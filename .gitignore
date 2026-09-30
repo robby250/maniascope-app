@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.pyc
+
+# editor / OS
+*.swp
+.DS_Store
+calc_id.txt

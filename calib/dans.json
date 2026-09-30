@@ -1,0 +1,379 @@
+{
+ "calc": "f097963af358",
+ "series": {
+  "4K REFORM": [
+   {
+    "order": -1.0,
+    "tier": "Intro 2",
+    "rating": 1.83,
+    "course": "Dan ~ REFORM ~ 1st Pack [~ INTRO-2nd ~ (Marathon)]"
+   },
+   {
+    "order": 0.0,
+    "tier": "Intro 3",
+    "rating": 2.645,
+    "course": "Dan ~ REFORM ~ 1st Pack [~ INTRO-3rd ~ (Marathon)]"
+   },
+   {
+    "order": 1.0,
+    "tier": "Reform 1",
+    "rating": 2.957,
+    "course": "Dan ~ REFORM ~ 1st Pack [~ 1st ~ (Marathon)]"
+   },
+   {
+    "order": 2.0,
+    "tier": "Reform 2",
+    "rating": 3.056,
+    "course": "Dan ~ REFORM ~ 1st Pack [~ 2nd ~ (Marathon)]"
+   },
+   {
+    "order": 3.0,
+    "tier": "Reform 3",
+    "rating": 3.078,
+    "course": "Dan ~ REFORM ~ 1st Pack [~ 3rd ~ (Marathon)]"
+   },
+   {
+    "order": 4.0,
+    "tier": "Reform 4",
+    "rating": 3.5,
+    "course": "Dan ~ REFORM ~ 1st Pack [~ 4th ~ (Marathon)]"
+   },
+   {
+    "order": 5.0,
+    "tier": "Reform 5",
+    "rating": 3.781,
+    "course": "Dan ~ REFORM ~ 1st Pack [~ 5th ~ (Marathon)]"
+   },
+   {
+    "order": 6.0,
+    "tier": "Reform 6",
+    "rating": 4.749,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ 6th ~ (Marathon)]"
+   },
+   {
+    "order": 7.0,
+    "tier": "Reform 7",
+    "rating": 4.709,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ 7th ~ (Marathon)]"
+   },
+   {
+    "order": 8.0,
+    "tier": "Reform 8",
+    "rating": 5.009,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ 8th ~ (Marathon)]"
+   },
+   {
+    "order": 9.0,
+    "tier": "Reform 9",
+    "rating": 5.338,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ 9th ~ (Marathon)]"
+   },
+   {
+    "order": 10.0,
+    "tier": "Reform 10",
+    "rating": 6.059,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ 10th ~ (Marathon)]"
+   },
+   {
+    "order": 11.0,
+    "tier": "Alpha",
+    "rating": 6.773,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ EXTRA-ALPHA ~ (Marathon)]"
+   },
+   {
+    "order": 12.0,
+    "tier": "Beta",
+    "rating": 6.486,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ EXTRA-BETA ~ (Marathon)]"
+   },
+   {
+    "order": 13.0,
+    "tier": "Gamma",
+    "rating": 7.322,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ EXTRA-GAMMA ~ (Marathon)]"
+   },
+   {
+    "order": 14.0,
+    "tier": "Delta",
+    "rating": 8.208,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ EXTRA-DELTA ~ (Marathon)]"
+   },
+   {
+    "order": 15.0,
+    "tier": "Epsilon",
+    "rating": 10.488,
+    "course": "Dan ~ REFORM ~ 2nd Pack [~ EXTRA-EPSILON ~ (Marathon)]"
+   },
+   {
+    "order": 16.0,
+    "tier": "Zeta",
+    "rating": 10.901,
+    "course": "Dan ~ REFORM ~ FINAL [~ FINAL - ZETA ~ ( Marathon )]"
+   },
+   {
+    "order": 17.0,
+    "tier": "Eta",
+    "rating": 13.081,
+    "course": "Dan ~ REFORM ~ FINAL [~ FINAL - ETA ~ ( Marathon )]"
+   }
+  ],
+  "4K Vibro": [
+   {
+    "order": 1.0,
+    "tier": "Vibro 1",
+    "rating": 6.782,
+    "course": "Vibro Dan Courses 1/2 [p-1]"
+   },
+   {
+    "order": 2.0,
+    "tier": "Vibro 2",
+    "rating": 8.494,
+    "course": "Vibro Dan Courses 1/2 [p-2]"
+   },
+   {
+    "order": 3.0,
+    "tier": "Vibro 3",
+    "rating": 8.971,
+    "course": "Vibro Dan Courses 1/2 [p-3]"
+   },
+   {
+    "order": 4.0,
+    "tier": "Vibro 4",
+    "rating": 8.972,
+    "course": "Vibro Dan Courses 1/2 [p-4]"
+   },
+   {
+    "order": 5.0,
+    "tier": "Vibro 5",
+    "rating": 8.654,
+    "course": "Vibro Dan Courses 1/2 [p-5]"
+   },
+   {
+    "order": 6.0,
+    "tier": "Vibro 6",
+    "rating": 9.229,
+    "course": "Vibro Dan Courses 1/2 [p-6]"
+   },
+   {
+    "order": 7.0,
+    "tier": "Vibro 7",
+    "rating": 9.15,
+    "course": "Vibro Dan Courses 2/2 [p-7]"
+   },
+   {
+    "order": 8.0,
+    "tier": "Vibro 8",
+    "rating": 8.922,
+    "course": "Vibro Dan Courses 2/2 [p-8]"
+   },
+   {
+    "order": 9.0,
+    "tier": "Vibro 9",
+    "rating": 10.316,
+    "course": "Vibro Dan Courses 2/2 [p-9]"
+   },
+   {
+    "order": 10.0,
+    "tier": "Vibro 10",
+    "rating": 11.064,
+    "course": "Vibro Dan Courses 2/2 [p-10]"
+   },
+   {
+    "order": 11.0,
+    "tier": "Vibro O",
+    "rating": 11.57,
+    "course": "Vibro Dan Courses 2/2 [p-o]"
+   },
+   {
+    "order": 12.0,
+    "tier": "Vibro W",
+    "rating": 12.894,
+    "course": "Vibro Dan Courses 2/2 [p-w]"
+   }
+  ],
+  "7K LN": [
+   {
+    "order": 0.0,
+    "tier": "0th",
+    "rating": 2.618,
+    "course": "LN Dan Phase I [0th Dan (Marathon)]"
+   },
+   {
+    "order": 1.0,
+    "tier": "1st",
+    "rating": 2.904,
+    "course": "LN Dan Phase I [1st Dan (Marathon)]"
+   },
+   {
+    "order": 2.0,
+    "tier": "2nd",
+    "rating": 3.573,
+    "course": "LN Dan Phase I [2nd Dan (Marathon)]"
+   },
+   {
+    "order": 3.0,
+    "tier": "3rd",
+    "rating": 4.675,
+    "course": "LN Dan Phase I [3rd Dan (Marathon)]"
+   },
+   {
+    "order": 4.0,
+    "tier": "4th",
+    "rating": 4.967,
+    "course": "LN Dan Phase II [4th Dan]"
+   },
+   {
+    "order": 5.0,
+    "tier": "5th",
+    "rating": 5.965,
+    "course": "LN Dan Phase II [5th Dan]"
+   },
+   {
+    "order": 6.0,
+    "tier": "6th",
+    "rating": 6.225,
+    "course": "LN Dan Phase II [6th Dan]"
+   },
+   {
+    "order": 7.0,
+    "tier": "7th",
+    "rating": 6.403,
+    "course": "LN Dan Phase II [7th Dan]"
+   },
+   {
+    "order": 8.0,
+    "tier": "8th",
+    "rating": 6.984,
+    "course": "LN Dan Phase II [8th Dan]"
+   },
+   {
+    "order": 9.0,
+    "tier": "9th",
+    "rating": 7.157,
+    "course": "LN Dan Phase III [9th Dan]"
+   },
+   {
+    "order": 10.0,
+    "tier": "10th",
+    "rating": 7.548,
+    "course": "LN Dan Phase III [10th Dan]"
+   },
+   {
+    "order": 11.0,
+    "tier": "Gamma",
+    "rating": 8.911,
+    "course": "LN Dan Phase III [Gamma Dan]"
+   },
+   {
+    "order": 12.0,
+    "tier": "Azimuth",
+    "rating": 9.162,
+    "course": "LN Dan Phase III [Azimuth Dan]"
+   },
+   {
+    "order": 13.0,
+    "tier": "Zenith",
+    "rating": 10.193,
+    "course": "LN Dan Phase III [Zenith Dan]"
+   },
+   {
+    "order": 14.0,
+    "tier": "Stellium",
+    "rating": 12.192,
+    "course": "Dan Phase IV [Stellium Dan (LN)]"
+   }
+  ],
+  "7K Regular": [
+   {
+    "order": 0.0,
+    "tier": "0th",
+    "rating": 3.348,
+    "course": "Regular Dan Phase I [0th Dan (Marathon)]"
+   },
+   {
+    "order": 1.0,
+    "tier": "1st",
+    "rating": 3.801,
+    "course": "Regular Dan Phase I [1st Dan (Marathon)]"
+   },
+   {
+    "order": 2.0,
+    "tier": "2nd",
+    "rating": 4.647,
+    "course": "Regular Dan Phase I [2nd Dan (Marathon)]"
+   },
+   {
+    "order": 3.0,
+    "tier": "3rd",
+    "rating": 4.861,
+    "course": "Regular Dan Phase I [3rd Dan (Marathon)]"
+   },
+   {
+    "order": 4.0,
+    "tier": "4th",
+    "rating": 5.274,
+    "course": "Regular Dan Phase II [4th Dan (Marathon)]"
+   },
+   {
+    "order": 5.0,
+    "tier": "5th",
+    "rating": 5.472,
+    "course": "Regular Dan Phase II [5th Dan (Marathon)]"
+   },
+   {
+    "order": 6.0,
+    "tier": "6th",
+    "rating": 5.488,
+    "course": "Regular Dan Phase II [6th Dan (Marathon)]"
+   },
+   {
+    "order": 7.0,
+    "tier": "7th",
+    "rating": 6.476,
+    "course": "Regular Dan Phase II [7th Dan (Marathon)]"
+   },
+   {
+    "order": 8.0,
+    "tier": "8th",
+    "rating": 6.666,
+    "course": "Regular Dan Phase II [8th Dan (Marathon)]"
+   },
+   {
+    "order": 9.0,
+    "tier": "9th",
+    "rating": 6.848,
+    "course": "Regular Dan Phase III [9th Dan]"
+   },
+   {
+    "order": 10.0,
+    "tier": "10th",
+    "rating": 7.475,
+    "course": "Regular Dan Phase III [10th Dan]"
+   },
+   {
+    "order": 11.0,
+    "tier": "Gamma",
+    "rating": 7.721,
+    "course": "Regular Dan Phase III [Gamma Dan]"
+   },
+   {
+    "order": 12.0,
+    "tier": "Azimuth",
+    "rating": 8.969,
+    "course": "Regular Dan Phase III [Azimuth Dan]"
+   },
+   {
+    "order": 13.0,
+    "tier": "Zenith",
+    "rating": 9.48,
+    "course": "Regular Dan Phase III [Zenith Dan]"
+   },
+   {
+    "order": 14.0,
+    "tier": "Stellium",
+    "rating": 11.818,
+    "course": "Dan Phase IV [Stellium Dan (Regular)]"
+   }
+  ]
+ }
+}

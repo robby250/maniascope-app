@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=ManiaScope
+GenericName=osu!mania Skillset Viewer
+Comment=Shows skillset difficulty for the map selected in osu!lazer
+Exec=@HERE@/run.sh
+Icon=@HERE@/icon.png
+Terminal=false
+Categories=Game;
+Keywords=osu;mania;skillset;difficulty;lazer;
+StartupNotify=true
+StartupWMClass=skillsets.py

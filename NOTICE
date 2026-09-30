@@ -1,0 +1,24 @@
+ManiaScope
+==========
+
+ManiaScope and its difficulty model (skill_calc.py and the rest) are original work,
+MIT-licensed — see LICENSE. No third-party calculator code is included or ported.
+
+Ideas (not code) that informed the model: per-hand finger-state analysis and LN
+layering (Quaver.API, MPL-2.0), per-column strain and fixed-time section aggregation
+(osu!, MIT), hand-specific demand and stamina adjustment (Etterna MinaCalc).
+
+The separate offline replay diagnostic (calib/replay_review.py) follows osu!lazer's
+judgement-window, note-lock, hold-release and replay-bitmask semantics, informed
+by ppy/osu commit f5f9e91be6ca6097caa3aa6473f24abd02ccb670 (MIT):
+https://github.com/ppy/osu/tree/f5f9e91be6ca6097caa3aa6473f24abd02ccb670/osu.Game.Rulesets.Mania
+Those upstream portions are Copyright (c) ppy Pty Ltd <contact@ppy.sh>; the MIT
+permission and warranty terms in LICENSE apply. No upstream calculator or full
+gameplay engine is bundled. Reconstruction discrepancies are reported explicitly.
+
+Automatic rate tracking talks to tosu (https://github.com/tosuapp/tosu, LGPL-3.0)
+over its local HTTP API. tosu is a separate program, downloaded by setup.sh from its
+official releases and not distributed with ManiaScope.
+
+osu! and osu!lazer are trademarks of their respective owners; ManiaScope is an
+unaffiliated, third-party tool.
