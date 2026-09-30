@@ -30,9 +30,11 @@ def main(argv):
             continue
         res = skill_calc.compute(skill_calc.parse_osu(path), 1.0)
         rating = res["scores"]["overall"]
-        series.setdefault(row["series"], []).append(
-            {"order": float(row["order"]), "tier": row["tier"], "rating": round(rating, 3), "course": row["course"]})
+        series.setdefault(row["series"], {}).setdefault(row["tier"], []).append((float(row["order"]), rating, row["course"]))
         print(f"{row['series']:11} {row['tier']:9} {rating:6.2f}  {row['course']}", flush=True)
+    # A tier named by several charts (e.g. 4K LN v2 stage packs: one song per dan per stage) is their mean.
+    series = {s: [{"order": v[0][0], "tier": t, "rating": round(sum(r for _o, r, _c in v) / len(v), 3),
+                   "course": " + ".join(c for _o, _r, c in v)} for t, v in tiers.items()] for s, tiers in series.items()}
     for s, tiers in series.items():
         tiers.sort(key=lambda t: t["order"])
         flips = [(a["tier"], b["tier"]) for a, b in zip(tiers, tiers[1:]) if b["rating"] <= a["rating"]]

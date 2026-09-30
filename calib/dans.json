@@ -374,6 +374,312 @@
     "rating": 11.818,
     "course": "Dan Phase IV [Stellium Dan (Regular)]"
    }
+  ],
+  "10K Regular": [
+   {
+    "order": 0.0,
+    "tier": "Lv.0",
+    "rating": 1.717,
+    "course": "CT's osu!mania 10K Dan Course (0~3) [[10K] Level 0]"
+   },
+   {
+    "order": 1.0,
+    "tier": "Lv.1",
+    "rating": 2.104,
+    "course": "CT's osu!mania 10K Dan Course (0~3) [[10K] Level 1]"
+   },
+   {
+    "order": 2.0,
+    "tier": "Lv.2",
+    "rating": 2.719,
+    "course": "CT's osu!mania 10K Dan Course (0~3) [[10K] Level 2]"
+   },
+   {
+    "order": 3.0,
+    "tier": "Lv.3",
+    "rating": 3.655,
+    "course": "CT's osu!mania 10K Dan Course (0~3) [[10K] Level 3]"
+   },
+   {
+    "order": 4.0,
+    "tier": "Lv.4",
+    "rating": 3.287,
+    "course": "CT's osu!mania 10K Dan Course (4~6) [[10K] Level 4]"
+   },
+   {
+    "order": 5.0,
+    "tier": "Lv.5",
+    "rating": 3.86,
+    "course": "CT's osu!mania 10K Dan Course (4~6) [[10K] Level 5]"
+   },
+   {
+    "order": 6.0,
+    "tier": "Lv.6",
+    "rating": 4.449,
+    "course": "CT's osu!mania 10K Dan Course (4~6) [[10K] Level 6]"
+   },
+   {
+    "order": 7.0,
+    "tier": "Lv.7",
+    "rating": 5.398,
+    "course": "CT's osu!mania 10K Dan Course (7~9) [[10K] level 7]"
+   },
+   {
+    "order": 8.0,
+    "tier": "Lv.8",
+    "rating": 6.581,
+    "course": "CT's osu!mania 10K Dan Course (7~9) [[10K] level 8]"
+   },
+   {
+    "order": 9.0,
+    "tier": "Lv.9",
+    "rating": 5.104,
+    "course": "CT's osu!mania 10K Dan Course (7~9) [[10K] level 9]"
+   },
+   {
+    "order": 10.0,
+    "tier": "Lv.10",
+    "rating": 7.133,
+    "course": "CT's osu!mania 10K Dan Course (Virtuoso) [[10K] Level 10]"
+   },
+   {
+    "order": 11.0,
+    "tier": "Lv.XI",
+    "rating": 7.472,
+    "course": "CT's osu!mania 10K Dan Course (Virtuoso) [[10K] Level XI (Expecialist)]"
+   },
+   {
+    "order": 12.0,
+    "tier": "Virtuoso",
+    "rating": 8.373,
+    "course": "CT's osu!mania 10K Dan Course (Virtuoso) [[10K] Level V (Virtuoso)]"
+   }
+  ],
+  "4K LN": [
+   {
+    "order": 1.0,
+    "tier": "1st",
+    "rating": 2.159,
+    "course": "4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Dango Daikazoku ~ 1st ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Nerevar Rising ~ 1st ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Hitorigoto ~ 1st ~ (Marathon)]"
+   },
+   {
+    "order": 2.0,
+    "tier": "2nd",
+    "rating": 2.952,
+    "course": "4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Doki Doki Literature Club! ~ 2nd ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Heartbeats ~ 2nd ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] SPF 420 ~ 2nd ~ (Marathon)]"
+   },
+   {
+    "order": 3.0,
+    "tier": "3rd",
+    "rating": 3.586,
+    "course": "4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] silver temple ~ 3rd ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] i use raw expectation to unlock placebo. ~ 3rd ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] aura ~ 3rd ~ (Marathon)]"
+   },
+   {
+    "order": 4.0,
+    "tier": "4th",
+    "rating": 3.839,
+    "course": "4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Gee ~ 4th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] future gazer ~ 4th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Otenba Koimusume ~ 4th ~ (Marathon)]"
+   },
+   {
+    "order": 5.0,
+    "tier": "5th",
+    "rating": 4.083,
+    "course": "4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] MilK ~ 5th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Promise ~ 5th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Pink Gold ~ 5th ~ (Marathon)]"
+   },
+   {
+    "order": 6.0,
+    "tier": "6th",
+    "rating": 4.301,
+    "course": "4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Koborezu no Negaigoto ~ 6th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Power To Progress ~ 6th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Mousou Express [Remix] ~ 6th ~ (Marathon)]"
+   },
+   {
+    "order": 7.0,
+    "tier": "7th",
+    "rating": 4.856,
+    "course": "4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] <3 ~ 7th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] On the FM ~ 7th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Rock It ~ 7th ~ (Marathon)]"
+   },
+   {
+    "order": 8.0,
+    "tier": "8th",
+    "rating": 5.512,
+    "course": "4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Sakase natsuzora, koi no hana. ~ 8th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Shotgun Senorita [Zardonic Remix] ~ 8th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Missing Banquet ~ 8th ~ (Marathon)]"
+   },
+   {
+    "order": 9.0,
+    "tier": "9th",
+    "rating": 5.712,
+    "course": "4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] cold planet ~ 9th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Dodger's Gadget ~ 9th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Raijin no Hidariude ~ 9th ~ (Marathon)]"
+   },
+   {
+    "order": 10.0,
+    "tier": "10th",
+    "rating": 6.484,
+    "course": "4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Sakura Trip 1.15x ~ 10th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] towa no maigo 1.1x ~ 10th ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Dopamine ~ 10th ~ (Marathon)]"
+   },
+   {
+    "order": 11.0,
+    "tier": "Yoake",
+    "rating": 6.884,
+    "course": "4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Love is War ~ Yoake ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Enigma 1.1x ~ Yoake ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Avalon no oka ~ Yoake ~ (Marathon)]"
+   },
+   {
+    "order": 12.0,
+    "tier": "Yuugure",
+    "rating": 6.877,
+    "course": "4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Carnation [ck remix] 1.05x ~ Yuugure ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] No. 6 ~ Yuugure ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] ENDYMION ~ Yuugure ~ (Marathon)]"
+   },
+   {
+    "order": 13.0,
+    "tier": "Yoru",
+    "rating": 7.776,
+    "course": "4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Intersect Thunderbolt -Remix ~ Yoru ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Kyouki Ranmai ~ Yoru ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Literal Crystal In The Cyphisonia 1.15x ~ Yoru ~]"
+   },
+   {
+    "order": 14.0,
+    "tier": "Yokaze",
+    "rating": 9.674,
+    "course": "4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Protoflicker 1.25x ~ Yokaze ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Lancelot -Flame of the Rebellion- 1.35x ~ Yokaze ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Cinderella Cage -Trancecore Mix- 1.6x ~ Yokaze ~ (Marathon)]"
+   },
+   {
+    "order": 15.0,
+    "tier": "Yami",
+    "rating": 8.719,
+    "course": "4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Mare Nectaris ~ Yami ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] Indomitable Spirit [Hommarju Remix] 1.5x ~ Yami ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Nhelv 1.05x ~ Yami ~ (Marathon)]"
+   },
+   {
+    "order": 16.0,
+    "tier": "Yume",
+    "rating": 9.507,
+    "course": "4K LN Dan Courses v2 ~ Stage 3 Map Pack ~ [[4K] White Hair Little Swords Girl 1.025x ~ Yume ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 1 Map Pack ~ [[4K] Kodoku no Kakurenbo 1.15x ~ Yume ~ (Marathon)] + 4K LN Dan Courses v2 ~ Stage 2 Map Pack ~ [[4K] Inaiinai isonshou 1.25x ~ Yume ~ (Marathon)]"
+   }
+  ],
+  "6K Regular": [
+   {
+    "order": 0.0,
+    "tier": "0th",
+    "rating": 2.16,
+    "course": "AXian's 6K Dan Course - Beginner Part [6K 0th Dan]"
+   },
+   {
+    "order": 1.0,
+    "tier": "1st",
+    "rating": 2.496,
+    "course": "AXian's 6K Dan Course - Beginner Part [6K 1st Dan]"
+   },
+   {
+    "order": 2.0,
+    "tier": "2nd",
+    "rating": 3.177,
+    "course": "AXian's 6K Dan Course - Beginner Part [6K 2nd Dan]"
+   },
+   {
+    "order": 3.0,
+    "tier": "3rd",
+    "rating": 3.876,
+    "course": "AXian's 6K Dan Course - Beginner Part [6K 3rd Dan]"
+   },
+   {
+    "order": 4.0,
+    "tier": "4th",
+    "rating": 4.157,
+    "course": "AXian's 6K Dan Course - Beginner Part [6K 4th Dan]"
+   },
+   {
+    "order": 5.0,
+    "tier": "5th",
+    "rating": 3.876,
+    "course": "AXian's 6K Dan Course - Beginner Part [6K 5th Dan]"
+   },
+   {
+    "order": 6.0,
+    "tier": "6th",
+    "rating": 4.609,
+    "course": "AXian's 6K Dan Course - Junior Part [6K 6th Dan]"
+   },
+   {
+    "order": 7.0,
+    "tier": "7th",
+    "rating": 5.183,
+    "course": "AXian's 6K Dan Course - Junior Part [6K 7th Dan]"
+   },
+   {
+    "order": 8.0,
+    "tier": "8th",
+    "rating": 5.257,
+    "course": "AXian's 6K Dan Course - Junior Part [6K 8th Dan]"
+   },
+   {
+    "order": 9.0,
+    "tier": "9th",
+    "rating": 5.469,
+    "course": "AXian's 6K Dan Course - Junior Part [6K 9th Dan]"
+   },
+   {
+    "order": 10.0,
+    "tier": "10th",
+    "rating": 5.989,
+    "course": "AXian's 6K Dan Course - Junior Part [6K 10th Dan]"
+   },
+   {
+    "order": 11.0,
+    "tier": "Extra 1st",
+    "rating": 6.114,
+    "course": "AXian's 6K Dan Course - Senior Part [6K Extra 1st Dan]"
+   },
+   {
+    "order": 12.0,
+    "tier": "Extra 2nd",
+    "rating": 6.767,
+    "course": "AXian's 6K Dan Course - Senior Part [6K Extra 2nd Dan]"
+   },
+   {
+    "order": 13.0,
+    "tier": "Extra 3rd",
+    "rating": 7.045,
+    "course": "AXian's 6K Dan Course - Senior Part [6K Extra 3rd Dan]"
+   },
+   {
+    "order": 14.0,
+    "tier": "Extra 4th",
+    "rating": 7.535,
+    "course": "AXian's 6K Dan Course - Senior Part [6K Extra 4th Dan]"
+   },
+   {
+    "order": 15.0,
+    "tier": "Extra 5th",
+    "rating": 7.811,
+    "course": "AXian's 6K Dan Course - Senior Part [6K Extra 5th Dan]"
+   },
+   {
+    "order": 16.0,
+    "tier": "Extra 6th",
+    "rating": 8.302,
+    "course": "AXian's 6K Dan Course - Extra Part [6K Extra 6th Dan]"
+   },
+   {
+    "order": 17.0,
+    "tier": "Extra 7th",
+    "rating": 8.698,
+    "course": "AXian's 6K Dan Course - Extra Part [6K Extra 7th Dan]"
+   },
+   {
+    "order": 18.0,
+    "tier": "Extra 8th",
+    "rating": 8.836,
+    "course": "AXian's 6K Dan Course - Extra Part [6K Extra 8th Dan]"
+   },
+   {
+    "order": 19.0,
+    "tier": "Extra 9th",
+    "rating": 10.27,
+    "course": "AXian's 6K Dan Course - Extra Part [6K Extra 9th Dan]"
+   },
+   {
+    "order": 31.0,
+    "tier": "Extra Final",
+    "rating": 9.944,
+    "course": "AXian's 6K Dan Course - Extra Part [6K Extra Final Dan]"
+   }
   ]
  }
 }
