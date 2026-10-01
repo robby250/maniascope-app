@@ -24,8 +24,48 @@ Your lazer scores are read locally from lazer's database (read-only copy).
 
 ## Linux
 
-Needs `python3-gi python3-gi-cairo gir1.2-gtk-3.0` and `pip install numpy rosu-pp-py`. Then
-`./setup.sh` and `./run.sh`.
+Runs from source with your system's Python. Open a terminal and do these steps once.
+
+**1. Install the dependencies** (pick your distro):
+
+| Distro | Command |
+|---|---|
+| Fedora | `sudo dnf install git python3-gobject gtk3 python3-cairo python3-numpy python3-pip` |
+| Debian / Ubuntu / Mint / Pop!_OS | `sudo apt install git python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-numpy python3-pip` |
+| Arch / Manjaro / EndeavourOS | `sudo pacman -S git python-gobject gtk3 python-cairo python-numpy python-pip` |
+
+**2. Install the pp calculator** (same on every distro):
+
+```
+python3 -m pip install --user rosu-pp-py
+```
+
+If pip answers `externally-managed-environment`, run it again with `--break-system-packages` at the end.
+
+**3. Download ManiaScope and set it up:**
+
+```
+git clone https://github.com/robby250/maniascope-app.git
+cd maniascope-app
+./setup.sh
+```
+
+`setup.sh` adds ManiaScope to your application menu and asks about optional downloads:
+
+- **tosu** (say yes): lets ManiaScope follow the rate you pick in lazer.
+- **Realm JS** (optional, needs `nodejs` and `npm`): imports your local lazer scores. It is only offered when npm is installed.
+- **rosu-pp-py**: skip if you already did step 2.
+
+**4. Start it** from the application menu (ManiaScope), or with `./run.sh` in that folder. On first start
+it downloads the population data for predictions (~140 MB).
+
+osu!lazer is found automatically whether it is the AppImage (`~/.local/share/osu`) or the Flatpak. For
+another location start it as `LAZER_DATA=/path/to/osu ./run.sh`.
+
+**Update later:** `cd maniascope-app && git pull`, then restart ManiaScope.
+
+**If it doesn't start:** the log is `~/.cache/maniascope/run.log`. `No module named 'gi'` means step 1
+is missing. `No module named 'numpy'` means `python3-numpy` from step 1 is missing.
 
 ## Notes
 
