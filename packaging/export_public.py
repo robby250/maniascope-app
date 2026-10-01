@@ -12,7 +12,8 @@ import subprocess
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-KEEP_CALIB = {"calib/difficulty.json", "calib/dans.json", "calib/dan_courses.tsv", "calib/dan_table.py"}
+KEEP_CALIB = {"calib/difficulty.json", "calib/dans.json", "calib/dan_courses.tsv", "calib/dan_table.py",
+              "calib/dan_fetch.py"}
 
 
 def released():

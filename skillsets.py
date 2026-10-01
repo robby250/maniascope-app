@@ -64,6 +64,23 @@ BAR_FULL = 10.0   # fixed scale for the skill bars: comparable across maps
 # Developer tools (saved-map comparisons, arbitrary .osu, prediction history) stay out of
 # release builds (user 2026-10-01); running from source or MANIASCOPE_DEBUG=1 shows them.
 DEBUG = os.environ.get("MANIASCOPE_DEBUG") == "1" or not getattr(sys, "frozen", False)
+def first_run_prompt(db):
+    """Standalone builds ask once for the osu! username (friends have no other score source set up)."""
+    if not getattr(sys, "frozen", False) or recdata.kv_get(db, "first_run_asked"):
+        return False
+    recdata.kv_set(db, "first_run_asked", True)
+    return True
+
+
+def tracking_switch(db):
+    """Only source/debug runs get the pause switch (user 2026-10-01). Release builds have no way back
+    on, so an old pause is closed instead of excluding every later play."""
+    if DEBUG:
+        return True
+    recdata.set_tracking(db, True)
+    return False
+
+
 DISPLAY_DEFAULTS = {"rating": True, "nps": True, "dan": True, "ln": True, "timeline": True, "skills": 3}
 # NPS badge: WoW item-rarity colours (poor, uncommon, rare, epic, legendary) centred on each 10 NPS
 # band and blended between them; from 20 NPS the digits run as a gradient that widens to 10 NPS by 30
@@ -473,6 +490,7 @@ class ManiaScopeWindow(Gtk.Window):
         self._display = dict(DISPLAY_DEFAULTS, **{k: v for k, v in (ui.get("display") or {}).items()
                                                   if k in DISPLAY_DEFAULTS})
         self._next_action = ui.get("next_action", "auto")
+        self._auto_next = ui.get("auto_next", True)
         if self._next_action not in ("auto", "copy", "link"):
             self._next_action = "auto"
         self._rec_revision, self._rec_views, self._card_data = 0, {}, None
@@ -492,6 +510,7 @@ class ManiaScopeWindow(Gtk.Window):
         self._obs = {"source": None, "path": None, "rate": None, "note": "starting…"}
         self._local = None          # pinned local file, or None to follow lazer
         self._shown = None          # (path, rate, chart, result, error, sv) on display
+        self._pending = False       # a newer selection is being analysed (header shown, analysis cleared)
         self._gen = 0
         self._closed = False
         self._requested = None
@@ -517,16 +536,17 @@ class ManiaScopeWindow(Gtk.Window):
         self.recs_btn.set_tooltip_text("Recommendations")
         bar.pack_start(self.recs_btn)
         skip = Gtk.Button.new_from_icon_name("media-skip-forward-symbolic", Gtk.IconSize.BUTTON)
-        skip.set_tooltip_text("Skip — not this one now (it comes back later)")
+        skip.set_tooltip_text("Skip: not this map (avoided for about 12 h)")
         skip.connect("clicked", lambda _b: self._next(True))
         self.skip_btn = skip
         skip.set_sensitive(False)
         bar.pack_start(skip)
-        self.track_btn = Gtk.ToggleButton(label="Tracking on", active=recdata.tracking_enabled(self.tracking_db))
-        self.track_btn.set_label("Tracking on" if self.track_btn.get_active() else "Tracking off")
-        self.track_btn.set_tooltip_text("Turn off before controller play. Paused plays stay excluded after imports and restarts. Resume for the next play.")
-        self.track_btn.connect("toggled", self._tracking_toggled)
-        bar.pack_start(self.track_btn)
+        if tracking_switch(self.tracking_db):
+            self.track_btn = Gtk.ToggleButton(label="Tracking on", active=recdata.tracking_enabled(self.tracking_db))
+            self.track_btn.set_label("Tracking on" if self.track_btn.get_active() else "Tracking off")
+            self.track_btn.set_tooltip_text("Turn off before controller play. Paused plays stay excluded after imports and restarts. Resume for the next play.")
+            self.track_btn.connect("toggled", self._tracking_toggled)
+            bar.pack_start(self.track_btn)
         bar.pack_end(self._overflow())
         self.set_titlebar(bar)
         self.set_title("ManiaScope")   # taskbar name; the header bar shows none
@@ -553,6 +573,9 @@ class ManiaScopeWindow(Gtk.Window):
         metadata.pack_end(self.ln_pct_lbl, False, False, 0)
         root.pack_start(metadata, False, False, 0)
 
+        # context (keys, dan, rate, length) on its own full-width line from the window's left edge
+        self.context_lbl = label(dim=True, hexpand=True)
+        root.pack_start(self.context_lbl, False, False, 0)
         head = Gtk.Box(spacing=8)
         self.number_lbl = GradLabel(valign=Gtk.Align.CENTER)
         self.number_lbl.set_tooltip_text(
@@ -560,19 +583,17 @@ class ManiaScopeWindow(Gtk.Window):
             "accurate play. Provisional calibration — one decimal is already generous.")
         head.pack_start(self.number_lbl, False, False, 0)
         side = Gtk.Grid(valign=Gtk.Align.CENTER, column_spacing=6)
-        self.context_lbl = label(dim=True, hexpand=True)
-        self.dominant_lbl = label()
+        self.dominant_lbl = label(hexpand=True)
         # every line always present (blank when empty) so the timeline keeps one height
         self.others_lbl = label()
         self.tags_lbl = label(dim=True)
-        # NPS beside the first two lines (context, top skill); lower lines use the full width
+        # NPS beside the top skill; lower lines use the full width
         self.nps_lbl = GradLabel(valign=Gtk.Align.CENTER)
         self.nps_lbl.set_tooltip_text("Notes per second, first to last note, at this rate")
-        side.attach(self.context_lbl, 0, 0, 1, 1)
-        side.attach(self.dominant_lbl, 0, 1, 1, 1)
-        side.attach(self.nps_lbl, 1, 0, 1, 2)
-        side.attach(self.others_lbl, 0, 2, 2, 1)
-        side.attach(self.tags_lbl, 0, 3, 2, 1)
+        side.attach(self.dominant_lbl, 0, 0, 1, 1)
+        side.attach(self.nps_lbl, 1, 0, 1, 1)
+        side.attach(self.others_lbl, 0, 1, 2, 1)
+        side.attach(self.tags_lbl, 0, 2, 2, 1)
         head.pack_start(side, True, True, 0)
         self.details_btn = Gtk.ToggleButton(valign=Gtk.Align.START, relief=Gtk.ReliefStyle.NONE)
         self.details_btn.add(Gtk.Image.new_from_icon_name("pan-down-symbolic", Gtk.IconSize.BUTTON))
@@ -641,70 +662,102 @@ class ManiaScopeWindow(Gtk.Window):
         self.connect("destroy", self._on_destroy)
         self.connect("delete-event", lambda *_: (lifecycle("close requested"), False)[1])
         self.connect("unmap-event", lambda *_: (lifecycle("window unmapped"), False)[1])
+        if first_run_prompt(self.tracking_db):
+            GLib.timeout_add(800, lambda: self._profile_dialog(first=True) and False)
 
     def _overflow(self):
-        """⋯: the viewer's own controls (Auto, rate, Open, Save, Saved maps) and the few session settings."""
-        pop = Gtk.Popover()
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin=8)
-        pop.add(box)
+        """⋯: the viewer's own controls (Auto, rate, Open, Save, Saved maps) and the few session settings.
 
-        def item(text, cb, tip=None):
-            btn = Gtk.Button(label=text, relief=Gtk.ReliefStyle.NONE, xalign=0)
-            btn.get_child().set_xalign(0)
-            btn.set_tooltip_text(tip)
-            btn.connect("clicked", lambda b: (pop.popdown(), cb(b)))
-            box.pack_start(btn, False, False, 0)
-        self.auto_btn = Gtk.CheckButton(label="Follow lazer's rate (Auto)", active=self._auto)
+        A Gtk.Menu, not a popover: on Wayland a popover is a subsurface the compositor never moves, so a
+        tall one flipped above a window at the screen top was cut off (user 2026-10-01); a menu is an
+        xdg_popup that the compositor flips and slides onto the screen."""
+        menu = Gtk.Menu()
+
+        def item(text, cb, tip=None, into=menu):
+            mi = Gtk.MenuItem(label=text)
+            mi.set_tooltip_text(tip)
+            mi.connect("activate", cb)
+            into.append(mi)
+            return mi
+
+        def choices(title, options, active, cb, tip=None):
+            sub, group, items = Gtk.Menu(), None, {}
+            for value, text in options:
+                mi = Gtk.RadioMenuItem.new_with_label_from_widget(group, text)
+                group = mi
+                mi.set_active(value == active)
+                mi.connect("toggled", lambda m, v=value: m.get_active() and cb(v))
+                sub.append(mi)
+                items[value] = mi
+            parent = Gtk.MenuItem(label=title)
+            parent.set_tooltip_text(tip)
+            parent.set_submenu(sub)
+            menu.append(parent)
+            return items
+
+        self.auto_btn = Gtk.CheckMenuItem(label="Follow lazer's rate (Auto)", active=self._auto)
         self._auto_handler = self.auto_btn.connect("toggled", self.on_auto_toggled)
-        box.pack_start(self.auto_btn, False, False, 0)
-        row = Gtk.Box(spacing=6)
-        row.pack_start(Gtk.Label(label="Rate"), False, False, 4)
+        menu.append(self.auto_btn)
         adj = Gtk.Adjustment(value=self._manual_rate, lower=0.25, upper=3.0,
                              step_increment=0.01, page_increment=0.05)
         self.rate_spin = Gtk.SpinButton(adjustment=adj, digits=2, numeric=True)
         self.rate_spin.set_tooltip_text("Playback rate — editing switches to manual")
         self._spin_handler = self.rate_spin.connect("value-changed", self.on_rate_edited)
-        row.pack_start(self.rate_spin, True, True, 0)
-        box.pack_start(row, False, False, 0)
+        item("Rate…", lambda _m: self._rate_dialog(), "Set the playback rate by hand (switches Auto off)")
         if DEBUG:
             item("Open .osu…", self.on_open)
             item("Save this map at this rate ★", self.on_save_map, "Saved maps can be compared with each other")
             item("Saved maps & comparisons…", self.on_compare)
-        item("Display…", lambda b: self._display_popover(menu), "Choose what the main window shows")
-        box.pack_start(Gtk.Separator(), False, False, 4)
-        item("Skip warmup", lambda _b: self.rec.put("skip_warmup"), "Already warm: remove the cold-session prior for PP, NPS and Skills")
-        item("New session", lambda _b: self.rec.put("reset"), "Forget today's form (history and bests stay)")
-        self._mode_combo = Gtk.ComboBoxText()
-        for value, label in (("pp", "Next: PP opportunities"), ("nps", "Next: NPS playlist"), ("skills", "Next: Skill practice")):
-            self._mode_combo.append(value, label)
-        self._mode_combo.set_active_id(self._rec_mode)
-        self._mode_combo.connect("changed", lambda c: self._set_rec_mode(c.get_active_id()))
-        box.pack_start(self._mode_combo, False, False, 0)
-        action = Gtk.ComboBoxText()
-        for value, label in (("auto", "Next action: Auto"), ("copy", "Next action: Copy search"), ("link", "Next action: Open beatmap link")):
-            action.append(value, label)
-        action.set_active_id(self._next_action)
-        action.set_tooltip_text("Auto copies search for installed maps and opens links for missing PP maps. Local-only maps always use search. Nothing sets mods or starts play.")
-        action.connect("changed", lambda c: self._set_next_action(c.get_active_id()))
-        box.pack_start(action, False, False, 0)
-        item("Reset learned NPS taste", lambda _b: self.rec.put("reset_taste"), "Keep scores, session and map history; forget only learned taste")
-        item("Import lazer scores now", lambda _b: self.rec.put("import"))
+        item("Display…", lambda _m: self._display_dialog(), "Choose what the main window shows")
+        menu.append(Gtk.SeparatorMenuItem())
+        item("Skip warmup", lambda _m: self.rec.put("skip_warmup"), "Already warm: remove the cold-session prior for PP, NPS and Skills")
+        item("New session", lambda _m: self.rec.put("reset"), "Forget today's form (history and bests stay)")
+        self._mode_items = choices("Next playlist", (("pp", "PP opportunities"), ("nps", "NPS playlist"),
+                                                     ("skills", "Skill practice")),
+                                   self._rec_mode, self._set_rec_mode)
+        choices("Next action", (("auto", "Auto"), ("copy", "Copy search"), ("link", "Open beatmap link")),
+                self._next_action, self._set_next_action,
+                "Auto copies search for installed maps and opens links for missing PP maps. Local-only maps always use search. Nothing sets mods or starts play.")
+        auto_next = Gtk.CheckMenuItem(label="Auto next after finishing the pick", active=self._auto_next)
+        auto_next.set_tooltip_text("Finishing the recommended map picks the next one and copies its search, as if you pressed Next")
+        auto_next.connect("toggled", lambda m: (setattr(self, "_auto_next", m.get_active()), self._queue_save()))
+        menu.append(auto_next)
+        item("Reset learned NPS taste", lambda _m: self.rec.put("reset_taste"), "Keep scores, session and map history; forget only learned taste")
+        item("Import lazer scores now", lambda _m: self.rec.put("import"))
         if not os.access(TOSU_BIN, os.X_OK):
-            item("Download tosu (rate tracking)", lambda _b: self._install_tosu(),
+            item("Download tosu (rate tracking)", lambda _m: self._install_tosu(),
                  "Follows the exact rate you pick in osu!. Official tosu release from GitHub (~40 MB).")
-        item("osu! profile…", lambda _b: self._profile_dialog(),
+        item("osu! profile…", lambda _m: self._profile_dialog(),
              "Your username: your public top 100 plays fill in bests that lazer doesn't have locally")
         if DEBUG:
             item("Play & prediction history…", self._show_history)
-        box.show_all()
-        menu = Gtk.MenuButton(popover=pop)
-        menu.add(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
-        menu.set_tooltip_text("More")
-        return menu
+        menu.show_all()
+        button = Gtk.MenuButton(popup=menu)
+        button.add(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
+        button.set_tooltip_text("More")
+        return button
 
-    def _profile_dialog(self):
-        dlg = Gtk.Dialog(title="osu! profile", parent=self, modal=True)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+    def _small_dialog(self, title, child):
+        """A small non-modal window the compositor places: stays on screen wherever the main window sits."""
+        dlg = Gtk.Dialog(title=title, transient_for=self, modal=False, destroy_with_parent=True)
+        dlg.add_button("Close", Gtk.ResponseType.CLOSE)
+        dlg.connect("response", lambda d, _r: d.destroy())
+        area = dlg.get_content_area()
+        area.set_margin_start(10); area.set_margin_end(10); area.set_margin_top(8)
+        area.pack_start(child, False, False, 0)
+        dlg.show_all()
+        return dlg
+
+    def _rate_dialog(self):
+        row = Gtk.Box(spacing=6)
+        row.pack_start(Gtk.Label(label="Rate"), False, False, 0)
+        row.pack_start(self.rate_spin, True, True, 0)
+        # the spin outlives the dialog: _set_spin keeps it in step with lazer while it is closed
+        self._small_dialog("Rate", row).connect("destroy", lambda _d: row.remove(self.rate_spin))
+
+    def _profile_dialog(self, first=False):
+        dlg = Gtk.Dialog(title="Welcome to ManiaScope" if first else "osu! profile", parent=self, modal=True)
+        dlg.add_buttons("Skip" if first else "Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
         box = dlg.get_content_area()
         box.set_spacing(8)
         box.set_margin_start(12); box.set_margin_end(12); box.set_margin_top(12)
@@ -721,11 +774,9 @@ class ManiaScopeWindow(Gtk.Window):
             self.rec.put("website_user", entry.get_text())
         dlg.destroy()
 
-    def _display_popover(self, relative_to):
+    def _display_dialog(self):
         """⋯ → Display…: what the main window shows. Persisted with the window layout."""
-        pop = Gtk.Popover(relative_to=relative_to)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, margin=8)
-        pop.add(box)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         for key, text in (("rating", "Difficulty rating"), ("dan", "Dan level"), ("nps", "NPS"),
                           ("ln", "LN %"), ("timeline", "Difficulty timeline")):
             check = Gtk.CheckButton(label=text, active=self._display[key])
@@ -733,21 +784,13 @@ class ManiaScopeWindow(Gtk.Window):
             box.pack_start(check, False, False, 0)
         row = Gtk.Box(spacing=6)
         row.pack_start(Gtk.Label(label="Skills shown"), False, False, 0)
-        count = Gtk.Label(width_chars=10, xalign=0)
-        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1, 6, 1)
-        scale.set_draw_value(False)
-        scale.set_value(self._display["skills"])
-        def skills(s):
-            n = int(round(s.get_value()))
-            count.set_text(f"{n}" + (" (default)" if n == DISPLAY_DEFAULTS["skills"] else ""))
-            self._set_display("skills", n)
-        scale.connect("value-changed", skills)
-        skills(scale)
-        row.pack_start(scale, True, True, 0)
-        row.pack_start(count, False, False, 0)
+        spin = Gtk.SpinButton(adjustment=Gtk.Adjustment(value=self._display["skills"], lower=1, upper=6,
+                                                         step_increment=1), digits=0, numeric=True)
+        spin.set_tooltip_text(f"Default {DISPLAY_DEFAULTS['skills']}")
+        spin.connect("value-changed", lambda s: self._set_display("skills", int(s.get_value())))
+        row.pack_start(spin, False, False, 0)
         box.pack_start(row, False, False, 0)
-        box.show_all()
-        pop.popup()
+        return self._small_dialog("Display", box)
 
     def _set_display(self, key, value):
         if self._display.get(key) != value:
@@ -963,6 +1006,8 @@ class ManiaScopeWindow(Gtk.Window):
             self.result_lbl.set_markup(f"<b>Last play · {GLib.markup_escape_text(msg['title'])}</b>\n"
                                        f"{GLib.markup_escape_text(msg['text'])}")
             self.result_lbl.show()
+            if self._auto_next and self._rec_mode in msg.get("targets", ()) and self.next_btn.get_sensitive():
+                self._next(False)
         elif msg["type"] == "history":
             if getattr(self, "_history_dialog", None):
                 self._history_text.get_buffer().set_text(msg["text"])
@@ -1072,7 +1117,7 @@ class ManiaScopeWindow(Gtk.Window):
         if mode not in recommend.MODES or mode == self._rec_mode:
             return
         self._rec_mode = mode
-        self._mode_combo.set_active_id(mode)
+        self._mode_items[mode].set_active(True)
         self._rec_notebook.set_current_page(recommend.MODES.index(mode))
         self.card_lbl.set_markup(card_markup(self._card_data, mode == "nps", mode == "skills", self._card_note))
         self._sync_rec()
@@ -1318,6 +1363,7 @@ class ManiaScopeWindow(Gtk.Window):
             with open(UI_FILE + ".tmp", "w", encoding="utf-8") as fh:
                 json.dump({"mode": "auto" if self._auto else "manual",
                            "recommendation_mode": self._rec_mode, "next_action": self._next_action,
+                           "auto_next": self._auto_next,
                            "pp_keys": list(self._rec_keys["pp"]), "nps_keys": list(self._rec_keys["nps"]),
                            "skills_keys": list(self._rec_keys["skills"]), "practice_skills": list(self._practice_skills),
                            "nps_focus": self._nps_focus,
@@ -1439,6 +1485,8 @@ class ManiaScopeWindow(Gtk.Window):
             with self._req_cv:
                 self._req = None if hit else (self._gen, path, rate, sv)
                 self._req_cv.notify()
+            if not hit:
+                self._render_pending(path, rate)
             if hit:
                 chart, result = hit
                 self._on_result((self._gen, path, rate, chart, result, None, sv))
@@ -1550,7 +1598,42 @@ class ManiaScopeWindow(Gtk.Window):
         return False
 
     # ---- presentation -----------------------------------------------------
+    def _render_pending(self, path, rate):
+        """Instant feedback while a (long) chart is analysed: its own title from the file header,
+        the old analysis cleared so it can't be read as the new map's."""
+        meta = {}
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line == "[HitObjects]":
+                        break
+                    k, sep, v = line.partition(":")
+                    if sep and k in ("Title", "TitleUnicode", "Artist", "ArtistUnicode", "Version", "Creator", "CircleSize"):
+                        meta.setdefault(k, v.strip())
+        except OSError:
+            pass
+        self._pending = True
+        title = meta.get("TitleUnicode") or meta.get("Title") or os.path.basename(path)
+        self.title_lbl.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>"
+                                  f"  <small>{GLib.markup_escape_text(meta.get('ArtistUnicode') or meta.get('Artist', ''))}</small>")
+        self.version_lbl.set_text(f"[{meta.get('Version', '')}]  {meta.get('Creator', '')}")
+        self.ln_pct_lbl.set_text("")
+        self.number_lbl.set('<span size="300%" weight="bold">…</span>', ("#555555",))
+        self.nps_lbl.set()
+        keys = meta.get("CircleSize", "").split(".")[0]
+        self._context = (f"{keys}K  ·  " if keys else "") + f"{rate:.2f}×"
+        self.context_lbl.set_text(self._context)
+        self.dominant_lbl.set_text("Calculating…")
+        self.others_lbl.set_text(" ")
+        self.tags_lbl.set_text(" ")
+        for pb, val, _name in self._bars.values():
+            pb.set_fraction(0)
+            val.set_text("")
+        self.timeline.queue_draw()
+
     def _render(self):
+        self._pending = False
         shown = self._shown
         res = shown[3] if shown else None
         err = shown[4] if shown else None
@@ -1588,8 +1671,9 @@ class ManiaScopeWindow(Gtk.Window):
         names = skill_calc.skill_names(chart.keys)
         entries = skill_calc.card(res)
         dan = dans.label(chart.keys, sc["overall"], res["ln_notes"] / max(1, res["notes"]),
-                         [e["name"] for e in entries]) if self._display["dan"] else None
-        self._context = f"{chart.keys}K  ·  {rate:.2f}×{mode}" + (f"  ·  {dan}" if dan else "") + (
+                         dans.vibro_runs(chart.notes, rate)) if self._display["dan"] else None
+        # dan before the rate: when the line is cut, the rate note goes first
+        self._context = f"{chart.keys}K" + (f"  ·  {dan}" if dan else "") + f"  ·  {rate:.2f}×{mode}" + (
             "  ·  SV ignored (Constant Speed)" if res.get("sv") == "ignored" else "")
         self._render_clock()
         dom, tags = skill_calc.describe(res)
@@ -1629,7 +1713,7 @@ class ManiaScopeWindow(Gtk.Window):
 
     def _span(self):
         """→ (first note ms, last end ms, rate) of the shown chart, or None."""
-        if not self._shown or not self._shown[3] or len(self._shown[2].notes) < 2:
+        if self._pending or not self._shown or not self._shown[3] or len(self._shown[2].notes) < 2:
             return None
         notes = self._shown[2].notes
         return notes[0][0], max(e for _t, e, _c in notes), self._shown[1]
@@ -1666,6 +1750,7 @@ class ManiaScopeWindow(Gtk.Window):
             left = max(0, t1 - max(t0, self._live if playing else t0)) / 1000 / rate
             text += f"  ·  {int(left) // 60}:{int(left) % 60:02d}" + (" left" if playing else "")
         self.context_lbl.set_text(text)
+        self.context_lbl.set_tooltip_text(text)
 
     def _update_status(self):
         obs = self._obs
@@ -1688,7 +1773,7 @@ class ManiaScopeWindow(Gtk.Window):
 
     def on_draw_timeline(self, area, cr):
         try:
-            res = self._shown[3] if self._shown else None
+            res = self._shown[3] if self._shown and not self._pending else None
             tl = res["timeline"] if res else None
             if not tl:
                 return False

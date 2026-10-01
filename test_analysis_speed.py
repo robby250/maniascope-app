@@ -39,8 +39,8 @@ def test_chart_prediction_work_is_reused_without_caching_session_results():
     f['tech_profile']['technical'] = 1.
     assert skill_practice.match(f, ['technical'])[0] == 1.
     model = SimpleNamespace(warmup=SimpleNamespace(rate_slope=Mock(return_value=3.)),
-                            pop={}, chart_affinity=Mock(return_value=(0., 0)))
-    with patch.object(R, 'base_of', side_effect=lambda pop, f, bid, rate: (rate, 0)) as base:
+                            pop={}, chart_affinity=Mock(return_value=(0., 0)), levels={})
+    with patch.object(R, 'base_of', side_effect=lambda pop, f, bid, rate, level=None: (rate, 0)) as base:
         value = R.Personal.rate_response(model, f, 'chart', 1, 1.)
         assert R.Personal.rate_response(model, f, 'chart', 1, 1.) == value
         assert base.call_count == 2

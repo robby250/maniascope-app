@@ -366,16 +366,28 @@ if __name__ == "__main__":
             print("ok", name)
 
 
+
+
 def test_dan_labels_follow_course_order_and_chart_type(monkeypatch):
-    import dans
-    tiers = [{"order": i, "tier": t, "rating": r} for i, (t, r) in enumerate(
-        [("1st", 3.), ("2nd", 4.), ("3rd", 3.9), ("4th", 6.)])]
-    table = {"7K Regular": dans._monotone(tiers), "7K LN": dans._monotone(tiers[:2])}
+    import dans, math
+    tiers = dans.monotone([(i, t, math.log(r)) for i, (t, r) in enumerate(
+        [("1st", 3.), ("2nd", 4.), ("3rd", 3.9), ("4th", 6.)])])
+    table = {"7K Regular": tiers, "7K LN": tiers[:2], "4K REFORM": tiers,
+             "4K Vibro": dans.monotone([(1, "Vibro 1", 2.3), (2, "Vibro 2", 2.5)])}
     monkeypatch.setattr(dans, "_table", lambda: table)
+    monkeypatch.setattr(dans, "_data", lambda: {"vibro_weights": (1., 0.)})
     # The 2nd/3rd reversal is pooled but both tiers stay reachable, in order.
-    ratings = [v for _t, v in table["7K Regular"]]
-    assert ratings == sorted(ratings) and len(set(ratings)) == 4
-    assert dans.label(7, 3.1, 0.) == "Reg 1st low" and dans.label(7, 7., 0.) == "Reg 4th+"
-    assert dans.label(7, 2., 0.) == "below Reg 1st"
-    assert dans.label(7, 3.5, .8).startswith("LN 1st") and dans.label(6, 5., 0.) is None
-    assert dans.kind(0., ["Vibro", "Stamina"]) == "vibro" and dans.kind(.6) == "ln"
+    values = [v for _t, v in table["7K Regular"]]
+    assert values == sorted(values) and len(set(values)) == 4
+    # nearest tier: a course rated exactly at its anchor shows that tier, not the one below
+    assert dans.label(7, 3., 0.) == "Reg 1st" and dans.label(7, 3.3, 0.) == "Reg 1st+"
+    assert dans.label(7, 9., 0.) == "Reg 4th+" and dans.label(7, 2., 0.) == "below Reg 1st"
+    assert dans.label(7, 3.5, .3).startswith("LN ") and dans.label(6, 5., 0.) is None
+    # vibro is read from the notes: a 4-column run at 11.5 hits/s is vibro, shown beside the rice dan
+    run = [(t * 87, t * 87, c) for t in range(40) for c in range(4)]
+    vib = dans.vibro_runs(run)
+    assert vib["share"] == 1. and 11 < vib["speed"] < 12
+    assert dans.label(4, 3., 0., vib) == "1st · Vibro 2−"     # log 11.5 hits/s sits 70% of the way to Vibro 2
+    assert dans.vibro_runs(run, rate=.8)["share"] == 0.          # slowed to 9.2 hits/s: jacks, not vibro
+    stream = [(t * 87, t * 87, t % 4) for t in range(160)]
+    assert dans.label(4, 3., 0., dans.vibro_runs(stream)) == "1st"

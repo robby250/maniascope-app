@@ -157,7 +157,7 @@ def test_session_ramp_and_recovery():
     s = R.Session(_attempts(t0, [0.2, 0.3], purpose="warmup"), t0 + 700)
     assert s.phase() == "warmup"                                 # two warmups, nothing strong yet
     s = R.Session(_attempts(t0, [0.2, 0.3, 0.8, 0.6, 0.7, 0.9]), t0 + 2000)
-    assert s.phase() == "push"
+    assert s.phase() == "build"          # strong but no beaten PP best: the staircase pushes only on beats
     one_bad = R.Session(_attempts(t0, [0.8, 0.6, 0.7, 0.9, 0.5, -2.0]), t0 + 2000)
     assert one_bad.phase() == "recover" and one_bad.form(7, "stream") < 0       # severe underperformance acts promptly
     s = R.Session(_attempts(t0, [0.5, 0.4, 0.3, 0.2, -1.5, -1.8]), t0 + 2000)
@@ -195,6 +195,16 @@ def test_recent_maps_stay_back_after_restart_and_return_after_variety():
     ev += _attempts(t0 + 200, [0.1, 0.0, 0.2], spacing=200)      # three other maps in between
     s = R.Session(ev, t0 + 900)
     assert s.freshness(7, 540) > .2
+
+
+def test_offered_chart_returns_after_a_share_of_the_pool_not_a_clock():
+    t = time.time()
+    offer = lambda dt, b: {"t": t - dt, "kind": "offer", "beatmap": b, "info": {"mode": "nps"}}
+    ev = [offer(5000, "9")] + [offer(4000 - i, str(100 + i)) for i in range(10)]
+    s = R.Session(ev, t)
+    assert s.freshness(9, 120, mode="nps", pool=400) < .01         # 10 of 400: still held back, hours later
+    assert .2 < s.freshness(9, 120, mode="nps", pool=20) < .3      # half the pool since: a quarter back
+    assert s.freshness(9, 120, mode="pp", pool=40) < 1e-3           # offers in another tab do not count
 
 
 def test_skip_is_not_permanent_and_render_is_not_exposure():
@@ -493,3 +503,45 @@ def test_release_evidence_is_stripped_and_installs_for_this_calculator(tmp_path,
     with patch.object(recdata.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(_pickle.dumps(dict(released, calc="other")))):
         with pytest.raises(ValueError):
             recdata.fetch_release_public()
+
+
+def test_jack_and_ln_follow_the_players_level_not_only_the_stars():
+    """Jack maps cost more once they pass the player's level; LN costs less near it (user 2026-10-01)."""
+    import math
+    import recdata
+    import recommend
+    pop = {"slope": {0: 2.}, "window": {0: 0.}, "mb": {}, "mbr": {},
+           "gap": {4: {"jack": [-.4, 0., .2, .4, .2], "ln": [.2, 0., -.2, -.2, 0.]}}}
+    jack = {"keys": 4, "overall": 5., "od": 8., "sk": {"jackspeed": 1.}}
+    ln = {"keys": 4, "overall": 5., "od": 8., "sk": {"ln": 1.}}
+    at = math.log(5.)
+    shift = lambda f, level: recommend.base_of(pop, f, level=level)[0] - recommend.base_of(pop, f)[0]
+    assert shift(jack, at + .3) < 0 < shift(jack, at - .15)       # easy for this player: cheap; above them: costly
+    assert shift(ln, at) < 0 < shift(ln, at + .3)                 # LN at their level: cheaper; far below: still costs
+    assert shift(dict(jack, keys=6), at - .15) == 0.              # 6K borrows 7K's curves: none here
+    pop["gap"][7] = pop["gap"][4]
+    assert shift(dict(jack, keys=6), at - .15) > 0
+    assert shift(dict(jack, keys=9), at - .15) == 0.              # 8K–10K keep none (DEV worse with 7K's)
+    # Centred parts describe "more than this keymode's usual mix": a chart at the mean share gets nothing.
+    pop["gap"][7] = {"chords": [.3, .3, .3, .3, .3]}
+    pop["share_mean"] = {7: {"chords": .5}}
+    chords = lambda share: {"keys": 7, "overall": 5., "od": 8., "sk": {"chordstream": share}}
+    assert shift(chords(.5), at) == 0. and shift(chords(1.), at) > 0 > shift(chords(0.), at)
+    assert recommend.play_levels([{"keys": 4, "t": 0., "f": {"overall": 5.}}] * 25, now=1.)[4] == recdata.competence_level([at] * 25)
+
+
+def test_packaged_install_replaces_evidence_fitted_by_older_links():
+    """Friends' installs keep public.pkl; a newer POP_VERSION re-downloads it, a failed download keeps the old one."""
+    from unittest.mock import patch
+    import sys
+    import recdata
+    import recommend as R
+    old = {"calc": recdata.calc_id(), "pop": {"version": 1}}
+    new = {"calc": recdata.calc_id(), "pop": {"version": recdata.POP_VERSION}}
+    with patch.object(sys, "frozen", True, create=True), patch.object(R.Recommender, "refit", lambda self: None), \
+            patch.object(recdata, "import_public_user", lambda db, pub: None):
+        with patch.object(recdata, "fetch_release_public", return_value=new):
+            assert R.Recommender(None, pub=old).pub is new
+            assert R.Recommender(None, pub=dict(new)).pub is not new        # current evidence: no download
+        with patch.object(recdata, "fetch_release_public", side_effect=OSError("offline")):
+            assert R.Recommender(None, pub=old).pub is old

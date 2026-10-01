@@ -14,6 +14,7 @@ here polls the API, and `refresh --download` is a manual, personal-analysis step
 
 usage: recdata.py import [realm]          lazer scores + installed maps → rec.db
        recdata.py build [DUMP_DIR]        public.pkl from the frozen snapshot (heavy; ~15 min)
+       recdata.py refit                   refit the active public.pkl's population links (charts kept)
        recdata.py check                   newest snapshot on data.ppy.sh vs the active one
        recdata.py refresh --archive TAR | --download   stage, validate, switch, prune
        recdata.py manifest [verify]       write / verify the frozen bundle's manifest
@@ -583,8 +584,77 @@ def _cand_job(job):
 # ---------------------------------------------------------------------------
 # public build: population fit, map effects, candidate table, the user's public record
 # ---------------------------------------------------------------------------
+# Map difficulty relative to the player (log stars − the player's competence-zone mean log stars).
+# Jacks are cheap below a player's speed and punishing at and above it; LN keeps costing far below the
+# player's level and costs less than rated near it (user 2026-10-01). Production-path DEV, all plays:
+# 4K RMSE .737 → .711, 7K .495 → .490. A steeper JACK_P in the stars was worse on 4K DEV: the effect
+# depends on the player, so it lives in the accuracy link, not the rating. A curve shared by every map
+# was rejected: fitted in the competence zone, it extrapolated badly to easy maps (DEV 4K/7K worse).
+# Other keymodes borrow 7K's curves: their own fits overfit (DEV 5K/6K/10K worse), 7K's improve every
+# one of them (DEV RMSE 5K .906 → .818, 6K .653 → .622, 8K .773 → .718, 9K .629 → .563, 10K .558 → .525).
+# Bumped when fit_population's links change meaning; packaged installs re-download older evidence.
+POP_VERSION = 2
+GAP_KNOTS = (-.3, -.15, 0., .15, .3)
+GAP_SHARED = 7
+# Execution families (Technical describes the same work: no curve of its own), "jacks" = every jack
+# kind together, "all" = 1 for every chart.
+GAP_FAMILIES = ("rice", "chords", "chordjack", "jack", "ln", "trill", "sv")
+GAP_SHARE_PARTS = GAP_FAMILIES + ("jacks", "all")
+# Level curves per keymode, chosen by calib/pattern_scan.py on DEV (docs/REPORT_2026-10-01_PATTERN_SCAN.md):
+# part → centred on the keymode's mean share. Centred, a curve means "more of this family than usual";
+# raw rice/chords shares (≈ 1 on most 7K maps) copied the star slope and soaked it up (7K slope
+# 1.41 → 0.25, DEV worse). "all" is a bump around the player's level: inner knots only, the ends stay
+# with the slope (all five knots, or knots out to −.9, were worse on DEV).
+# 4K: raw jack/LN curves plus centred SV beat all families centred (DEV RMSE .7085 vs .7183).
+GAP_SPEC = {4: {"jacks": False, "ln": False, "sv": True},
+            7: dict({p: True for p in GAP_FAMILIES}, all=False)}
+# Keymodes that borrow 7K's curves: DEV 5K/6K slightly better, 8K–10K worse (all on 7K's link).
+GAP_BORROW = (5, 6)
+
+
+def gap_basis(g):
+    """Piecewise-linear hats over GAP_KNOTS (clamped beyond the ends), for a float or an array."""
+    import numpy as np
+    g = np.clip(g, GAP_KNOTS[0], GAP_KNOTS[-1])
+    out = []
+    for i, k in enumerate(GAP_KNOTS):
+        lo = GAP_KNOTS[i-1] if i else k - 1.
+        hi = GAP_KNOTS[i+1] if i + 1 < len(GAP_KNOTS) else k + 1.
+        out.append(np.clip(np.minimum((g - lo) / (k - lo), (hi - g) / (hi - k)), 0., 1.))
+    return out
+
+
+def gap_shares(f):
+    """Share of each GAP_SHARE_PARTS part in a chart (strongest member skill / overall), the weights of its curves."""
+    import warmup
+    s = f.get("sk", {})
+    share = lambda members: min(1., max(max(0., s.get(x, 0.)) for x in members))
+    return tuple(share(warmup.MEMBERS[p]) for p in GAP_FAMILIES) + (
+        share(("chordjack", "jackspeed", "minijack", "longjack")), 1.)
+
+
+def competence_level(log_ratings):
+    """Mean log stars of the plays within 70 % of the 90th percentile: where the player plays."""
+    import numpy as np
+    lr = np.asarray(log_ratings, float)
+    return float(lr[lr >= np.percentile(lr, 90) + math.log(.7)].mean())
+
+
+def gap_term(pop, f, level):
+    """Link shift from the level curves for a chart played by a player at `level` (log stars)."""
+    gap, means = pop.get("gap", {}), pop.get("share_mean", {})
+    k = f["keys"] if f["keys"] in gap else GAP_SHARED if f["keys"] in GAP_BORROW else None
+    if k not in gap or level is None:
+        return 0.
+    shares = dict(zip(GAP_SHARE_PARTS, gap_shares(f)))
+    mean = means.get(k, {})
+    hats = gap_basis(math.log(max(.05, f["overall"])) - level)
+    return float(sum((shares.get(p, 0.) - mean.get(p, 0.)) * sum(c * h for c, h in zip(cs, hats))
+                     for p, cs in gap[k].items()))
+
+
 def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy='pp',
-                   ceilings=False, specialization=False):
+                   ceilings=False, specialization=False, spec=None):
     """y = log(1 − acc320): player level + monotone rating curve + hit window + map effect.
     Competence zone as in calib/eval.py (rows within 70 % of the player-keymode-year's 90th percentile).
     → dict of slopes, window coefficients, map effects (per beatmap and per beatmap@rate) and variances.
@@ -606,7 +676,7 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
         a, n = acc320((stats[0], stats[1], stats[2], stats[3], stats[4], stats[5]))
         if accuracy == 'lazer':a=acc_lazer(stats)
         elif accuracy != 'pp':raise ValueError('Unknown accuracy target')
-        raw[(u, f["keys"], year)].append((b, rate, f["overall"], f["od"], a, f["keys"],n))
+        raw[(u, f["keys"], year)].append((b, rate, f["overall"], f["od"], a, f["keys"], n, gap_shares(f)))
     rows = []
     for g, lst in raw.items():
         if len(lst) < 20:
@@ -614,8 +684,11 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
         top = np.percentile([x[2] for x in lst], 90)
         rows += [(g,) + x for x in lst if x[2] >= 0.7 * top and 0.75 <= x[4] <= (1. if ceilings else .998)]
     K = np.array([r[6] for r in rows])
-    ks = sorted(k for k, n in collections.Counter(K.tolist()).items() if n >= 1000)
-    kg = np.array([ks.index(k) if k in ks else len(ks) for k in K])       # rare keymodes share one slope
+    ks = sorted(k for k, n in collections.Counter(K.tolist()).items() if n >= 1000 and k in (4, 7))
+    # 5K/6K/8K–10K share 7K's link: their own fits came out far too flat (5K slope .64, 9K .35 vs 7K
+    # 1.41) and 7K's link cut DEV RMSE 5K .906→.756, 8K .773→.604, 9K .629→.490 (2026-10-01).
+    shared = ks.index(GAP_SHARED) if GAP_SHARED in ks else len(ks)
+    kg = np.array([ks.index(k) if k in ks else shared for k in K])
     losses=1.-np.array([r[5] for r in rows])
     if ceilings:
         counts=np.array([r[7] for r in rows],float)
@@ -630,20 +703,31 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
     n_u = np.bincount(ug)
     dm = lambda v: v - (np.bincount(ug, v, minlength=len(n_u)) / n_u)[ug]
     G = len(ks) + 1
+    level = np.bincount(ug, lr) / n_u
+    hats = gap_basis(lr - level[ug])
+    spec = GAP_SPEC if spec is None else spec
+    gap_keys = [k for k in spec if k in ks]
+    shares = np.array([r[8] for r in rows])
+    ix = {p: i for i, p in enumerate(GAP_SHARE_PARTS)}
+    share_mean = {k: {p: float(shares[K == k, ix[p]].mean()) if centred else 0. for p, centred in spec[k].items()}
+                  for k in gap_keys}
+    inner = lambda p: range(1, len(GAP_KNOTS) - 1) if p == "all" else range(len(GAP_KNOTS))
+    gap_cols = [(k, p, j) for k in gap_keys for p in spec[k] for j in inner(p)]
     Xr = np.column_stack([lr * (kg == i) for i in range(G)] + [lw * (kg == i) for i in range(G)]
-                         + [bend * (kg == i) for i in range(G)])
+                         + [bend * (kg == i) for i in range(G)]
+                         + [(shares[:, ix[p]] - share_mean[k][p]) * hats[j] * (K == k) for k, p, j in gap_cols])
     X = np.column_stack([dm(c) for c in Xr.T])
     # Small convex bounded ridge fit. The rating link cannot turn down, and a
     # wider timing window cannot make an otherwise identical chart harder.
-    A, rhs = X.T @ X + np.eye(3*G) * max(1., len(rows)*.0001), X.T @ dm(y)
+    A, rhs = X.T @ X + np.eye(X.shape[1]) * max(1., len(rows)*.0001), X.T @ dm(y)
     nuisance=None
     if specialization:
         import population_response
         z=np.array([population_response.skills(feats[r[1]][r[2]]) for r in rows])
         gram,projected,nuisance=population_response.eliminate(X,dm(y),z,ug)
         A-=gram;rhs-=projected
-    lower = np.concatenate([np.full(G, .2), np.full(G, -np.inf), np.zeros(G)])
-    upper = np.concatenate([np.full(G, np.inf), np.zeros(G), np.full(G, np.inf)])
+    lower = np.concatenate([np.full(G, .2), np.full(G, -np.inf), np.zeros(G), np.full(len(gap_cols), -np.inf)])
+    upper = np.concatenate([np.full(G, np.inf), np.zeros(G), np.full(G, np.inf), np.full(len(gap_cols), np.inf)])
     coef = np.clip(np.linalg.solve(A, rhs), lower, upper)
     for _ in range(1500):
         previous = coef.copy()
@@ -671,9 +755,13 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
     slope = {k: float(coef[i]) for i, k in enumerate(ks)}
     window = {k: float(coef[G + i]) for i, k in enumerate(ks)}
     curve = {k: float(coef[2*G + i]) for i, k in enumerate(ks)}
-    slope[0], window[0] = float(coef[len(ks)]), float(coef[G + len(ks)])    # 0 = any other keymode
-    curve[0] = float(coef[2*G+len(ks)])
-    return {"slope": slope, "window": window, "curve": curve, "curve_knee": 4.,
+    # 0 = any other keymode
+    slope[0], window[0], curve[0] = (float(coef[shared]), float(coef[G + shared]), float(coef[2*G + shared]))
+    gap = {k: {p: [0.] * len(GAP_KNOTS) for p in spec[k]} for k in gap_keys}
+    for (k, p, j), c in zip(gap_cols, coef[3*G:]):
+        gap[k][p][j] = float(c)
+    return {"version": POP_VERSION, "slope": slope, "window": window, "curve": curve, "curve_knee": 4., "gap": gap,
+            "share_mean": share_mean,
             "mb": mb, "mbr": mbr, "sig2": sig2, "tau2": tau2, "kappa": kap,
             "rows": len(rows), "players": len({r[0][0] for r in rows}),
             "accuracy_target":'lazer305' if accuracy=='lazer' else 'pp320',
@@ -986,6 +1074,23 @@ def main():
         activate(name)
         print(f"public.pkl: {len(pub['feats'])} charts, population {pub['pop']['rows']} rows / {pub['pop']['players']} players, "
               f"user {len(pub['user']['scores'])} stable scores, stats {pub['user']['stats']}")
+    elif cmd == "refit":
+        with open(ACTIVE, "r", encoding="utf-8") as fh:
+            directory = os.path.join(ROLLING, json.load(fh)["name"])
+        path = os.path.join(directory, "calculators", calc_id(), "public.pkl")
+        path = path if os.path.isfile(path) else os.path.join(directory, "public.pkl")
+        with open(path, "rb") as fh:
+            pub = pickle.load(fh)
+        with open(os.path.join(FROZEN, "scores.pkl"), "rb") as fh:
+            scores, maps = pickle.load(fh)
+        fr = {b: {r: v for r, v in f.items() if isinstance(r, float)} for b, f in pub["feats"].items()}
+        pub["pop"] = fit_population(scores, maps, fr, pub["user"]["id"])
+        pub["pop_lazer"] = fit_population(scores, maps, fr, pub["user"]["id"], accuracy="lazer",
+                                          ceilings=True, specialization=True)
+        with open(path + ".part", "wb") as fh:
+            pickle.dump(pub, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(path + ".part", path)
+        print("refit", path, {k: {p: [round(c, 2) for c in v] for p, v in g.items()} for k, g in pub["pop_lazer"]["gap"].items()})
     elif cmd == "check":
         print(check_index(connect()))
     elif cmd == "refresh":

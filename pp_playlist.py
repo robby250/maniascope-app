@@ -107,18 +107,21 @@ def prepare(rec, candidates, session):
         # hundred credible 0.1–3pp improvements before freshness is considered.
         utility = .3 + math.log1p(c["gain"]/.05)**.65
         headroom = max(0., pp-(c.get("best") or pp)) / max(20., pp*.1)
-        fr = session.freshness(event_key(c), c["length"], mode="pp")
         continuity = 1. if keys == k0 else .45
-        c["fresh"] = fr
         c["purpose"] = "probe" if cold else "push" if c.get("push_only") or state > .8 else "farm"
         # Likely improvements come far more often than long shots (user 2026-09-30).
-        c["weight"] = (utility * (.2+.8*tier_fit) * accuracy_fit * continuity * (1+.3*min(2., headroom)) * fr
+        c["weight"] = (utility * (.2+.8*tier_fit) * accuracy_fit * continuity * (1+.3*min(2., headroom))
                        * c.get("p_up", 1.))
         c["why"] = (reason(c) + f" · expected {100*acc:.1f}%"
                     + (" · comfortable keymode probe" if cold else " · peak opportunity" if state > .8 else " · current-form fit")
                     + (f" · current top #{c['best_rank']}" if c.get("best_rank", 101) <= 100 else
                        " · new/top-100 contender" if contender else " · smaller PP improvement"))
         rows.append(c)
+    total = sum(c["weight"] for c in rows)
+    pool = total ** 2 / max(1e-300, sum(c["weight"] ** 2 for c in rows)) if total > 0 else None
+    for c in rows:
+        c["fresh"] = session.freshness(event_key(c), c["length"], mode="pp", pool=pool)
+        c["weight"] *= c["fresh"]
     # Offer/skip never promises a repeat. Only relax when *all* credible choices
     # have been cycled; there is no utility-floor trap shrinking the pool first.
     fresh = [c for c in rows if c["fresh"] >= .08]
@@ -128,13 +131,7 @@ def prepare(rec, candidates, session):
     elif rows:
         for c in rows:
             c["weight"] /= max(1e-6, c["fresh"])**.5
-    # Cycle the eligible charts before offering the same favourites again.
-    # Persisted offers survive restarts; next/open are the same exposure.
-    counts = collections.Counter(e['beatmap'] for e in session.all
-                                 if e['kind']=='offer' and e['info'].get('mode', 'pp')=='pp')
-    if rows:
-        least = min(counts[event_key(c)] for c in rows)
-        rows = [c for c in rows if counts[event_key(c)]==least]
+    # No hard bag (cycle every chart before any repeat): freshness's offer count is the soft one.
     last = next((e["beatmap"] for e in reversed(session.all) if e["kind"] == "offer"), None)
     if len(rows) > 1:
         rows = [c for c in rows if event_key(c) != last]

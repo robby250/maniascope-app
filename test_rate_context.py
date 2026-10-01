@@ -42,7 +42,7 @@ def test_interpolation_inside_measured_rate_range_is_preserved():
 def test_bad_lower_rate_result_does_not_disappear_on_uprates():
     m=model();m.aff['known']=(.6,10)
     m.rate_support['known']=(.78,.78);m.rate_bandwidth[7]=.08
-    with patch.object(R,'base_of',side_effect=lambda pop,f,b=None,rate=None:(2*math.log(rate/.78),0)):
+    with patch.object(R,'base_of',side_effect=lambda pop,f,b=None,rate=None,level=None:(2*math.log(rate/.78),0)):
         predictions=[m.predict({'keys':7},'known',rate=rate) for rate in (.78,.79,.9,1.)]
     assert all(b[0]>a[0] for a,b in zip(predictions,predictions[1:]))
     assert all(b[1]>a[1] for a,b in zip(predictions,predictions[1:]))

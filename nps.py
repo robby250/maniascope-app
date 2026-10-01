@@ -652,7 +652,9 @@ def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps
             if ns:
                 density_floor[k] = min(20. * k / 7., .85 * float(np.quantile(ns, .70)))
     counts = collections.Counter((c["keys"], c["group"]) for c in rows)
-    fresh = [session.freshness(event_key(c), c["length"], mode=mode) for c in rows]
+    w = np.exp(np.array([c["base_value"] for c in rows]) - max(c["base_value"] for c in rows))
+    pool = float(w.sum() ** 2 / (w ** 2).sum())        # effective number of charts the playlist draws from
+    fresh = [session.freshness(event_key(c), c["length"], mode=mode, pool=pool) for c in rows]
     relax = sum(fresh) < 3
     recent = [a for a in session.attempts[-6:] if a.get("profile") and a.get("meaningful", True)]
     recent_families = {a.get("family") for a in recent[-4:]}

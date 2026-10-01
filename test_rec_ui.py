@@ -70,8 +70,10 @@ def test_tabs_keys_clipboard_and_persistence():
                     w._next(False)
                     assert w._rec_views['nps']['target_data']['acc_mid'] == .951
                     assert w.next_btn.get_sensitive()
-                    # Recalculation still pending: consume the remaining snapshot.
-                    w._next(False)
+                    # Recalculation still pending: consume the remaining snapshot — finishing the pick is Next.
+                    w._on_rec(dict(type='result', title='t', text='x', targets=['pp']))   # another tab's pick
+                    assert len(w.rec.tasks) == queued + 1
+                    w._on_rec(dict(type='result', title='t', text='x', targets=['nps']))
                     assert w._rec_views['nps']['target_data']['sha'] == 'c'*64
                     assert len(w.rec.tasks) == queued + 2
                     w._on_rec(dict(pool(w._rec_revision), selection_id=1))
@@ -161,6 +163,20 @@ def test_tabs_keys_clipboard_and_persistence():
                 assert w.rec.tasks[-1][0] == 'configure' and w.rec.tasks[-1][7] == {'nps': .94, 'skills': .925}
                 w._set_display('rating', False); w._set_display('skills', 1)
                 assert not w.number_lbl.get_visible() and w.others_lbl.get_text().strip() == ''
+                def find(widget, kind):
+                    if isinstance(widget, kind): return widget
+                    for child in (widget.get_children() if isinstance(widget, Gtk.Container) else ()):
+                        hit = find(child, kind)
+                        if hit: return hit
+                dlg = w._display_dialog(); find(dlg, Gtk.SpinButton).set_value(1); find(dlg, Gtk.SpinButton).set_value(4)
+                assert w._display['skills'] == 4; dlg.destroy(); w._set_display('skills', 1)
+                assert not ui.first_run_prompt(w.tracking_db)                # source runs never ask
+                with patch.object(ui.sys, 'frozen', True, create=True):
+                    assert ui.first_run_prompt(w.tracking_db) and not ui.first_run_prompt(w.tracking_db)
+                assert ui.tracking_switch(w.tracking_db)                     # source runs keep the switch
+                ui.recdata.set_tracking(w.tracking_db, False)
+                with patch.object(ui, 'DEBUG', False):
+                    assert not ui.tracking_switch(w.tracking_db) and ui.recdata.tracking_enabled(w.tracking_db)
                 w._save_ui()
                 geometry=json.load(open(prefs))
                 assert geometry['skills_acc_target'] == .925 and geometry['display']['skills'] == 1

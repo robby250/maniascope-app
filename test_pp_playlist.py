@@ -131,16 +131,18 @@ def test_pp_cycles_eligible_maps_even_after_offer_penalty_recovers():
         pick=random.Random(i).choices(rows,weights=[c['weight'] for c in rows])[0]
         picks.append(pick['bid'])
         events.append(dict(id=i+1,t=now,kind='offer',beatmap=R.event_key(pick),info={'mode':'pp'}))
-    assert all(len(set(picks[i:i+5]))==5 for i in range(0,15,5))
+    # soft shuffle bag: every chart comes up, none twice within three picks, no forced full cycle
+    assert set(picks)==set(range(5)) and all(len(set(picks[i:i+3]))==3 for i in range(13))
 
 
-def test_pp_does_not_relax_with_one_unseen_eligible_map_left():
+def test_pp_prefers_the_unseen_map_and_never_repeats_the_last():
     rec=_FakeRec([])
     candidates=[dict(_cand(i,1.),acc_mid=.985,pp_mid=105.) for i in range(4)]
     events=[dict(id=i+1,t=1000+i,kind='offer',beatmap=R.event_key(c),info={'mode':'pp'})
             for i,c in enumerate(candidates[:3])]
     rows,relaxed=P.prepare(rec,candidates,R.Session(events,1010))
-    assert [c['bid'] for c in rows]==[3] and not relaxed
+    best=max(rows,key=lambda c:c['weight'])
+    assert best['bid']==3 and 2 not in [c['bid'] for c in rows] and not relaxed
 
 
 def test_positive_pp_opportunity_below_top100_is_not_discarded():

@@ -15,6 +15,7 @@ Personal PP recommendations: what is worth playing now.
 usage: recommend.py list [N]      the current pool, ledger coverage and why
        recommend.py retro [CUT]   held-out check of predictions on the user's own later attempts (G533QR: needs the dump)
 """
+import bisect
 import collections
 import gc
 import json
@@ -221,8 +222,9 @@ def now_months():
     return months(time.strftime("%F"))
 
 
-def base_of(pop, f, b=None, rate=None):
-    """Public part of the prediction: slope × log rating + hit window + the map's effect → (value, n public rows)."""
+def base_of(pop, f, b=None, rate=None, level=None):
+    """Public part of the prediction: slope × log rating + hit window + the map's effect → (value, n public rows).
+    level: the player's competence level in this keymode (log stars) for the pattern level curves (recdata.gap_term)."""
     k = f["keys"]
     s = pop["slope"].get(k, pop["slope"][0])
     c = pop["window"].get(k, pop["window"][0])
@@ -237,7 +239,22 @@ def base_of(pop, f, b=None, rate=None):
     lr = math.log(max(.05, f["overall"]))
     curve = pop.get("curve", {}).get(k, pop.get("curve", {}).get(0, 0.))
     bend = max(0., lr-math.log(pop.get("curve_knee", 4.))) ** 2
-    return s * lr + curve*bend + c * math.log(max(10.0, 64 - 3 * f["od"])) + mb, n_mb
+    return s * lr + curve*bend + c * math.log(max(10.0, 64 - 3 * f["od"])) + mb + recdata.gap_term(pop, f, level), n_mb
+
+
+def play_levels(rows, now=None):
+    """{keys: competence level (log stars)} from the player's plays of the last year (all plays when
+    fewer than 20), the same zone the population fit centres its gap curves on."""
+    now = now_months() if now is None else now
+    by = collections.defaultdict(list)
+    for r in rows:
+        by[r["keys"]].append(r)
+    out = {}
+    for k, rs in by.items():
+        recent = [r for r in rs if r["t"] >= now - 12]
+        use = recent if len(recent) >= 20 else rs
+        out[k] = recdata.competence_level([math.log(max(.05, r["f"]["overall"])) for r in use])
+    return out
 
 
 PERSONAL_GEOMETRY = ('log_density_per_key', 'repeat',
@@ -266,8 +283,9 @@ def zvec(f, names, mu=-3.):
 
 class Personal:
     """Fitted from the user's own rows. Everything is per keymode with a pooled fallback."""
+    levels = {}     # competence level per keymode (log stars); the rows' base already used it
 
-    def __init__(self, pub, rows, now=None):
+    def __init__(self, pub, rows, now=None, levels=None):
         # Both forecasts target lazer plays. Stable merges a hold's head/tail
         # into one judgement; neither 305 nor 320 reweighting reconstructs the
         # two separate judgements. Stable tap scores remain transfer evidence.
@@ -281,6 +299,7 @@ class Personal:
         rows = [dict(r, y=r['y']-cold.get(r.get('key'),0.)) for r in rows]
         pop = pub["pop"]
         self.pop, self.now = pop, now if now is not None else now_months()
+        self.levels = levels or {}
         self.names = recdata.SKILLS
         K = np.array([r["keys"] for r in rows])
         y = np.array([r["y"] for r in rows])
@@ -476,7 +495,7 @@ class Personal:
     def predict(self, f, chart, b=None, rate=None):
         """→ (mu, model sd, attempt sd) of y = log(1 − acc320) for the next attempt, before session form."""
         k = f["keys"]
-        base, n_mb = base_of(self.pop, f, b, rate)
+        base, n_mb = base_of(self.pop, f, b, rate, self.levels.get(k))
         L, lv, sd = self.level_of(k)
         mu = L + base
         if k in self.beta:
@@ -519,8 +538,9 @@ class Personal:
             return cached[1]
         physical = self.warmup.rate_slope(f)
         lo, hi = rate/1.01, rate*1.01
-        left = base_of(self.pop, f, bid, lo)[0] + self.chart_affinity(chart, lo, f['keys'])[0]
-        right = base_of(self.pop, f, bid, hi)[0] + self.chart_affinity(chart, hi, f['keys'])[0]
+        level = self.levels.get(f['keys'])
+        left = base_of(self.pop, f, bid, lo, level)[0] + self.chart_affinity(chart, lo, f['keys'])[0]
+        right = base_of(self.pop, f, bid, hi, level)[0] + self.chart_affinity(chart, hi, f['keys'])[0]
         value = max(1., min(8., physical + (right-left)/math.log(hi/lo)))
         cache[key] = (f, value)
         return value
@@ -555,6 +575,8 @@ class Personal:
                        warmup.rate_elasticity(f,self.warmup.elasticities), xs, ys, mb, affinity)
             cache[key] = context
         _, slope, curve, knee, elasticity, xs, ys, mb, affinity = context
+        # ponytail: the pattern level curves (recdata.gap_term) are left out of this cold-capacity step; add
+        # their difference here if cold forecasts on jack, LN or SV maps show a bias.
         old = math.log(max(.05,f['overall']))
         new = math.log(max(.05,f['overall']*math.exp(elasticity*log_rate_loss)))
         shift = slope*(new-old) + curve*(max(0.,new-knee)**2-max(0.,old-knee)**2)
@@ -799,8 +821,11 @@ class Session:
         self.lock = None                 # old scalar locks do not constrain per-tab choices
         self._events_by_map = collections.defaultdict(list)
         self._attempts_by_map = collections.defaultdict(list)
+        self._offer_times = collections.defaultdict(list)
         for e in self.all:
             self._events_by_map[str(e["beatmap"])].append(e)
+            if e["kind"] == "offer":
+                self._offer_times[e["info"].get("mode")].append(e["t"])
         for a in self.history_attempts:
             self._attempts_by_map[str(a["beatmap"])].append(a)
         self._downrates = collections.defaultdict(list)
@@ -1041,8 +1066,14 @@ class Session:
                 return a["keys"]
         return None
 
-    def freshness(self, bid, length_s, mode=None):
-        """1 = fresh. A restart/reset affects form, never recent-play avoidance."""
+    def freshness(self, bid, length_s, mode=None, pool=None):
+        """1 = fresh. A restart/reset affects form, never recent-play avoidance.
+
+        pool: the playlist's effective size. An offered chart then recovers by how many other offers
+        came since, (n/(n + pool/2))²: a soft shuffle bag — a quarter back after half the pool, 44% after
+        all of it, so a favourite can return before the pool is exhausted but never right away. Not a
+        hard bag ("not guaranteed … but it shouldn't come back very soon", user 2026-10-01), and not a
+        clock — a 40-minute recovery brought charts back within one session."""
         f, now = 1.0, self.now
         att = [a for a in self._attempts_by_map.get(str(bid), []) if a.get("meaningful")]
         last_offer = None
@@ -1056,7 +1087,10 @@ class Session:
                 if mode and e["info"].get("mode", mode) != mode:
                     continue
                 f *= (0.1 if e in self.events else 1 - 0.9 * math.exp(-dt / 43200))
-        if last_offer is not None:
+        if last_offer is not None and pool:
+            n = len(self._offer_times.get(mode, ())) - bisect.bisect_right(self._offer_times.get(mode, []), last_offer)
+            f *= (n / (n + .5 * pool)) ** 2
+        elif last_offer is not None:
             f *= 1 - .98 * math.exp(-max(0., now-last_offer) / 2400.)
         if att:
             last = att[-1]
@@ -1218,11 +1252,13 @@ class Recommender:
         self.db = db
         self._candidate_keys = recdata.normalize_keys(keys)
         self.pub = pub or recdata.load_public()
-        if not self.pub and getattr(sys, "frozen", False):
+        stale = self.pub and self.pub.get("pop", {}).get("version", 1) < recdata.POP_VERSION
+        if (not self.pub or stale) and getattr(sys, "frozen", False):
             try:
                 self.pub = recdata.fetch_release_public()
             except (OSError, ValueError, pickle.UnpicklingError) as exc:
-                raise RuntimeError(f"could not download the population evidence from {recdata.RELEASE_REPO} ({exc})")
+                if not self.pub:   # older evidence still works; only a missing one is fatal
+                    raise RuntimeError(f"could not download the population evidence from {recdata.RELEASE_REPO} ({exc})")
         if not self.pub:
             raise RuntimeError("no public evidence yet (recdata.py build on the machine with the dump, then copy rec/rolling)")
         if self.pub.get("calc") != recdata.calc_id():
@@ -1244,14 +1280,17 @@ class Recommender:
         session = Session(load_events(self.db))
         begin = min((e["t"] for e in session.events if e["kind"] == "start"), default=float("inf"))
         historical = [r for r in rows if not r["ts"] or r["ts"] < begin]
-        self.model = Personal(self.pub, [dict(r, base=base_of(self.pub["pop"], r["f"], r["b"], round(r["rate"], 3))[0])
-                                        for r in historical])
+        levels = play_levels(historical)
+        self.model = Personal(self.pub, [dict(r, base=base_of(self.pub["pop"], r["f"], r["b"], round(r["rate"], 3),
+                                                              levels.get(r["keys"]))[0])
+                                         for r in historical], levels=levels)
         self.accuracy_model=None
         if self.pub.get('pop_lazer'):
             display_pub=dict(self.pub,pop=self.pub['pop_lazer'])
-            display_rows=[dict(r,y=r['y_lazer'],base=base_of(display_pub['pop'],r['f'],r['b'],round(r['rate'],3))[0])
+            display_rows=[dict(r,y=r['y_lazer'],base=base_of(display_pub['pop'],r['f'],r['b'],round(r['rate'],3),
+                                                             levels.get(r['keys']))[0])
                           for r in historical]
-            self.accuracy_model=Personal(display_pub,display_rows)
+            self.accuracy_model=Personal(display_pub,display_rows,levels=levels)
         self._baseline_begin = begin
         self.ledger, self.ledger_missing = build_ledger(self.db, self.pub, self.installed)
         import pp_playlist
@@ -2350,7 +2389,9 @@ class Worker(threading.Thread):
                               y=math.log(max(1e-3, 1 - min(acc, 0.999))),
                               y_lazer=math.log(max(1e-3,1-min(display_accuracy,.999))))
             # Show the saved play even if subsequent feature calculation/refitting fails.
-            self.emit({"type": "result", "title": label, "text": self._verdict(key, bid, None, info)})
+            self.emit({"type": "result", "title": label, "text": self._verdict(key, bid, None, info),
+                       "targets": [m for m, c in self.targets.items()
+                                   if c and navigation.same_map(c, sha=score["sha256"], md5=md5, bid=bid)]})
         if self.rec and (_new or fresh):
             if recdata.predictable_context(score.get("mods_list"), score.get("rate")):
                 self._request_feature(score.get("sha256"), path, score.get("rate"), refit=True)
@@ -2682,9 +2723,10 @@ def retro(cut="2026-06-01"):
     rows, _sk = evidence_rows(db, pub_cut, fs)
     before = [r for r in rows if r["t"] < months(cut)]
     after = sorted((r for r in rows if r["t"] >= months(cut) and r["src"] != "public"), key=lambda r: r["ts"] or 0)
+    levels = play_levels(before, months(cut))
     for r in before + after:
-        r["base"] = base_of(pub_cut["pop"], r["f"], r["b"], round(r["rate"], 3))[0]
-    m = Personal(pub_cut, before, now=months(cut))
+        r["base"] = base_of(pub_cut["pop"], r["f"], r["b"], round(r["rate"], 3), levels.get(r["keys"]))[0]
+    m = Personal(pub_cut, before, now=months(cut), levels=levels)
     hist = collections.defaultdict(list)
     for r in before:
         hist[r["chart"]].append(r["y"])
