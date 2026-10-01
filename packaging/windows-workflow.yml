@@ -41,6 +41,7 @@ jobs:
           Push-Location realmjs
           & "..\nodetmp\node-$n-win-x64\npm.cmd" init -y | Out-Null
           & "..\nodetmp\node-$n-win-x64\npm.cmd" install realm@12
+          Remove-Item -Recurse -Force node_modules\realm\prebuilds\android, node_modules\realm\prebuilds\apple
           Pop-Location
       - name: Source self-test
         run: |
