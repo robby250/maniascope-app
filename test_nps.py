@@ -340,6 +340,8 @@ def test_website_charts_join_nps_as_downloads_with_a_mild_popularity_prior(tmp_p
     # Out-of-reach rates are never loaded; a chart with none left is dropped.
     assert webmaps.catalog({7}, (), {7: (5., 7.)})[1]['b'].values() == [{'x': 1}]
     assert webmaps.catalog({7}, (), {7: (10., 12.)}) == ({}, {})
+    # A window between two rated rates keeps both: they anchor the exact-rate refinement.
+    assert dict(webmaps.catalog({7}, (), {7: (7., 8.)})[1]['a'].items()) == {1.: {'x': 1}, 1.2: {'x': 2}}
     # A catalogue from another calculator keeps its features until re-published (no on-device analysis).
     with open(tmp_path/'web.pkl', 'wb') as fh:
         pickle.dump({'calc': 'older', 'format': 3, 'maps': maps,

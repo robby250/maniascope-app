@@ -2079,7 +2079,10 @@ class Worker(threading.Thread):
                         refits[0] = done
                         self.put("refit")           # suggestions sharpen while the rest is analysed
                 progress(0, len({sha for sha, _r in need}))
-                fs.fill(need, stop=self.busy, workers=3 if first else 1, chunk=12,
+                import webmaps
+                # First learning is all the player waits for: every core but two, paused while playing.
+                n = webmaps._workers() if first else 1
+                fs.fill(need, stop=self.busy, workers=n, chunk=max(12, 4 * n),
                         cancel=self._halt.is_set, progress=progress)
                 self._learning = None
                 self.put("refit")

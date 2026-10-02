@@ -36,12 +36,14 @@ SEARCH = "https://osu.direct/api/v2/search?mode=3&status={status}&amount=100&off
 FILES = (("https://osu.direct/api/osu/{bid}", .6), ("https://osu.ppy.sh/osu/{bid}", 3.))
 UA = "maniascope/0.1 (personal osu!mania practice recommender)"
 STATUSES = (-2, -1, 0, 1, 2, 3, 4)       # graveyard, wip, pending, ranked, approved, qualified, loved
-RATES = (0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5)
+# HT/NM/DT only (user 2026-10-02: ~3x faster crawl, ~3x smaller web.pkl). NPS/Skills compute the exact
+# rate a candidate needs on demand, as for installed maps (nps.candidates_from proposals).
+RATES = (0.75, 1.0, 1.5)
 PAUSE = .6                               # osu.direct allows 120 requests/minute
 PAGES = 4                                # pages in flight (~3 s each server-side → ~60/min)
 # Estimates before the first run on this PC (measured on G533QR 2026-10-01); runs learn their own.
 SEC_FETCH = 2.4                          # one chart from osu.direct incl. pacing and ppy fallback
-SEC_ANALYSE = 2.0                        # CPU seconds per chart for the 9 rates, split over workers
+SEC_ANALYSE = 0.7                        # CPU seconds per chart for the 3 rates, split over workers
 CHART_BYTES = 150_000                    # .osu ≈ 120 KB mean + its features in state.db and web.pkl
 
 
@@ -389,7 +391,13 @@ def catalog(keys, installed_md5=(), reach=None):
                         title=m["title"], version=m["version"], creator=m["creator"], audio_sha=None,
                         audio_required=0, path=chart, installed=False, playcount=m["playcount"])
         lo, hi = (reach or {}).get(m["keys"], (0., float("inf")))
-        rates = {r: b for r, b in web["feats"][sha].items() if lo <= m["overall"][r] <= hi}
+        ov = m["overall"]
+        rates = {r: b for r, b in web["feats"][sha].items() if lo <= ov[r] <= hi}
+        if not rates:     # the window falls between two rated rates: both anchor an exact refinement
+            below = [r for r in ov if ov[r] < lo]
+            above = [r for r in ov if ov[r] > hi]
+            if below and above:
+                rates = {r: web["feats"][sha][r] for r in (max(below, key=ov.get), min(above, key=ov.get))}
         if not rates:
             del out[sha]
             continue
