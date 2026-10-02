@@ -1,0 +1,23 @@
+[Icon Theme]
+Name=ManiaScope
+Comment=The few Breeze Dark icons ManiaScope shows; the rest come from the inherited themes
+Inherits=breeze-dark,Adwaita,hicolor
+Directories=actions/16,actions/22,actions/24,symbolic/actions
+
+[actions/16]
+Size=16
+Type=Fixed
+
+[actions/22]
+Size=22
+Type=Fixed
+
+[actions/24]
+Size=24
+Type=Fixed
+
+[symbolic/actions]
+Size=16
+MinSize=8
+MaxSize=512
+Type=Scalable

@@ -11,7 +11,13 @@ ManiaScope — glanceable osu!mania difficulty for the map selected in osu!lazer
 
 Requires python3-gi (GTK 3) + pycairo; pure stdlib otherwise.
 """
-import gi
+import os
+# One look on every desktop and on Windows: the bundled Breeze Dark theme and icons (theme/README.md).
+# GLib reads XDG_DATA_DIRS once, so this precedes GTK; frozen builds already list their share/ there.
+_THEME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "theme")
+os.environ["XDG_DATA_DIRS"] = os.pathsep.join(filter(None, [
+    _THEME_DIR, os.environ.get("XDG_DATA_DIRS") or ("" if os.name == "nt" else "/usr/local/share:/usr/share")]))
+import gi  # noqa: E402
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("PangoCairo", "1.0")
@@ -22,7 +28,6 @@ import functools  # noqa: E402
 import glob  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
-import os  # noqa: E402
 import re  # noqa: E402
 import sys  # noqa: E402
 import subprocess  # noqa: E402
@@ -2179,6 +2184,11 @@ def main():
             selected_analysis.preserve_runtime()
         except OSError:
             log_exc("preserve prediction runtime")
+        # App-set values outrank the desktop's (XSETTINGS, settings.ini); Arial stands in where
+        # Liberation Sans is missing (same metrics; Windows has no Liberation).
+        Gtk.Settings.get_default().set_properties(
+            gtk_theme_name="ManiaScope", gtk_icon_theme_name="ManiaScope",
+            gtk_font_name="Liberation Sans, Arial 10")
         win = ManiaScopeWindow()
         app.viewer = win
         app.add_window(win)

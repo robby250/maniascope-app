@@ -1,0 +1,5 @@
+/* Breeze Dark (breeze-gtk 6.7.5) with the KDE Breeze Dark colour scheme and window buttons. Later
+   @define-color wins, so colors.css comes after the theme. */
+@import url("breeze-dark.css");
+@import url("window_decorations.css");
+@import url("colors.css");
