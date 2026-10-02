@@ -17,6 +17,7 @@ import hashlib
 import http.client
 import itertools
 import json
+import math
 import os
 import pickle
 import sqlite3
@@ -401,6 +402,12 @@ def catalog(keys, installed_md5=(), reach=None):
         if not rates:
             del out[sha]
             continue
+        if reach and len(rates) > 2:
+            # Two rates nearest the window's centre anchor the exact-rate refinement. All in-window
+            # rates were ~190k predictions after every score, and the GUI lagged for minutes
+            # (G835LX 2026-10-02, after the 9-rate crawl).
+            mid = math.log(lo * hi) / 2
+            rates = {r: rates[r] for r in sorted(rates, key=lambda r: abs(math.log(ov[r]) - mid))[:2]}
         feats[sha] = Rates(rates)
     return out, feats
 

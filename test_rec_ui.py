@@ -48,6 +48,12 @@ def test_tabs_keys_clipboard_and_persistence():
                 def pool(rev):
                     return {"type":"pool", "mode":"nps", "revision":rev, "selection_id":w._selection_id, "phase":"warmup", "shown":[c],
                             "note":"Synthetic UI check · target ~94%", "summary":"No actual prediction"}
+                # A tab without its first list says it is loading, not that nothing fits.
+                assert w._rec_views['pp']['placeholder'].get_text().startswith('Loading PP suggestions')
+                w._on_rec(dict(type='status', text='Fitting…'))
+                assert w._rec_views['pp']['placeholder'].get_text() == 'Loading PP suggestions…\n\nFitting…'
+                w._on_rec(dict(pool(w._rec_revision), mode='pp', shown=[]))
+                assert w._rec_views['pp']['placeholder'].get_text().startswith('Nothing to suggest yet.')
                 w._on_rec(pool(w._rec_revision - 1))
                 assert not w.next_btn.get_sensitive()
                 w._on_rec(pool(w._rec_revision))

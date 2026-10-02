@@ -342,6 +342,14 @@ def test_website_charts_join_nps_as_downloads_with_a_mild_popularity_prior(tmp_p
     assert webmaps.catalog({7}, (), {7: (10., 12.)}) == ({}, {})
     # A window between two rated rates keeps both: they anchor the exact-rate refinement.
     assert dict(webmaps.catalog({7}, (), {7: (7., 8.)})[1]['a'].items()) == {1.: {'x': 1}, 1.2: {'x': 2}}
+    # Many in-window rates: only the two nearest the window's centre are predicted.
+    maps['a']['overall'] = {.8: 4., 1.: 6., 1.2: 9., 1.4: 11.}
+    with open(tmp_path/'web.pkl', 'wb') as fh:
+        pickle.dump({'calc': calc, 'format': 3, 'maps': maps, 'feats': {s: {r: pickle.dumps({'x': r}) for r in
+                     maps[s]['overall']} for s in maps}}, fh)
+    os.utime(tmp_path/'web.pkl', (2, 2))
+    assert sorted(webmaps.catalog({7}, (), {7: (3.5, 12.)})[1]['a']) == [1., 1.2]
+    assert len(webmaps.catalog({7})[1]['a']) == 4
     # A catalogue from another calculator keeps its features until re-published (no on-device analysis).
     with open(tmp_path/'web.pkl', 'wb') as fh:
         pickle.dump({'calc': 'older', 'format': 3, 'maps': maps,

@@ -89,6 +89,17 @@ def bonus(n):
     return 416.6667 * (1 - 0.995 ** min(n, 1000))
 
 
+
+def _interp(x, xs, ys):
+    """np.interp for one scalar on a short sorted list: ~20x cheaper per call (PP scoring calls it per chart)."""
+    i = bisect.bisect_right(xs, x)
+    if i == 0:
+        return ys[0]
+    if i == len(xs):
+        return ys[-1]
+    x0, x1 = xs[i-1], xs[i]
+    return ys[i-1] + (ys[i]-ys[i-1]) * (x-x0) / (x1-x0) if x1 > x0 else ys[i]
+
 class Ledger:
     """Best counted pp per beatmap → total, and the exact change of replacing/adding one map's best."""
 
@@ -236,8 +247,8 @@ def base_of(pop, f, b=None, rate=None, level=None):
     anchors = [(r, pop["mbr"][(b, r)]) for r, _v in recdata.VARIANTS if (b, r) in pop["mbr"]]
     if rate is not None and rate > 0 and anchors:
         xs = [math.log(r) for r, _v in anchors]
-        mb = float(np.interp(math.log(rate), xs, [v[0] for _r, v in anchors]))
-        n_mb = float(np.interp(math.log(rate), xs, [v[1] for _r, v in anchors]))
+        mb = _interp(math.log(rate), xs, [v[0] for _r, v in anchors])
+        n_mb = _interp(math.log(rate), xs, [v[1] for _r, v in anchors])
     lr = math.log(max(.05, f["overall"]))
     curve = pop.get("curve", {}).get(k, pop.get("curve", {}).get(0, 0.))
     bend = max(0., lr-math.log(pop.get("curve_knee", 4.))) ** 2
@@ -523,10 +534,10 @@ class Personal:
         a, n_c = self.aff.get(chart, (0.0, 0))
         anchors = self.rate_aff.get(chart, [])
         if anchors and rate:
-            a = float(np.interp(math.log(rate), [math.log(r) for r, _a, _n in anchors], [v for _r, v, _n in anchors]))
+            a = _interp(math.log(rate), [math.log(r) for r, _a, _n in anchors], [v for _r, v, _n in anchors])
             # Confidence follows the local anchor too. Three NM scores are
             # not three extra observations of the lone DT performance.
-            n_c = float(np.interp(math.log(rate), [math.log(r) for r, _a, _n in anchors], [n for _r, _a, n in anchors]))
+            n_c = _interp(math.log(rate), [math.log(r) for r, _a, _n in anchors], [n for _r, _a, n in anchors])
         support=self.rate_support.get(chart)
         if support and rate:
             distance=max(0.,math.log(support[0]/rate),math.log(rate/support[1]))
@@ -595,7 +606,7 @@ class Personal:
         new = math.log(max(.05,f['overall']*math.exp(elasticity*log_rate_loss)))
         shift = slope*(new-old) + curve*(max(0.,new-knee)**2-max(0.,old-knee)**2)
         if xs:
-            shift += float(np.interp(math.log(rate)+log_rate_loss,xs,ys))-mb
+            shift += _interp(math.log(rate)+log_rate_loss,xs,ys)-mb
         if affinity is not None:
             shift += self.chart_affinity(chart,rate*math.exp(log_rate_loss),f['keys'])[0]-affinity
         return max(0., shift)
@@ -1558,7 +1569,7 @@ class Recommender:
                         "push_only": not bool(normal[ix]),
                         "sd_model": float(A["sdm"][ix]), "sd": float(A["sda"][ix]), "challenge": float(chal[ix]),
                         "skill": A["skill"][ix], "length": f["length"] / 1000 / rate, "installed": meta["md5"] in self.installed,
-                        "overall": score_units.displayed_feature(f), "stars": f["stars"], "f": f})
+                        "stars": f["stars"], "f": f})
         self._score_cache = {cache_key: out}
         return out, session
 
@@ -1998,8 +2009,13 @@ class Worker(threading.Thread):
                     self._last_idle_check = time.monotonic()
                     self._daily_check()
                 continue
+            started = time.monotonic()
             try:
                 getattr(self, "t_" + task[0])(*task[1:])
+                took = time.monotonic() - started
+                if took > 1.5:      # every later tab switch / Next waits behind it (run.log evidence)
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] slow recommender task {task[0]} {took:.1f} s"
+                          f" · {self.q.qsize()} queued", flush=True)
             except Exception:
                 traceback.print_exc()
                 self.emit({"type": "status", "text": f"recommendation task {task[0]} failed (see run.log)"})
@@ -2127,7 +2143,9 @@ class Worker(threading.Thread):
             phase, shown, note = self._pool(mode)
             shown = self._prepared_playlist(mode, shown)
             st = {"nps": self.nps_state, "skills": self.skills_state}.get(mode) or {}
-            progress = (st["analyzed"], st["total"]) if st.get("total") and st["analyzed"] < st["total"] else None
+            # Charts that cannot be analysed (converts, broken files) are done too, or the bar waits forever.
+            done = st.get("analyzed", 0) + st.get("failed", 0)
+            progress = (done, st["total"]) if st.get("total") and done < st["total"] else None
             self.emit({"type": "pool", "mode": mode, "revision": self.revision, "selection_id": self._selection_id,
                        "phase": phase, "shown": shown, "note": note, "summary": summary(self.rec),
                        "progress": progress})
@@ -2232,7 +2250,7 @@ class Worker(threading.Thread):
         note = f"target ~{100 * self.acc_targets.get(mode, .94):.0f}% · 0.70–1.50×"
         if not st["total"]:
             note += " · no maps of these keymodes found yet"
-        elif st["analyzed"] < st["total"]:
+        elif st["analyzed"] + st["failed"] < st["total"]:
             note += (f" · {st['analyzed']:,} of {st['total']:,} maps analysed so far; "
                      "the rest are analysed a few at a time while you use this playlist")
         else:
@@ -2243,7 +2261,7 @@ class Worker(threading.Thread):
         if mode == "skills":
             note = skill_practice.label(self.practice_skills) + " · " + note
         if not shown:
-            note += (" · looking for maps that fit your target…" if st["analyzed"] < st["total"]
+            note += (" · looking for maps that fit your target…" if st["analyzed"] + st["failed"] < st["total"]
                      else " · no map fits your accuracy target at 0.70–1.50× (try another target or keymode)")
         if st["failed"]:
             note += f" · {st['failed']} unavailable analyses"

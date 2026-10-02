@@ -1189,7 +1189,7 @@ class ManiaScopeWindow(Gtk.Window):
             sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
             listing = Gtk.ListBox(activate_on_single_click=True)
             listing.connect("row-activated", lambda _l, row, m=mode: self._activate_rec(m, row))
-            placeholder = Gtk.Label(label="Nothing to suggest yet.", wrap=True, max_width_chars=50,
+            placeholder = Gtk.Label(label=f"Loading {recommend.MODE_NAMES[mode]} suggestions…", wrap=True, max_width_chars=50,
                                     justify=Gtk.Justification.CENTER, margin=24)
             placeholder.get_style_context().add_class("dim-label")
             placeholder.show()
@@ -1198,7 +1198,8 @@ class ManiaScopeWindow(Gtk.Window):
             status.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
             view = {"list": listing, "target": target, "note": note, "keys": key_btn,
                     "status": status, "hover": False, "pending": None, "ready": False, "target_data": None,
-                    "placeholder": placeholder, "wait": wait, "learning": None, "analysing": None}
+                    "placeholder": placeholder, "wait": wait, "learning": None, "analysing": None, "loaded": False,
+                    "status_text": "", "name": recommend.MODE_NAMES[mode]}
             self._rec_views[mode] = view
             sw.connect("enter-notify-event", lambda *_a, m=mode: self._rec_hover(m, True))
             sw.connect("leave-notify-event", lambda *_a, m=mode: self._rec_hover(m, False))
@@ -1250,7 +1251,8 @@ class ManiaScopeWindow(Gtk.Window):
             if total:
                 self.rec_progress.set_fraction(min(1., done / total))
             for v in self._rec_views.values():
-                v["placeholder"].set_text("Nothing to suggest yet." + (f"\n\n{text}" if text else ""))
+                v["status_text"] = text
+                self._set_placeholder(v)
             if not self.next_btn.get_sensitive():   # a greyed-out Next says what it waits for
                 self.next_btn.set_tooltip_text(text or None)
         elif msg["type"] == "pool":
@@ -1493,6 +1495,12 @@ class ManiaScopeWindow(Gtk.Window):
         return True
 
     @staticmethod
+    def _set_placeholder(view):
+        # Until a tab's first list arrives it is loading, not empty (PP sat at "Nothing to suggest yet" ~20 s).
+        head = "Nothing to suggest yet." if view["loaded"] else f"Loading {view['name']} suggestions…"
+        view["placeholder"].set_text(head + (f"\n\n{view['status_text']}" if view["status_text"] else ""))
+
+    @staticmethod
     def _show_wait(view):
         view["wait"].show_progress(*(view["learning"] or view["analysing"] or (None,)))
 
@@ -1501,6 +1509,9 @@ class ManiaScopeWindow(Gtk.Window):
         msg, view["pending"] = view["pending"], None
         if not msg or msg["revision"] != self._rec_revision or msg.get("selection_id", 0) < self._selection_id:
             return
+        if not view["loaded"]:
+            view["loaded"] = True
+            self._set_placeholder(view)
         for row in view["list"].get_children():
             view["list"].remove(row)
         if msg["shown"]:
@@ -2192,6 +2203,10 @@ def main():
     threading.excepthook = lambda args: log_exc(f"thread:{args.thread.name}",
                                                (args.exc_type, args.exc_value, args.exc_traceback))
     # Gtk.Application is single-instance: a second launch just raises this window
+    # The playlist builder is pure-Python CPU for minutes after each score; at the default 5 ms GIL
+    # switch interval every GTK callback and syscall of the viewer waited a full slice behind it
+    # (G835LX 2026-10-02: "several seconds to load anything"; 512 cache stats 921 ms → 38 ms at 1 ms).
+    sys.setswitchinterval(.001)
     app = Gtk.Application(application_id="io.github.robby250.ManiaScope")
 
     def activate(app):

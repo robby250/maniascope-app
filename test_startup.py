@@ -67,3 +67,16 @@ def test_saved_pool_is_published_before_background_import_finishes(tmp_path):
         finally:
             release.set();worker._import_thread.join(2)
             worker.stop();worker.put('history');worker.join(2)
+
+
+def test_progress_counts_unanalysable_charts_as_done():
+    out = []
+    worker = R.Worker(out.append)
+    worker.rec = SimpleNamespace(rows=[0]*30)
+    worker.mode = "nps"
+    with patch.object(worker, "_pool", return_value=("", [], "")), \
+         patch.object(worker, "_prepared_playlist", return_value=[]), patch.object(R, "summary", return_value={}):
+        for failed, want in ((1, None), (0, (9, 10))):
+            worker.nps_state = dict(worker.nps_state, total=10, analyzed=9, failed=failed)
+            worker._publish()
+            assert out[-1]["progress"] == want
