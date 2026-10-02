@@ -100,3 +100,9 @@ def test_gameplay_display_correction_preserves_forecast_inputs_and_labels():
                     assert raw['name']==shown['name']
                 assert U.displayed_value(f['overall'],7,c.od,factor)==pytest.approx(after['scores']['overall'])
                 assert all(v>=0 and math.isfinite(v) for v in after['timeline'])
+
+
+def test_unconverted_cache_still_displays():
+    import structural_residual as S
+    f={'keys':7,'overall':5.,'od':8.,'sk':{},'execution':{'residual_vector':[.2]*len(S.NAMES)}}
+    assert U.displayed_feature(f)>0     # no 'preunit_overall' (stats tab KeyError on G835LX 2026-10-01)

@@ -68,6 +68,61 @@ def basis(values, model):
     return columns
 
 
+def tree_predict(X, model):
+    """Boosted oblivious trees, rows of X = values + [log baseline] → log-star shifts (numpy).
+    With 'scales', each split is a logistic ramp of that width instead of a step: hard splits made
+    the stars fall 1.8 % from 1.20× to 1.22× on a plain 7K stream (2026-10-02), while the
+    rest of the calculator rises smoothly with rate."""
+    import numpy as np
+    X = np.asarray(X, float)
+    out = np.full(len(X), float(model['intercept']))
+    scales = model.get('scales')
+    for feats, cuts, leaves in model['trees']:
+        if scales is None:
+            i = np.zeros(len(X), int)
+            for f, c in zip(feats, cuts):
+                i = 2*i + (X[:, f] > c)
+            out += np.asarray(leaves)[i]
+            continue
+        weight = np.ones((len(X), 1))
+        for f, c in zip(feats, cuts):
+            p = 1/(1 + np.exp(-np.clip((X[:, f] - c)/scales[f], -60, 60)))[:, None]
+            weight = np.stack([weight*(1 - p), weight*p], axis=2).reshape(len(X), -1)   # leaf = 2*leaf + bit
+        out += weight @ np.asarray(leaves)
+    return out
+
+
+def tree_shift(keys, baseline, values, parameters):
+    """Second stage after the additive basis: what the current stars still miss, learned from
+    TRAIN map residuals by calib/fit_structural_residual.py --trees (user 2026-10-01: fix single
+    maps, not just the average). Chart-only inputs, so local and unranked charts get it too."""
+    model = parameters.get('structural_trees', {}).get('modes', {}).get(str(keys))
+    if not model or baseline <= 0 or values is None or len(values) != len(NAMES):
+        return 0.
+    x = list(values) + [math.log(max(.05, baseline))]
+    scales = model.get('scales')
+    out = model['intercept']
+    for feats, cuts, leaves in model['trees']:
+        if scales is None:
+            i = 0
+            for f, c in zip(feats, cuts):
+                i = 2*i + (x[f] > c)
+            out += leaves[i]
+            continue
+        weight = [1.]
+        for f, c in zip(feats, cuts):
+            z = max(-60., min(60., (x[f] - c)/scales[f]))
+            p = 1/(1 + math.exp(-z))
+            weight = [w*q for w in weight for q in (1 - p, p)]
+        out += sum(w*v for w, v in zip(weight, leaves))
+    return tree_limit(out, baseline)
+
+
+def tree_limit(shift, baseline):
+    """Clip, and fade below 4★ like the additive stage (few scored easy charts to learn from)."""
+    return max(-.25, min(.25, shift))*min(1., (baseline/4.)**2)
+
+
 def correction(keys, baseline, values, parameters, explain=False):
     """Return calibrated stars (and optional named log-rating contributions)."""
     stage = parameters.get('structural_residual', {})

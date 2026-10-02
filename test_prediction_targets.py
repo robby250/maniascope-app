@@ -153,3 +153,43 @@ def test_personal_geometry_counts_width_and_overlap_once():
     assert np.count_nonzero(np.isclose(z,.37))==1
     assert len(z)==7+len(R.PERSONAL_GEOMETRY)
     assert z[-1]==pytest.approx(R.zvec(dict(f,execution={}),())[-1])
+
+
+def test_tree_stage_learns_a_step_and_runtime_matches_training():
+    import structural_residual as S
+    from calib.fit_structural_residual import boost
+    rng=np.random.default_rng(1)
+    X=rng.normal(size=(2000,len(S.NAMES)+1))
+    y=np.where(X[:,3]>.5,.2,-.05)+rng.normal(0,.02,2000)
+    for model in boost(X,y,np.ones(2000),200):
+        pass
+    pred=S.tree_predict(X,model)
+    assert np.sqrt(np.mean((pred-y)**2))<.04
+    x=X[7]
+    p={'structural_trees':{'modes':{'7':model}}}
+    assert S.tree_shift(7,math.exp(x[-1]),list(x[:-1]),p)==pytest.approx(S.tree_limit(pred[7],math.exp(x[-1])))
+    assert S.tree_shift(4,math.exp(x[-1]),list(x[:-1]),p)==0.
+    # Soft splits: the runtime matches the numpy path, and a sweep across the learned step is
+    # continuous (hard splits jumped; a rate sweep then went down, 2026-10-02).
+    soft=dict(model,scales=[.05]*X.shape[1])
+    ps={'structural_trees':{'modes':{'7':soft}}}
+    assert S.tree_shift(7,math.exp(x[-1]),list(x[:-1]),ps)==pytest.approx(S.tree_limit(S.tree_predict(X[7:8],soft)[0],math.exp(x[-1])))
+    sweep=np.tile(X[7],(201,1));sweep[:,3]=np.linspace(0,1,201)
+    for m,limit in ((soft,.01),(model,.1)):
+        steps=np.abs(np.diff(S.tree_predict(sweep,m)))
+        assert (steps.max()<limit)==(m is soft),(steps.max(),limit)
+
+
+def test_tree_stage_reaches_displayed_stars():
+    import score_units, structural_residual as S
+    values=[.1]*len(S.NAMES)
+    model={'intercept':.1,'trees':[]}
+    base={'structural_residual':{'modes':{'7':{'low':[-9]*len(values),'high':[9]*len(values),'mean':[0]*len(values),
+                                               'scale':[1]*len(values),'coeff':[0]*len(values)}}},
+          'score_units':{'modes':{'7':{'display_coeff':[0]*len(values)}}}}
+    with_trees=dict(base,structural_trees={'modes':{'7':model}})
+    ex={'residual_vector':values}
+    # final_rating multiplies by exp(.1); the display ratio must keep that, not cancel it
+    original=5.*math.exp(.1)
+    assert score_units.display_factor(7,5.,ex,original,with_trees)==pytest.approx(1.)
+    assert score_units.display_factor(7,5.,ex,5.,base)==pytest.approx(1.)

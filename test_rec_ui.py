@@ -250,3 +250,53 @@ if __name__ == "__main__":
     test_tabs_keys_clipboard_and_persistence()
     test_skill_picker_native_cycle_and_separate_expansion()
     print("ok four tabs, Stats/practice navigation, multi-key/skill filters, clipboard, Next and geometry persistence")
+
+
+def test_unchosen_playlist_keymodes_follow_what_the_player_plays():
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, {"MANIASCOPE_REC": tmp}):
+            import skillsets as ui
+            from gi.repository import Gtk
+            class Worker:
+                def __init__(self, *a, **kw): self.tasks = []
+                def put(self, *task): self.tasks.append(task)
+                def start(self): pass
+                def stop(self): pass
+            prefs = os.path.join(tmp, "ui.json")
+            with open(prefs, "w") as f:
+                json.dump({"recommendation_mode": "nps", "skills_keys": [7]}, f)      # NPS never chosen
+            dbfile = os.path.join(tmp, "rec.db")
+            db = ui.recdata.connect(dbfile)
+            with db:
+                for i in range(30):
+                    keys = 4 if i < 24 else 7 if i < 28 else 10       # 80 % 4K, 13 % 7K, 7 % 10K
+                    db.execute("INSERT INTO installed(sha256,keys) VALUES(?,?)", (f"s{i}", keys))
+                    db.execute("INSERT INTO scores(key,src,sha256,played) VALUES(?,?,?,?)", (f"k{i}", "realm", f"s{i}", f"2026-09-{i+1:02d}"))
+            assert ui.recdata.played_keys(db) == (4, 7)
+            db.close()
+            with patch.object(ui, "UI_FILE", prefs), patch.object(ui.recdata, "DB_FILE", dbfile), \
+                 patch.object(ui.recommend, "Worker", Worker), patch.object(ui, "LazerWatcher", Worker), \
+                 patch.object(ui.ManiaScopeWindow, "_start_tosu", lambda *_: None), \
+                 patch.object(ui.ManiaScopeWindow, "_worker", lambda *_: None):
+                w = ui.ManiaScopeWindow()
+                assert w._rec_keys["nps"] == (4, 7) and w._rec_keys["skills"] == (7,)
+                assert [k for k, b in w._key_checks["nps"].items() if b.get_active()] == [4, 7]
+                w._save_ui()
+                assert json.load(open(prefs))["nps_keys"] == [4, 7]
+                w.destroy(); w.recs.destroy()
+            # No history yet: 7K now, not saved as a choice, and the import that lands later decides.
+            with open(prefs, "w") as f:
+                json.dump({"recommendation_mode": "nps"}, f)
+            with patch.object(ui, "UI_FILE", prefs), patch.object(ui.recdata, "DB_FILE", os.path.join(tmp, "empty.db")), \
+                 patch.object(ui.recommend, "Worker", Worker), patch.object(ui, "LazerWatcher", Worker), \
+                 patch.object(ui.ManiaScopeWindow, "_start_tosu", lambda *_: None), \
+                 patch.object(ui.ManiaScopeWindow, "_worker", lambda *_: None):
+                w = ui.ManiaScopeWindow()
+                assert w._rec_keys["nps"] == (7,) and w._keys_auto == {"nps", "skills"}
+                w._save_ui()
+                assert json.load(open(prefs))["nps_keys"] is None
+                with patch.object(ui.recdata, "played_keys", lambda db: (4,)):
+                    assert not w._auto_keys()
+                assert w._rec_keys["nps"] == w._rec_keys["skills"] == (4,) and not w._keys_auto
+                assert [k for k, b in w._key_checks["skills"].items() if b.get_active()] == [4]
+                w.destroy(); w.recs.destroy()

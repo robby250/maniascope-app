@@ -13,9 +13,10 @@ import recdata
 
 ROOT = Path(__file__).resolve().parent
 MODULES = recdata.CALCULATOR_MODULES
+# recdata.py is not compiled: listing it made every playlist/stats edit discard the build (G835LX ran
+# 2.5× slower Python from 2026-09-28). activate() still checks the calculator identity it computes.
 INPUTS = tuple(name+'.py' for name in MODULES) + (
-    'skill_calc.pxd', 'gestures.pxd', 'execution.pxd', 'calib/difficulty.json',
-    'recdata.py', 'native_backend.py')
+    'skill_calc.pxd', 'gestures.pxd', 'execution.pxd', 'calib/difficulty.json', 'native_backend.py')
 ABI = sysconfig.get_config_var('SOABI')
 SUFFIX = sysconfig.get_config_var('EXT_SUFFIX')
 FILES = tuple(name+SUFFIX for name in MODULES) + ('calib/difficulty.json',)

@@ -165,3 +165,12 @@ def test_skip_warmup_invalidates_both_local_prediction_caches(tmp_path):
     w._pool('skills');w._pool('nps')
     assert calls==[False,True]
     db.close()
+
+
+def test_demanded_is_match_for_every_single_skill():
+    """Stats reads group membership from one pass; it must equal match(f, [g]) per group."""
+    import skill_practice as sp
+    for f in ({'keys': 7, 'sk': {'ln': .9, 'stream': .3}}, {'keys': 4, 'sk': {'jackspeed': .8, 'chordjack': .7}},
+              {'keys': 7, 'sk': {'chordstream': .5, 'bracket': .48, 'sv': .2}}):
+        dem = sp.demanded(f)
+        assert dem and all((g in sp.match(f, [g])[1]) == (g in dem) for g in sp.dimensions(f['keys']))

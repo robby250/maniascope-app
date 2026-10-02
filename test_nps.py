@@ -310,6 +310,9 @@ def test_nps_focus_changes_selection_without_refitting_or_changing_rate_targets(
         publish.assert_called_once(); build.assert_not_called()
         worker.t_configure('nps', {'pp':None, 'nps':[7], 'skills':[7]}, revision=0, nps_focus=0.)
         assert worker.nps_focus == 1.                    # a superseded slider event cannot win
+        worker.playlists['skills'] = [rows[0]]
+        worker.t_configure('nps', {'pp':None, 'nps':[7], 'skills':[7]}, revision=2, web_bias={'skills': 0.})
+        assert worker.web_bias == {'nps': .5, 'skills': 0.} and worker.playlists['skills'] == []
     for value in (None, 'invalid', float('nan'), float('inf')):
         assert nps.normalize_focus(value) == .5
     assert nps.normalize_focus(-1) == 0. and nps.normalize_focus(2) == 1.
@@ -337,11 +340,22 @@ def test_website_charts_join_nps_as_downloads_with_a_mild_popularity_prior(tmp_p
     # Out-of-reach rates are never loaded; a chart with none left is dropped.
     assert webmaps.catalog({7}, (), {7: (5., 7.)})[1]['b'].values() == [{'x': 1}]
     assert webmaps.catalog({7}, (), {7: (10., 12.)}) == ({}, {})
+    # A catalogue from another calculator keeps its features until re-published (no on-device analysis).
+    with open(tmp_path/'web.pkl', 'wb') as fh:
+        pickle.dump({'calc': 'older', 'format': 3, 'maps': maps,
+                     'feats': {s: {1.: pickle.dumps({'x': 1})} for s in maps}}, fh)
+    os.utime(tmp_path/'web.pkl', (1, 1))
+    web, feats = webmaps.catalog({7})
+    assert set(web) == set(feats) == {'a', 'b'}
     rows = [dict(keys=7, sha=s, md5=s, family=s, rate=1., nps=30., base_value=0., length=180., profile=[1.],
                  description='Mixed', group='chords', acc_mid=.94, installed=inst, playcount=pc)
             for s, inst, pc in (('local', True, None), ('rare', False, 10), ('popular', False, 20000))]
     w = {c['sha']: c['weight'] for c in nps.weighted_candidates(rows, R.Session([], 1000), [7])}
     assert w['popular'] == pytest.approx(w['local']) and .65 < w['rare']/w['local'] < .75
+    # Settings slider: left end drops maps you don't have, the right end makes them ×4 as likely.
+    assert {c['sha'] for c in nps.weighted_candidates(rows, R.Session([], 1000), [7], web=nps.web_factor(0.))} == {'local'}
+    more = {c['sha']: c['weight'] for c in nps.weighted_candidates(rows, R.Session([], 1000), [7], web=nps.web_factor(1.))}
+    assert more['popular'] / more['local'] == pytest.approx(4.) and nps.web_factor(.5) == 1.
 
 
 def test_website_star_filter_keeps_unrated_charts():
@@ -350,6 +364,39 @@ def test_website_star_filter_keeps_unrated_charts():
     assert webmaps.in_stars(rated(7.), [6., 12.]) and webmaps.in_stars(rated(None), [6., 12.])
     assert not webmaps.in_stars(rated(5.9), [6., 12.]) and not webmaps.in_stars(rated(12.1), [6., 12.])
     assert webmaps.in_stars(rated(2.), None)
+
+
+def test_website_crawl_estimates_before_start_pauses_on_request_and_resumes(tmp_path, monkeypatch):
+    import webmaps
+    monkeypatch.setattr(webmaps, 'WEB_DIR', str(tmp_path))
+    monkeypatch.setattr(webmaps, 'FILES', (('{bid}', 0.),))
+    db = webmaps._db()
+    with db:
+        for bid in range(1, 5):
+            db.execute("INSERT INTO diffs(bid,keys,md5,notes,length,playcount,stars) VALUES(?,?,?,?,?,?,?)",
+                       (bid, 7, f'm{bid}', 2000, 120, bid, 8. if bid < 4 else 3.))
+    assert webmaps.estimate(db, {7}, [6., 12.])['unlisted'] == []     # older crawls: their rows' keymodes
+    webmaps._kv(db, 'keys', [7])                     # what a listing pass records
+    est = webmaps.estimate(db, {4, 7}, [6., 12.])   # chart 4 is outside the ★ range
+    assert (est['fetch'], est['analyse'], est['ready'], est['unlisted']) == (3, 3, 0, [4])
+    assert est['new_bytes'] == 3 * webmaps.CHART_BYTES and est['seconds'] > 0
+    assert webmaps.estimate(db, {4}, [6., 12.])['fetch'] == 0
+    def get(url):
+        (tmp_path/'stop').touch()                    # the app pressed Pause during the first download
+        return b'chart ' + url.encode()
+    monkeypatch.setattr(webmaps, '_get', get)
+    with pytest.raises(webmaps.Stopped):
+        webmaps.fetch(db, {7}, None, [6., 12.])
+    assert webmaps._kv(db, 'progress')['fetched'] == 1             # stored one, then paused
+    assert webmaps.estimate(db, {7}, [6., 12.])['fetch'] == 2
+    (tmp_path/'stop').unlink()
+    monkeypatch.setattr(webmaps, '_get', lambda url: b'chart ' + url.encode())
+    assert webmaps.fetch(db, {7}, None, [6., 12.]) == 2          # resume fetches only the rest
+    assert webmaps.estimate(db, {7}, [6., 12.])['fetch'] == 0
+    lock = webmaps._lock()                                         # a crawl holds it while it runs
+    assert webmaps.running() and webmaps._lock() is None
+    lock.close()
+    assert not webmaps.running()
 
 
 def test_first_real_build_replaces_the_installed_only_restart_list(tmp_path):

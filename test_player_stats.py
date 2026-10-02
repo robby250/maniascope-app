@@ -42,3 +42,19 @@ def test_sparse_and_unmeasured_limits_are_not_confident_numeric_ratings(tmp_path
     rec.rows=rec.rows[:2]
     assert P.build(rec)[7]['groups']['ln']['value'] is None
     rec.db.close()
+
+
+def test_history_follows_the_monthly_level_and_marks_the_peak(tmp_path):
+    import numpy as np
+    rec=fixture(tmp_path)
+    # Month 300 was 0.2 better (fewer misses) than now; month 301 has too few recorded plays to show.
+    # 100 plays a month; month 301 unplayed; month 300 went 0.2 better (fewer misses) than the rest.
+    sw=np.array([100.,0.,100.,100.,100.,100.,100.]);se=np.array([-20.,0.,0.,0.,0.,0.,0.])
+    rec.model.monthly={7:(300,se,sw)}
+    profile=P.build(rec)
+    history=profile[7]['history'];now=profile[7]['groups']['overall']
+    assert [m for m,_v in history]==[300,302,303,304,305,306] and abs(history[-1][1]-now['value'])<1e-9
+    assert profile[7]['peak'][0]==300 and history[0][1]>history[1][1]>now['value']
+    page=P.current(profile,R.Session([],1000))['pages'][7]
+    assert not page['session'] and page['peak'][1]>page['groups']['overall']['value']
+    rec.db.close()

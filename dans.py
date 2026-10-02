@@ -5,8 +5,10 @@ by this calculator (calib/dan_table.py), not another calculator's scale (user 20
 content decides the series and the place; titles never enter (user: "no cheating").
 
 Series: LN-heavy charts are placed among LN dans, the rest among rice dans; 4K charts with sustained
-same-column runs are also placed among vibro dans (REFORM Zeta/Eta songs hold real vibro sections, so
-vibro is shown beside the rice dan, not instead of it). Vibro dans are placed by vibro speed together
+same-column runs are also placed among vibro dans (REFORM Zeta/Eta courses hold real vibro sections, so
+vibro is shown beside the rice dan). A chart mostly made of vibro runs shows the vibro dan alone: its
+mashing reads as fast rice/LN to the calculator, so "Zeta" or "LN Yami+" there named the wrong skill
+(user 2026-10-01). Vibro dans are placed by vibro speed together
 with stars (weights fitted on the vibro dans): stars alone put Vibro 2–8 within 8.5–9.2★ out of order,
 and population accuracy on ranked vibro charts gives no reason to move the stars themselves.
 """
@@ -27,7 +29,9 @@ SHORT = {"7K Regular": "Reg ", "7K LN": "LN ", "4K LN": "LN ", "6K Regular": "6K
 VIBRO_GAP = 100        # ms: a column re-hit this fast keeps a vibro run going (10 hits/s)
 VIBRO_RUN = 6          # hits in one column before it counts as vibro, not a jack
 VIBRO_SHARE = .10      # share of notes in such runs: 117/120 vibro dan charts, 0.5% of ranked 4K (2026-10-01)
+VIBRO_ONLY = .25      # 44/48 vibro dan charts reach it; 4/113 REFORM charts (Zeta/Eta vibro songs), no LN dan chart
 LN_SHARE = .22         # LN dans' charts hold >= 25% LN notes, rice dans' <= 19% (2026-10-01)
+LN_MAJORITY = .5       # from here holds are most notes: the LN dan alone
 
 
 def vibro_runs(notes, rate=1.0):
@@ -125,6 +129,18 @@ def place(series, rating, vibro=None):
 
 def label(keys, rating, ln_share, vibro=None):
     # Vibro last: the rice/LN dan is the main reading (user 2026-10-01).
-    parts = [place(SERIES.get((keys, kind(ln_share))), rating),
-             place("4K Vibro", rating, vibro) if keys == 4 and vibro and vibro["share"] >= VIBRO_SHARE else None]
+    share = vibro["share"] if keys == 4 and vibro else 0.
+    # Mixed charts (LN dan share but mostly taps) read on both, the tap dans first (user 2026-10-01:
+    # Rebellious exorcist [Eternal Torment], 29 % LN rice stamina, showed only "LN Gamma").
+    series = [kind(ln_share)] if ln_share < LN_SHARE or ln_share >= LN_MAJORITY else ["rice", "ln"]
+    parts = [None if share >= VIBRO_ONLY else place(SERIES.get((keys, s)), rating) for s in series] + \
+            [place("4K Vibro", rating, vibro) if share >= VIBRO_SHARE else None]
     return " · ".join(p for p in parts if p) or None
+
+
+def ability(keys, value, skill="overall"):
+    """Dan whose charts sit at a player's ~94 % difficulty for this Stats skill (LN skills on the LN dans).
+    None for vibro (its dans need a vibro speed) and keymodes without dans."""
+    if value is None or skill.endswith("vibro"):
+        return None
+    return place(SERIES.get((keys, "ln" if skill.split("/")[0] == "ln" else "rice")), value)

@@ -37,7 +37,9 @@ def display_factor(keys, baseline, execution, original, parameters):
     model = dict(stage['modes'][str(keys)], coeff=coeff)
     display = {'structural_residual': dict(stage, modes={str(keys): model})}
     rolled = execution.get('rolled_factor', 1.)
-    corrected = structural_residual.correction(keys, baseline/rolled, values, display)*rolled
+    # The tree stage is part of the stars, not of the display basis: keep it on both sides of the ratio.
+    corrected = structural_residual.correction(keys, baseline/rolled, values, display)*rolled \
+        * math.exp(structural_residual.tree_shift(keys, baseline, values, parameters))
     return corrected/original
 
 
@@ -54,7 +56,8 @@ def displayed_feature(f):
         return (f['overall'] + f.get('preunit_overall', f['overall'])) / 2
     import difficulty_model
     model = difficulty_model.parameters()['score_units']['modes'][str(f['keys'])]
-    return display_rating(f['preunit_overall']*factor, f['od'], model)
+    # Unconverted caches (63 of G835LX's 7K charts) hold the pre-unit rating as 'overall'.
+    return display_rating(f.get('preunit_overall', f['overall'])*factor, f['od'], model)
 
 
 def displayed_value(value, keys, od=8., factor=1.):

@@ -168,12 +168,20 @@ def activation(history, now, keys, skill=None):
     return state*math.exp(-max(0.,now-last_end)/COOLING)
 
 
+_NUISANCE={}
+
+
 def nuisance(row):
-    f=row['f'];sk=f.get('sk',{})
+    # Every refit evaluates the same feature dicts ~25 times (taus × splits): ~1/4 of startup.
+    f=row['f'];hit=_NUISANCE.get(id(f))
+    if hit is not None and hit[0] is f:return hit[1]
+    sk=f.get('sk',{})
     lr=math.log(max(.1,f['overall']))
-    return [1.,lr,lr*lr,f.get('ln',0.),f.get('stam',1.),
-            f.get('endurance',{}).get('load',0.)]+[
-        max((sk.get(x,0.) for x in MEMBERS[k]),default=0.) for k in FAMILIES]
+    v=(1.,lr,lr*lr,f.get('ln',0.),f.get('stam',1.),f.get('endurance',{}).get('load',0.))+tuple(
+        max((sk.get(x,0.) for x in MEMBERS[k]),default=0.) for k in FAMILIES)
+    if len(_NUISANCE)>200000:_NUISANCE.clear()
+    _NUISANCE[id(f)]=(f,v)
+    return v
 
 
 def _fit(rows, tau, use_cold=True):

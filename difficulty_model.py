@@ -131,7 +131,8 @@ def _baseline_rating(keys, raw, features, execution=None):
 def final_rating(keys, raw, features, execution=None):
     import structural_residual
     base = _baseline_rating(keys, raw, features, execution)
-    value=structural_residual.correction(keys, base, (execution or {}).get('residual_vector'), parameters())
+    values=(execution or {}).get('residual_vector'); p=parameters()
+    value=structural_residual.correction(keys, base, values, p)*math.exp(structural_residual.tree_shift(keys, base, values, p))
     return value*(execution or {}).get('rolled_factor',1.)
 
 

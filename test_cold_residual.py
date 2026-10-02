@@ -102,3 +102,18 @@ def test_fresh_calculation_and_feature_transform_share_structural_inputs():
     # Inference does not modify public scores or return a cached map-ID answer.
     c.title='renamed';c.creator='different'
     assert C.compute(c,rate)['scores']['overall']==r['scores']['overall']
+
+
+def test_tracked_openings_that_play_warm_shrink_the_cold_curve():
+    def history(cold_result):
+        ev=events([0]*12)
+        for i in range(6):          # six openings forecast .15 worse than warm
+            ev[2*i]['info'].update(cold_penalty=.15)
+            ev[2*i+1]['info']['y']=-3.+cold_result
+        return R.Session(ev,99999,warmup_model=cold_model())
+    assert history(.15).cold_scale(7)==pytest.approx(1.,abs=.01)     # they were as cold as forecast
+    warm=history(0.)                                                  # they played like warm maps
+    assert warm.cold_scale(7)<.5
+    assert warm.warmup_penalty(7,'chordjack')==pytest.approx(
+        warm._historical_cold(7,'chordjack')*warm.cold_scale(7))
+    assert R.Session([],1200,warmup_model=cold_model()).cold_scale(7)==1.

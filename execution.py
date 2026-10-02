@@ -181,6 +181,29 @@ def analyse(chart, rate: float, bin_seconds: float=0.5, *, cancelled=None, prepa
     return sums
 
 
+def column_runs(chart, rate: float, bins: int):
+    """Per bin: share of notes inside same-column runs (>= VIBRO_MIN starts < VIBRO_GAP apart), short
+    holds included. A 42 ms hold in a 48/s roll is mashed like a tap."""
+    import skill_calc
+    by = collections.defaultdict(list)
+    for t, _e, c in chart.notes:
+        by[c].append(t * .001 / rate)
+    inrun, count = [0.]*bins, [0.]*bins
+    for times in by.values():
+        times.sort()
+        run = times[:1]
+        for t in times[1:] + [math.inf]:
+            if t - run[-1] < skill_calc.VIBRO_GAP:
+                run.append(t)
+                continue
+            for x in run:
+                b = min(bins - 1, int(x / skill_calc.BIN))
+                count[b] += 1
+                inrun[b] += len(run) >= skill_calc.VIBRO_MIN
+            run = [t]
+    return [i / c if c else 0. for i, c in zip(inrun, count)]
+
+
 def attribute(parts, total, original, chart, rate: float, *, shared=None, cancelled=None):
     """Reassign overlapping descriptions, without double-charging any demand."""
     import skill_calc
@@ -237,7 +260,21 @@ def attribute(parts, total, original, chart, rate: float, *, shared=None, cancel
     nosv = [max(0.,t-sv/skill_calc.BIN) for t,sv in zip(total,parts["sv_raw"])]
     # The old per-column frequency test also labelled ordinary ultra-fast rolls
     # Vibro. Only actual repeated-row execution now owns that descriptor.
-    original["vibro"] = [t*min(1.,v/.8) for t,v in zip(nosv,g["vibro"])]
+    # Repeated-row execution owns Vibro. A roll so fast that its rows can't be hit one by one (rows
+    # under ~30 ms apart) while every column repeats at vibro speed is mashed the same way ("Vibro
+    # Dansen": 4-key rolls 21 ms apart read as Stream/Dump 10, user 2026-10-01); ordinary fast rolls
+    # stay rice/jumptrill.
+    runs = column_runs(chart, rate, len(total))
+    own = [max(min(1., v/.8), share*smooth(rows/skill_calc.BIN, 28., 36.))
+           for v, share, rows in zip(g["vibro"], runs, parts["rows"])]
+    own = [o if o >= .02 else 0. for o in own]      # gesture noise (~1e-6) must not reorder tied labels
+    original["vibro"] = [t*(own[i] if i < len(own) else 0.) for i,t in enumerate(nosv)]
+    # Mashed rows are not streamed or held: like Mash above, their share leaves the rice and LN
+    # descriptions (vibro charts read "Dump 10.2" / LN 57 %). Jacks keep it.
+    for name in ("stream", "delay", "dump", "jumpstream", "handstream", "chordstream", "bracket",
+                 "ln", "release", "inverse", "hybrid", "shield"):
+        if name in original:
+            original[name] = [x*(1.-(own[i] if i < len(own) else 0.)) for i,x in enumerate(original[name])]
     rice = [k for k in ("stream","delay","dump","jumpstream","handstream","chordstream") if k in original]
     # Relative-time gesture binning can include an exact endpoint that the
     # legacy floating-point demand horizon rounds down. Never index past the

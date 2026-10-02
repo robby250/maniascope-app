@@ -330,11 +330,14 @@ def test_selected_card_matches_list():
 
 def test_other_calculator_refused():
     """Public features from another skill_calc.py are never mixed with this one's."""
+    from unittest.mock import patch
+    import recdata
     try:
-        R.Recommender(_db(), {"calc": "not-this", "feats": {}, "maps": {}, "pop": {}, "user": {}})
+        with patch.object(recdata, "fetch_release_public", side_effect=OSError("404")):
+            R.Recommender(_db(), {"calc": "not-this", "feats": {}, "maps": {}, "pop": {}, "user": {}})
         raise AssertionError("stale public evidence accepted")
     except RuntimeError as exc:
-        assert "another calculator" in str(exc)
+        assert "another ManiaScope version" in str(exc)
 
 
 def test_lazer_accuracy_scale():
@@ -497,10 +500,12 @@ def test_release_evidence_is_stripped_and_installs_for_this_calculator(tmp_path,
     assert released["user"]["scores"] == [] and released["user"]["id"] is None and pub["user"]["scores"] == [1]
     monkeypatch.setattr(recdata, "ROLLING", str(tmp_path))
     monkeypatch.setattr(recdata, "ACTIVE", str(tmp_path / "active.json"))
-    with patch.object(recdata.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(_pickle.dumps(released))):
+    class Response(io.BytesIO):
+        headers = {}
+    with patch.object(recdata.urllib.request, "urlopen", lambda *a, **k: Response(_pickle.dumps(released))):
         assert recdata.fetch_release_public()["snapshot"] == "snap_x"
     assert recdata.load_public()["user"]["scores"] == []
-    with patch.object(recdata.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(_pickle.dumps(dict(released, calc="other")))):
+    with patch.object(recdata.urllib.request, "urlopen", lambda *a, **k: Response(_pickle.dumps(dict(released, calc="other")))):
         with pytest.raises(ValueError):
             recdata.fetch_release_public()
 
@@ -545,3 +550,53 @@ def test_packaged_install_replaces_evidence_fitted_by_older_links():
             assert R.Recommender(None, pub=dict(new)).pub is not new        # current evidence: no download
         with patch.object(recdata, "fetch_release_public", side_effect=OSError("offline")):
             assert R.Recommender(None, pub=old).pub is old
+    # Source installs (no sys.frozen) download too when evidence is missing or from another calculator
+    # (friend's Linux clone 2026-10-01 waited forever), but keep a merely older link version.
+    other = {"calc": "not-this", "pop": {"version": recdata.POP_VERSION}}
+    seen = []
+    with patch.object(R.Recommender, "refit", lambda self: None), \
+            patch.object(recdata, "import_public_user", lambda db, pub: None), \
+            patch.object(recdata, "load_public", return_value=None):
+        with patch.object(recdata, "fetch_release_public", side_effect=lambda progress: (progress(5, 10), new)[1]):
+            assert R.Recommender(None, progress=lambda *a: seen.append(a)).pub is new
+            assert R.Recommender(None, pub=other).pub is new
+        with patch.object(recdata, "fetch_release_public", side_effect=AssertionError("no download")):
+            assert R.Recommender(None, pub=old).pub is old
+    assert any(a[1:] == (5, 10) and "MB" in a[0] for a in seen)
+
+
+def test_plays_like_moves_stars_by_the_public_map_effect():
+    import math
+    import recommend as R
+    pop = {"slope": {0: 2., 4: 2.}, "mb": {1: (-.5, 300), 2: (.02, 300), 3: (-.5, 5)}, "mbr": {(1, 1.5): (.4, 80)}}
+    f = {"overall": 10., "keys": 4}
+    stars, n = R.plays_like(pop, f, 1, 1.)
+    assert n == 300 and abs(stars - 10 * math.exp(-.25)) < 1e-9          # fewer misses than its stars → easier
+    assert R.plays_like(pop, f, 1, 1.5)[0] > 10                            # its own 1.5× evidence wins
+    assert R.plays_like(pop, f, 2, 1.) is None and R.plays_like(pop, f, 3, 1.) is None and R.plays_like(pop, f, None, 1.) is None
+    # Above the knee the link bends: the shift must invert slope and curve together (Chinmoku 1.5×:
+    # slope-only said 7.4★ for a 9.2★ chart the full link puts at 8.9★).
+    curved = dict(pop, curve={0: 1.6, 4: 1.6}, curve_knee=4.)
+    stars, _ = R.plays_like(curved, f, 1, 1.)
+    g = lambda x: 2. * x + 1.6 * max(0., x - math.log(4.)) ** 2
+    assert abs(g(math.log(stars)) - (g(math.log(10.)) - .5)) < 1e-9 and stars > 10 * math.exp(-.25)
+
+
+def test_first_run_learns_the_level_before_suggesting():
+    """A fresh install imports thousands of plays after the startup analysis already ran with none: the
+    import restarts it, and PP shows nothing (the reason, not 4K Beginner maps) until the level is known."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    messages, order = [], []
+    worker = R.Worker(messages.append)
+    worker.rec, worker.db = SimpleNamespace(rows=[]), None
+    with patch.object(worker, "_pool", side_effect=AssertionError("published while learning")):
+        worker._learning = "Analysing…"
+        worker._publish()
+        worker._learning, worker._first_import = None, True
+        worker._publish()
+    with patch.object(worker, "_start_fill", lambda: order.append("fill")), \
+            patch.object(worker, "t_refit", lambda: order.append("refit")), \
+            patch.object(R, "play_history", return_value=[]):
+        worker.t_imported({"new": 11049, "installed": 52988}, 0, True)
+    assert order == ["fill", "refit"] and not worker._first_import

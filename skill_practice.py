@@ -245,6 +245,19 @@ def _match(keys, skills, profile, selected):
     return max((min(1., values[k]) for k in matched), default=0.), matched
 
 
+def demanded(f):
+    """Skills g for which match(f, [g]) matches, from one strengths pass (Stats tests every group per chart)."""
+    return _demanded(f.get('keys', 7), tuple(f.get('sk', {}).items()), tuple((f.get('tech_profile') or {}).items()))
+
+
+@lru_cache(maxsize=32768)
+def _demanded(keys, skills, profile):
+    f = {'keys': keys, 'sk': dict(skills), 'tech_profile': dict(profile)}
+    values = strengths(f)
+    floor = max(.45, .60*max(values.values(), default=0.))
+    return frozenset(k for k, v in practice_strengths(f, values).items() if v >= floor)
+
+
 def session_skill(key, keys):
     node = dimensions(keys).get(key)
     return node.members[0] if node else None

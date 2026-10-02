@@ -76,8 +76,11 @@ def test_rate_sweep_is_smooth_and_uncapped():
     prev = 0
     for r100 in range(70, 201, 2):
         v = S.compute(ch, r100 / 100)["scores"]["overall"]
-        # 0.5 s bins shift under the notes as rate changes: allow a sub-display wobble
-        assert prev * 0.997 < v < prev * 1.07 or prev == 0, (r100, prev, v)
+        # 0.5 s bins shift under the notes as rate changes: allow a sub-display wobble. The learned
+        # stages can dip slightly: on 48 sampled ranked charts the pre-tree calculator already dips
+        # >0.3 % in 22 of 3,120 steps (worst 4.5 %); soft tree splits add 6 (hard ones added 46).
+        # This chart dips 1.1 % at 1.70→1.72× (2026-10-02).
+        assert prev * 0.985 < v < prev * 1.07 or prev == 0, (r100, prev, v)
         prev = v
 
 
@@ -196,6 +199,17 @@ def test_rate_from_mods():
 
 def names(notes, **kw):
     return [e["name"] for e in S.card(S.compute(S.parse_osu(chart(notes, **kw)), 1.0))]
+
+
+def test_mashed_rolls_read_as_vibro_not_stream():
+    # "Vibro Dansen": a 4-key roll 21 ms apart, short holds, each column every 83 ms, is mashed
+    roll = [(1000 + 21 * i, (2, 3, 0, 1)[i % 4], 1000 + 21 * i + 42) for i in range(1600)]
+    r = S.compute(S.parse_osu(chart(roll, keys=4)), 1.0)
+    sc = r["scores"]
+    assert S.card(r)[0]["name"] == "Vibro" and sc["vibro"] > 2 * max(sc["stream"], sc["dump"], sc["ln"])
+    # the same roll at a hittable 60 ms per row stays rice
+    slow = [(1000 + 60 * i, (2, 3, 0, 1)[i % 4]) for i in range(600)]
+    assert S.compute(S.parse_osu(chart(slow, keys=4)), 1.0)["scores"]["vibro"] < .1
 
 
 def test_card_taxonomy():
@@ -382,12 +396,18 @@ def test_dan_labels_follow_course_order_and_chart_type(monkeypatch):
     # nearest tier: a course rated exactly at its anchor shows that tier, not the one below
     assert dans.label(7, 3., 0.) == "Reg 1st" and dans.label(7, 3.3, 0.) == "Reg 1st+"
     assert dans.label(7, 9., 0.) == "Reg 4th+" and dans.label(7, 2., 0.) == "below Reg 1st"
-    assert dans.label(7, 3.5, .3).startswith("LN ") and dans.label(6, 5., 0.) is None
+    assert dans.label(7, 3.5, .6).startswith("LN ") and dans.label(6, 5., 0.) is None
+    # Mixed: mostly taps with LN-dan amounts of holds read on both, tap dan first
+    assert dans.label(7, 3.5, .3).startswith("Reg ") and " · LN " in dans.label(7, 3.5, .3)
     # vibro is read from the notes: a 4-column run at 11.5 hits/s is vibro, shown beside the rice dan
     run = [(t * 87, t * 87, c) for t in range(40) for c in range(4)]
     vib = dans.vibro_runs(run)
     assert vib["share"] == 1. and 11 < vib["speed"] < 12
-    assert dans.label(4, 3., 0., vib) == "1st · Vibro 2−"     # log 11.5 hits/s sits 70% of the way to Vibro 2
+    assert dans.label(4, 3., 0., vib) == "Vibro 2−"     # all vibro: the rice dan would name the wrong skill
+    mixed = run + [(4000 + t * 87, 4000 + t * 87, t % 4) for t in range(600)]      # 21 % vibro runs
+    assert dans.label(4, 3., 0., dans.vibro_runs(mixed)) == "1st · Vibro 2−"
+    assert dans.ability(4, 3.) == "1st" and dans.ability(7, 3.5, "ln/release").startswith("LN ")
+    assert dans.ability(4, 3., "jackspeed/vibro") is None and dans.ability(4, None) is None
     assert dans.vibro_runs(run, rate=.8)["share"] == 0.          # slowed to 9.2 hits/s: jacks, not vibro
     stream = [(t * 87, t * 87, t % 4) for t in range(160)]
     assert dans.label(4, 3., 0., dans.vibro_runs(stream)) == "1st"

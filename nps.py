@@ -35,6 +35,13 @@ def normalize_focus(value):
         return .5
 
 
+def web_factor(value):
+    """'Maps you don't have' slider → their sampling weight: 0 off, .5 same footing as your own, 1 ×4.
+    Same footing already gives a new player mostly downloads and a big library mostly its own maps."""
+    value = normalize_focus(value)
+    return 0. if value <= 0. else 4. ** (2 * value - 1)
+
+
 DEFAULT_TARGET = .94
 
 
@@ -623,7 +630,7 @@ def taste(db, now=None):
     return {g: max(-.25, min(.25, score / max(1., count))) for g, (score, count) in result.items()}
 
 
-def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps"):
+def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps", web=1.):
     """Each eligible chart family contributes quality-weighted sampling mass.
 
     Equally good maps naturally reproduce library proportions. Density, poor
@@ -635,6 +642,8 @@ def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps
     families = {}
     for c in candidates:
         if c["keys"] not in allowed or not MIN_RATE <= c.get("rate", 1.) <= MAX_RATE:
+            continue
+        if web <= 0. and not c.get("installed", True):
             continue
         key = (c["keys"], c["family"])
         if key not in families or c["base_value"] > families[key]["base_value"]:
@@ -669,7 +678,7 @@ def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps
             value -= 1.2
         if not c.get("installed", True):
             # Mild popularity prior for website charts only: ×0.7 near 10 plays → ×1 from 10k.
-            value += math.log(.6 + .1 * min(4., math.log10(1 + (c.get("playcount") or 0))))
+            value += math.log(.6 + .1 * min(4., math.log10(1 + (c.get("playcount") or 0)))) + math.log(web)
         cached_penalty = c.get("_profile_penalty")
         if cached_penalty and cached_penalty[0] == profile_key:
             value -= cached_penalty[1]

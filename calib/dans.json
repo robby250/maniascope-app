@@ -1,8 +1,8 @@
 {
- "calc": "f097963af358",
+ "calc": "95f73351c259",
  "vibro_weights": [
-  25.88419225963175,
-  5.812240409618042
+  26.862496159204596,
+  5.613330663951926
  ],
  "series": {
   "10K Regular": [
@@ -16,15 +16,15 @@
    },
    {
     "tier": "Lv.2",
-    "value": 0.97377
+    "value": 0.97179
    },
    {
     "tier": "Lv.3",
-    "value": 1.10273
+    "value": 1.10255
    },
    {
     "tier": "Lv.4",
-    "value": 1.18988
+    "value": 1.18739
    },
    {
     "tier": "Lv.5",
@@ -32,23 +32,23 @@
    },
    {
     "tier": "Lv.6",
-    "value": 1.49271
+    "value": 1.48936
    },
    {
     "tier": "Lv.7",
-    "value": 1.68612
+    "value": 1.67454
    },
    {
     "tier": "Lv.8",
-    "value": 1.77002
+    "value": 1.76608
    },
    {
     "tier": "Lv.9",
-    "value": 1.86739
+    "value": 1.85904
    },
    {
     "tier": "Lv.10",
-    "value": 1.96476
+    "value": 1.952
    },
    {
     "tier": "Lv.XI",
@@ -56,205 +56,205 @@
    },
    {
     "tier": "Virtuoso",
-    "value": 2.12501
+    "value": 2.12482
    }
   ],
   "4K LN": [
    {
     "tier": "1st",
-    "value": 0.92492
+    "value": 0.96798
    },
    {
     "tier": "2nd",
-    "value": 1.24333
+    "value": 1.30733
    },
    {
     "tier": "3rd",
-    "value": 1.33544
+    "value": 1.39231
    },
    {
     "tier": "4th",
-    "value": 1.37241
+    "value": 1.46505
    },
    {
     "tier": "5th",
-    "value": 1.41256
+    "value": 1.51511
    },
    {
     "tier": "6th",
-    "value": 1.53198
+    "value": 1.56517
    },
    {
     "tier": "7th",
-    "value": 1.61004
+    "value": 1.63165
    },
    {
     "tier": "8th",
-    "value": 1.67413
+    "value": 1.6951
    },
    {
     "tier": "9th",
-    "value": 1.74917
+    "value": 1.74452
    },
    {
     "tier": "10th",
-    "value": 1.85444
+    "value": 1.85208
    },
    {
     "tier": "Yoake",
-    "value": 1.91449
+    "value": 1.93944
    },
    {
     "tier": "Yuugure",
-    "value": 1.95262
+    "value": 1.99814
    },
    {
     "tier": "Yoru",
-    "value": 2.05219
+    "value": 2.05684
    },
    {
     "tier": "Yokaze",
-    "value": 2.2371
+    "value": 2.24254
    },
    {
     "tier": "Yami",
-    "value": 2.2371
+    "value": 2.24626
    },
    {
     "tier": "Yume",
-    "value": 2.2371
+    "value": 2.24998
    }
   ],
   "4K REFORM": [
    {
     "tier": "Intro 1",
-    "value": 0.26757
+    "value": 0.26648
    },
    {
     "tier": "Intro 2",
-    "value": 0.56853
+    "value": 0.57172
    },
    {
     "tier": "Intro 3",
-    "value": 0.97276
+    "value": 0.95469
    },
    {
     "tier": "Reform 1",
-    "value": 1.03956
+    "value": 1.00937
    },
    {
     "tier": "Reform 2",
-    "value": 1.11697
+    "value": 1.11323
    },
    {
     "tier": "Reform 3",
-    "value": 1.12417
+    "value": 1.1563
    },
    {
     "tier": "Reform 4",
-    "value": 1.308
+    "value": 1.3133
    },
    {
     "tier": "Reform 5",
-    "value": 1.3962
+    "value": 1.39374
    },
    {
     "tier": "Reform 6",
-    "value": 1.54596
+    "value": 1.54981
    },
    {
     "tier": "Reform 7",
-    "value": 1.57945
+    "value": 1.59107
    },
    {
     "tier": "Reform 8",
-    "value": 1.61124
+    "value": 1.63295
    },
    {
     "tier": "Reform 9",
-    "value": 1.729
+    "value": 1.7054
    },
    {
     "tier": "Reform 10",
-    "value": 1.79331
+    "value": 1.76259
    },
    {
     "tier": "Alpha",
-    "value": 1.90882
+    "value": 1.89899
    },
    {
     "tier": "Beta",
-    "value": 1.94984
+    "value": 1.94889
    },
    {
     "tier": "Gamma",
-    "value": 1.99085
+    "value": 1.9988
    },
    {
     "tier": "Delta",
-    "value": 2.11424
+    "value": 2.16441
    },
    {
     "tier": "Epsilon",
-    "value": 2.3502
+    "value": 2.34219
    },
    {
     "tier": "Zeta",
-    "value": 2.35856
+    "value": 2.40191
    },
    {
     "tier": "Eta",
-    "value": 2.57115
+    "value": 2.59531
    }
   ],
   "4K Vibro": [
    {
     "tier": "Vibro 1",
-    "value": 74.03099
+    "value": 76.20119
    },
    {
     "tier": "Vibro 2",
-    "value": 74.50208
+    "value": 76.61215
    },
    {
     "tier": "Vibro 3",
-    "value": 74.97317
+    "value": 77.02311
    },
    {
     "tier": "Vibro 4",
-    "value": 75.57541
+    "value": 77.52974
    },
    {
     "tier": "Vibro 5",
-    "value": 76.17765
+    "value": 78.03636
    },
    {
     "tier": "Vibro 6",
-    "value": 76.27454
+    "value": 78.30037
    },
    {
     "tier": "Vibro 7",
-    "value": 76.6611
+    "value": 78.67179
    },
    {
     "tier": "Vibro 8",
-    "value": 77.00261
+    "value": 78.98288
    },
    {
     "tier": "Vibro 9",
-    "value": 78.037
+    "value": 80.08692
    },
    {
     "tier": "Vibro 10",
-    "value": 79.50082
+    "value": 81.57193
    },
    {
     "tier": "Vibro O",
-    "value": 80.81842
+    "value": 82.94238
    },
    {
     "tier": "Vibro W",
-    "value": 82.00962
+    "value": 83.7451
    }
   ],
   "6K Regular": [
@@ -300,11 +300,11 @@
    },
    {
     "tier": "10th",
-    "value": 1.77961
+    "value": 1.77913
    },
    {
     "tier": "Extra 1st",
-    "value": 1.83823
+    "value": 1.83799
    },
    {
     "tier": "Extra 2nd",
@@ -312,7 +312,7 @@
    },
    {
     "tier": "Extra 3rd",
-    "value": 1.91077
+    "value": 1.91067
    },
    {
     "tier": "Extra 4th",
@@ -320,151 +320,151 @@
    },
    {
     "tier": "Extra 5th",
-    "value": 2.01033
+    "value": 2.01026
    },
    {
     "tier": "Extra 6th",
-    "value": 2.1165
+    "value": 2.11586
    },
    {
     "tier": "Extra 7th",
-    "value": 2.14574
+    "value": 2.14527
    },
    {
     "tier": "Extra 8th",
-    "value": 2.17745
+    "value": 2.17645
    },
    {
     "tier": "Extra 9th",
-    "value": 2.20916
+    "value": 2.20762
    },
    {
     "tier": "Extra Final",
-    "value": 2.25551
+    "value": 2.25401
    }
   ],
   "7K LN": [
    {
     "tier": "0th",
-    "value": 0.8826
+    "value": 0.89047
    },
    {
     "tier": "1st",
-    "value": 0.97527
+    "value": 1.005
    },
    {
     "tier": "2nd",
-    "value": 1.29102
+    "value": 1.36456
    },
    {
     "tier": "3rd",
-    "value": 1.52353
+    "value": 1.55958
    },
    {
     "tier": "4th",
-    "value": 1.58369
+    "value": 1.62351
    },
    {
     "tier": "5th",
-    "value": 1.66069
+    "value": 1.73897
    },
    {
     "tier": "6th",
-    "value": 1.76748
+    "value": 1.80354
    },
    {
     "tier": "7th",
-    "value": 1.85522
+    "value": 1.89311
    },
    {
     "tier": "8th",
-    "value": 1.90154
+    "value": 1.91604
    },
    {
     "tier": "9th",
-    "value": 1.94917
+    "value": 1.94731
    },
    {
     "tier": "10th",
-    "value": 2.05041
+    "value": 2.03205
    },
    {
     "tier": "Gamma",
-    "value": 2.15535
+    "value": 2.13716
    },
    {
     "tier": "Azimuth",
-    "value": 2.23641
+    "value": 2.24618
    },
    {
     "tier": "Zenith",
-    "value": 2.34841
+    "value": 2.34339
    },
    {
     "tier": "Stellium",
-    "value": 2.48856
+    "value": 2.51125
    }
   ],
   "7K Regular": [
    {
     "tier": "0th",
-    "value": 1.2148
+    "value": 1.16695
    },
    {
     "tier": "1st",
-    "value": 1.33537
+    "value": 1.33456
    },
    {
     "tier": "2nd",
-    "value": 1.53622
+    "value": 1.50899
    },
    {
     "tier": "3rd",
-    "value": 1.58126
+    "value": 1.57949
    },
    {
     "tier": "4th",
-    "value": 1.60028
+    "value": 1.63888
    },
    {
     "tier": "5th",
-    "value": 1.69964
+    "value": 1.69827
    },
    {
     "tier": "6th",
-    "value": 1.74483
+    "value": 1.74938
    },
    {
     "tier": "7th",
-    "value": 1.84877
+    "value": 1.83217
    },
    {
     "tier": "8th",
-    "value": 1.87214
+    "value": 1.87454
    },
    {
     "tier": "9th",
-    "value": 1.93326
+    "value": 1.915
    },
    {
     "tier": "10th",
-    "value": 2.02571
+    "value": 2.05383
    },
    {
     "tier": "Gamma",
-    "value": 2.10479
+    "value": 2.1346
    },
    {
     "tier": "Azimuth",
-    "value": 2.21084
+    "value": 2.21234
    },
    {
     "tier": "Zenith",
-    "value": 2.27625
+    "value": 2.31198
    },
    {
     "tier": "Stellium",
-    "value": 2.44235
+    "value": 2.41531
    }
   ]
  }

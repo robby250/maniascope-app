@@ -54,6 +54,16 @@ VARIANTS = ((0.75, "HT"), (1.0, "NM"), (1.5, "DT"))
 SUPPORTED_KEYS = tuple(range(4, 11))
 
 
+def played_keys(db, n=500, share=.1):
+    """Keymodes holding at least `share` of the player's latest n lazer plays, or () before 20 plays."""
+    rows = [r[0] for r in db.execute("SELECT i.keys FROM scores s JOIN installed i ON i.sha256=s.sha256 "
+                                     "WHERE s.src!='public' ORDER BY s.played DESC LIMIT ?", (n,))
+            if r[0] in SUPPORTED_KEYS]
+    if len(rows) < 20:
+        return ()
+    return tuple(sorted(k for k in set(rows) if rows.count(k) >= share * len(rows)))
+
+
 def normalize_keys(value):
     if value is None or value == "all":
         return SUPPORTED_KEYS
@@ -614,6 +624,14 @@ GAP_BORROW = (5, 6)
 
 def gap_basis(g):
     """Piecewise-linear hats over GAP_KNOTS (clamped beyond the ends), for a float or an array."""
+    if isinstance(g, (float, int)):       # every prediction: plain floats, numpy per scalar cost 30 % of a refit
+        g = min(max(g, GAP_KNOTS[0]), GAP_KNOTS[-1])
+        out = []
+        for i, k in enumerate(GAP_KNOTS):
+            lo = GAP_KNOTS[i-1] if i else k - 1.
+            hi = GAP_KNOTS[i+1] if i + 1 < len(GAP_KNOTS) else k + 1.
+            out.append(min(1., max(0., min((g - lo) / (k - lo), (hi - g) / (hi - k)))))
+        return out
     import numpy as np
     g = np.clip(g, GAP_KNOTS[0], GAP_KNOTS[-1])
     out = []
@@ -624,13 +642,33 @@ def gap_basis(g):
     return out
 
 
+_GAP_MEMBERS = {}
+
+
+def _gap_members():
+    import warmup                         # warmup imports recdata: filled on first use
+    _GAP_MEMBERS.update({p: tuple(warmup.MEMBERS[p]) for p in GAP_FAMILIES},
+                        jacks=("chordjack", "jackspeed", "minijack", "longjack"))
+
+
+def _gap_share(s, part):
+    """Strongest member skill / overall of one part (sk values are already relative to overall)."""
+    if part == "all":
+        return 1.
+    if not _GAP_MEMBERS:
+        _gap_members()
+    best = 0.
+    for x in _GAP_MEMBERS[part]:
+        v = s.get(x, 0.)
+        if v > best:
+            best = v
+    return min(1., best)
+
+
 def gap_shares(f):
     """Share of each GAP_SHARE_PARTS part in a chart (strongest member skill / overall), the weights of its curves."""
-    import warmup
     s = f.get("sk", {})
-    share = lambda members: min(1., max(max(0., s.get(x, 0.)) for x in members))
-    return tuple(share(warmup.MEMBERS[p]) for p in GAP_FAMILIES) + (
-        share(("chordjack", "jackspeed", "minijack", "longjack")), 1.)
+    return tuple(_gap_share(s, p) for p in GAP_SHARE_PARTS)
 
 
 def competence_level(log_ratings):
@@ -646,10 +684,9 @@ def gap_term(pop, f, level):
     k = f["keys"] if f["keys"] in gap else GAP_SHARED if f["keys"] in GAP_BORROW else None
     if k not in gap or level is None:
         return 0.
-    shares = dict(zip(GAP_SHARE_PARTS, gap_shares(f)))
-    mean = means.get(k, {})
+    s, mean = f.get("sk", {}), means.get(k, {})
     hats = gap_basis(math.log(max(.05, f["overall"])) - level)
-    return float(sum((shares.get(p, 0.) - mean.get(p, 0.)) * sum(c * h for c, h in zip(cs, hats))
+    return float(sum((_gap_share(s, p) - mean.get(p, 0.)) * sum(c * h for c, h in zip(cs, hats))
                      for p, cs in gap[k].items()))
 
 
@@ -864,19 +901,29 @@ def load_public():
 
 
 RELEASE_REPO = os.environ.get("MANIASCOPE_RELEASE_REPO", "robby250/maniascope-app")
+RELEASE_URL = os.environ.get("MANIASCOPE_RELEASE_URL", f"https://github.com/{RELEASE_REPO}/releases/latest/download")
 
 
-def fetch_release_public():
-    """Packaged installs: the published population evidence for this exact calculator (derived statistics,
-    never the dump; the owner's own scores are stripped at release). → pub or None."""
+def fetch_release_public(progress=None):
+    """The published population evidence for this exact calculator (derived statistics, never the dump;
+    the owner's own scores are stripped at release). progress(done_bytes, total_bytes) per chunk. → pub."""
     cid = calc_id()
-    url = f"https://github.com/{RELEASE_REPO}/releases/latest/download/public-{cid}.pkl"
+    url = f"{RELEASE_URL}/public-{cid}.pkl"
+    chunks, done = [], 0
     with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "maniascope"}), timeout=60) as resp:
-        data = resp.read()
+        total = int(resp.headers.get("Content-Length") or 0)
+        while chunk := resp.read(1 << 20):
+            chunks.append(chunk)
+            done += len(chunk)
+            if progress:
+                progress(done, total)
+    data = b"".join(chunks)
     pub = pickle.loads(data)
     if pub.get("calc") != cid:
         raise ValueError("published evidence belongs to another calculator")
-    directory = os.path.join(ROLLING, pub["snapshot"])
+    # Versioned beside any personal public.pkl (load_public prefers it): a source install on the
+    # builder's own machines must never have its unstripped evidence replaced by the release copy.
+    directory = os.path.join(ROLLING, pub["snapshot"], "calculators", cid)
     os.makedirs(directory, exist_ok=True)
     tmp = os.path.join(directory, "public.pkl.part")
     with open(tmp, "wb") as fh:

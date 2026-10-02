@@ -57,7 +57,9 @@ PUSH_STEP = .5
 PESSIMISM = 0.25               # model uncertainty shifts the mean (in its sd), never widens the upside
 HALF_LIFE_MONTHS = 12.0
 LEVEL_BW = 4.0                 # months: level drift kernel
+HISTORY_ZONE = .15             # Stats history counts plays at most this far (log stars) below the competence level
 WARMUP_MAX = 3
+COLD_PRIOR = .1     # Σ penalty² the historical cold curve is worth against tracked results (~40 openings at .05)
 EVIDENCE_MODS = {"NF", "HD", "FI", "FL", "MR", "SD", "PF", "DT", "NC", "HT", "DC", "CL", "RD"}
 import paths  # noqa: E402
 LAZER_FILES = os.path.join(paths.lazer_data(), "files")
@@ -312,6 +314,7 @@ class Personal:
         # performances become exact-normal-chart familiarity or retry evidence.
         chart = [r["chart"] + ("|RD" if r.get("rd") else "") for r in rows]
         e = y - base
+        lr_all = np.array([math.log(max(.05, r["f"]["overall"])) for r in rows])
         # stable high scores are bests: shift them by the best-of-several gap measured on lazer attempts
         by = collections.defaultdict(list)
         for i, c in enumerate(chart):
@@ -326,6 +329,7 @@ class Personal:
         w = np.where(src, 0.5, 1.0) * lev * np.where(randomized, .35, 1.)
         self.keys = sorted(k for k, n in collections.Counter(K.tolist()).items() if n >= 30)
         self.level, self.level_var, self.curve, self.sd, self.beta, self.zmean, self.zscale = {}, {}, {}, {}, {}, {}, {}
+        self.monthly = {}                  # keymode → (first month, Σw·e, Σw) of every-play rows (Stats history)
         self.shape_validation = {}
         glob = float(np.average(e, weights=w * w_rec)) if len(e) else 0.0
         self.glob = glob
@@ -342,6 +346,16 @@ class Personal:
             prior = float(np.average(e[s], weights=w[s]))
             curve = (num + 3 * prior) / (den + 3)
             self.curve[k] = (grid[0], curve)
+            # Stats history: every recorded play, month by month. Website/stable bests survive only when
+            # they were good (a 2020 "Azimuth" peak from top-100s), and this curve's 4-month kernel with
+            # stable bests flattened a May peak into a steady rise (user 2026-10-01).
+            own = w[s] * ~src[s]
+            if k in self.levels:
+                # Only maps near the player's limit say where the limit is: 97 % on maps 30 % below it
+                # made an easy month look like the peak (user 2026-10-01).
+                own = own * (lr_all[s] >= self.levels[k] - HISTORY_ZONE)
+            self.monthly[k] = (grid[0], np.bincount(mb - grid[0], own * e[s], minlength=len(grid)),
+                               np.bincount(mb - grid[0], own, minlength=len(grid)))
             L_at[s] = curve[mb - grid[0]]
             self.level[k] = float(curve[-1])
             resid = e[s] - L_at[s]
@@ -689,8 +703,9 @@ class FeatureSource:
                 need.add((r["sha256"], round(r["rate"] or 1.0, 3)))
         return sorted(need)
 
-    def fill(self, pairs, stop=lambda: False, workers=3, chunk=40, cancel=lambda: False):
-        """Compute features in niced worker processes, a chunk at a time (stop() pauses between chunks)."""
+    def fill(self, pairs, stop=lambda: False, workers=3, chunk=40, cancel=lambda: False, progress=None):
+        """Compute features in niced worker processes, a chunk at a time (stop() pauses between chunks).
+        progress(charts_done, charts_total) after each chunk."""
         from multiprocessing import get_context
         by = collections.defaultdict(list)
         for sha, rate in pairs:
@@ -707,6 +722,8 @@ class FeatureSource:
                     time.sleep(2)
                 for sha, res in pool.map(_feat_job, jobs[i:i + chunk]):
                     done += self._store(sha, res)
+                if progress:
+                    progress(min(len(jobs), i + chunk), len(jobs))
         return done
 
     def _store(self, sha, res):
@@ -983,7 +1000,28 @@ class Session:
         values = self._corrections[key]
         return sum(w*values[fam] for fam,w in (profile or warmup.family_weights(f)))
 
+    def cold_scale(self, keys):
+        """Share of the historical cold curve that tracked results still show (user 2026-10-01: first
+        maps ~.05–.1× too easy; G835LX 7K forecasts with .045 / .124 cold penalty came out .15 / .26
+        better than predicted, warm ones .04). Least squares of result on penalty through the warm
+        baseline, prior 1 worth COLD_PRIOR. Recorded penalties are unscaled by their own scale."""
+        key = ('cold_scale', keys)
+        if key not in self._corrections:
+            obs = [(a['cold_penalty'] / (a.get('cold_scale') or 1.), a['y'] - a['base_mu']) for a in self.history_attempts
+                   if a.get('keys') == keys and a['kind'] == 'finish' and a.get('ability_evidence', True)
+                   and a.get('y') is not None and a.get('base_mu') is not None and a.get('cold_penalty') is not None
+                   and (a.get('cold_scale') or 1.) > 0]
+            warm = [e for c, e in obs if c < .02]
+            base = sum(warm) / len(warm) if len(warm) >= 5 else 0.
+            num = sum(c * (e - base) for c, e in obs) + COLD_PRIOR
+            den = sum(c * c for c, _e in obs) + COLD_PRIOR
+            self._corrections[key] = max(0., min(1.5, num / den))
+        return self._corrections[key]
+
     def warmup_penalty(self, keys, skill, seconds=0., f=None, speed_slope=None, response=None, profile=None):
+        return self._historical_cold(keys, skill, seconds, f, speed_slope, response, profile) * self.cold_scale(keys)
+
+    def _historical_cold(self, keys, skill, seconds=0., f=None, speed_slope=None, response=None, profile=None):
         """Historical completed-score curve; no target changes or rate-up bans.
 
         Difficulty/rate comes down to preserve the same ~94% target. The chart's
@@ -1248,23 +1286,36 @@ def history_text(rows):
 # the recommender
 # ---------------------------------------------------------------------------
 class Recommender:
-    def __init__(self, db, pub=None, keys=None):
+    def __init__(self, db, pub=None, keys=None, progress=None):
+        """progress(text, done, total): startup steps a first run waits on (download, fit)."""
         self.db = db
         self._candidate_keys = recdata.normalize_keys(keys)
         self.pub = pub or recdata.load_public()
+        cid = recdata.calc_id()
         stale = self.pub and self.pub.get("pop", {}).get("version", 1) < recdata.POP_VERSION
-        if (not self.pub or stale) and getattr(sys, "frozen", False):
+        # Source installs download too: a Linux git clone has no evidence until it does (friend 2026-10-01
+        # sat at "Loading prediction model"), and after `git pull` its evidence belongs to the old calculator.
+        if not self.pub or self.pub.get("calc") != cid or (stale and getattr(sys, "frozen", False)):
+            def report(done, total, t0=time.monotonic()):
+                if progress:
+                    rate = done / max(1e-3, time.monotonic() - t0)
+                    left = f" · ~{(total - done) / rate:.0f} s left" if total and done < total and rate > 0 else ""
+                    progress(f"Downloading population data (what other players score) · {done / 1e6:.0f}"
+                             + (f" / {total / 1e6:.0f}" if total else "") + f" MB{left}", done, total)
             try:
-                self.pub = recdata.fetch_release_public()
+                self.pub = recdata.fetch_release_public(report)
             except (OSError, ValueError, pickle.UnpicklingError) as exc:
                 if not self.pub:   # older evidence still works; only a missing one is fatal
-                    raise RuntimeError(f"could not download the population evidence from {recdata.RELEASE_REPO} ({exc})")
+                    raise RuntimeError(f"could not download the population data from {recdata.RELEASE_REPO} "
+                                       f"({exc}); check the internet connection and restart ManiaScope")
         if not self.pub:
-            raise RuntimeError("no public evidence yet (recdata.py build on the machine with the dump, then copy rec/rolling)")
-        if self.pub.get("calc") != recdata.calc_id():
+            raise RuntimeError("no population data yet; restart ManiaScope while online to download it")
+        if self.pub.get("calc") != cid:
             # its skill features mean something else (or lack skills): never mix them with this calculator's
-            raise RuntimeError(f"public evidence was built by another calculator ({self.pub.get('calc')}, now "
-                               f"{recdata.calc_id()}): rebuild with recdata.py build and copy rec/rolling")
+            raise RuntimeError(f"the population data belongs to another ManiaScope version ({self.pub.get('calc')}, "
+                               f"now {cid}) and none is published for this one yet; update with git pull")
+        if progress:
+            progress("Fitting your prediction model to your scores…", 0, 0)
         recdata.import_public_user(db, self.pub)
         self.refit()
 
@@ -1654,7 +1705,40 @@ class Recommender:
             c['title'] = f"{metadata.get('Artist', '')} - {metadata.get('Title', '')} [{metadata.get('Version', '')}]"
         if ranked:
             c.update(pp_estimates(e, f, b, self.ledger))
+        c["plays_like"] = plays_like(self.pub.get("pop_lazer") or self.pub["pop"], f, b, rate)
         return c
+
+
+def plays_like(pop, f, b, rate, min_scores=30, min_shift=.05):
+    """(stars, scores) the public scores say a chart plays like at this rate — its stars moved by its
+    map effect — or None with few scores or a shift under min_shift (user 2026-10-01: Aim Burst 12.5★
+    has 98 % top scores; the same players score 92 % on a 12.5★ Camellia map)."""
+    if b is None:
+        return None
+    mb, n = pop["mbr"].get((b, round(rate, 3)), pop["mb"].get(b, (0., 0)))
+    if n < min_scores:
+        return None
+    # Invert the whole link (slope·x + curve·(x − knee)²), not the slope alone: above the knee the
+    # link is ~3× steeper at 9★, and slope-only turned Chinmoku [Midnight Symphony] 1.5× (displayed
+    # 9.2★, mb −.17) into "plays like 7.4★" where the full link gives 8.9★ (user 2026-10-02).
+    k = f["keys"]
+    s = pop["slope"].get(k, pop["slope"][0])
+    c = pop.get("curve", {}).get(k, pop.get("curve", {}).get(0, 0.))
+    knee = math.log(pop.get("curve_knee", 4.))
+    g = lambda x: s * x + c * max(0., x - knee) ** 2
+    lr = math.log(max(.05, f["overall"]))
+    target = g(lr) + mb                                 # more misses = harder
+    if target <= g(knee) or c <= 0:
+        x = target / s                                  # the link is linear below the knee
+    else:
+        x = knee + (-s + math.sqrt(s * s + 4 * c * (target - s * knee))) / (2 * c)
+    ratio = math.exp(x - lr)
+    if abs(ratio - 1) < min_shift:
+        return None
+    # The card shows display stars; scale the rating before the display conversion, not after it.
+    shown = dict(f, overall=f["overall"] * ratio,
+                 **({"preunit_overall": f["preunit_overall"] * ratio} if "preunit_overall" in f else {}))
+    return score_units.displayed_feature(shown), int(n)
 
 
 def pp_estimates(e, f, bid, ledger):
@@ -1752,7 +1836,7 @@ class Predictor:
             out.update({'display_'+k:expected[k] for k in accuracy_targets.FIELDS})
             # PP means/spreads remain untouched; playlist quality and displayed
             # intervals use the directly fitted display target.
-            out.update({k:expected[k] for k in ('acc_mid','acc_lo','acc_hi','opening_acc','activation_minutes',
+            out.update({k:expected[k] for k in ('acc_mid','acc_lo','acc_hi','opening_acc','activation_minutes','cold_scale',
                                                'rate_slope','sd_model','warmup_tau')})
         return out
 
@@ -1785,7 +1869,7 @@ class Predictor:
         # the full-map prediction, but also expose the opening-state estimate
         # so the playlist can reject an overly hard cold opening.
         opening = session.warmup_penalty(f['keys'], skill, 0., f,slope,response,cached[3])
-        return {"mu": mu, "base_mu": base_mu, "cold_penalty": cold,
+        return {"mu": mu, "base_mu": base_mu, "cold_penalty": cold, "cold_scale": session.cold_scale(f['keys']),
                 "activation_minutes":session.activation_for(f,cached[3]),
                 "warmup_tau":self.model.warmup.parameters(f['keys'])['tau'] if hasattr(self.model,'warmup') else 6.,
                 "opening_acc": shown(mu + max(0., opening-cold)),
@@ -1811,6 +1895,7 @@ class Worker(threading.Thread):
         self.playlists = {m: [] for m in MODES}
         self._playlist_consumed = collections.deque(maxlen=20)
         self.nps_focus = .5
+        self.web_bias = {"nps": .5, "skills": .5}
         self.acc_targets = {"nps": .94, "skills": .94}
         self._selection_id = 0
         self.practice_skills = ()
@@ -1828,6 +1913,7 @@ class Worker(threading.Thread):
         self._replay_retries = 0
         self._replay_thread = None
         self._import_thread = None
+        self._fill_thread, self._learning, self._first_import = None, None, False
         self._refit_due = False
         self._nps_prediction_context, self._nps_predictions = None, {}
         self._local_pool_cache = {}
@@ -1851,9 +1937,18 @@ class Worker(threading.Thread):
             self._queued_config_revision = max(self._queued_config_revision, task[4])
         self.q.put(task)
 
+    def _stage(self, text, done=0, total=0, blocking=False):
+        """What startup is waiting on: the status line, its progress bar, and the selected map's card."""
+        self._loading = text
+        self.emit({"type": "status", "text": text or "", "progress": (done, total) if total else None,
+                   "blocking": blocking})
+        if not self.rec and getattr(self, "_sel", (None,))[0]:
+            self._card()
+
     def run(self):
         self.db = recdata.connect()
-        self.emit({"type": "status", "text": "recommendations: restoring saved history…"})
+        self._first_import = self.db is not None and recdata.kv_get(self.db, 'realm_import') is None
+        self._stage("Opening your saved plays and recommendations…")
         try:
             # The UI queues its real tab/filters before start(). Honour them
             # before launching any invisible local-playlist work.
@@ -1874,7 +1969,7 @@ class Worker(threading.Thread):
                 # new objects still receive normal cycle collection.
                 gc.collect()
                 gc.freeze()
-            self.rec = Recommender(self.db, public, keys=self.keys['pp'])
+            self.rec = Recommender(self.db, public, keys=self.keys['pp'], progress=self._stage)
             self.generation += 1
             import nps
             self.builder = nps.Builder(lambda kind, data: self.put("nps_update", kind, data), self.busy)
@@ -1882,10 +1977,11 @@ class Worker(threading.Thread):
             self._restore_local(self.mode)
             self._request_nps()
             self._publish()
-            threading.Thread(target=self._fill, daemon=True, name="features").start()
+            self._start_fill()
+            self._stage(None)
         except Exception as exc:
             traceback.print_exc()
-            self.emit({"type": "status", "text": f"recommendations unavailable: {str(exc)[:120]}"})
+            self._stage(f"Recommendations unavailable: {str(exc)[:240]}", blocking=True)
         self._begin_import()
         while not self._halt.is_set():
             if self._refit_due and not self.busy():
@@ -1949,8 +2045,18 @@ class Worker(threading.Thread):
         if error:
             self.emit({"type": "status", "text": "Replay archive pending: " + error})
 
+    def _start_fill(self):
+        """One background analysis at a time; an import that brings new plays starts another."""
+        if self._fill_thread is None or not self._fill_thread.is_alive():
+            if self._first_learning():
+                self._learning = "Checking which of your played charts still need analysing…"
+            self._fill_thread = threading.Thread(target=self._fill, daemon=True, name="features")
+            self._fill_thread.start()
+
     def _fill(self):
-        """Features for the user's own charts that the public table lacks (custom rates, unranked maps)."""
+        """Features for the user's own charts that the public table lacks (custom rates, unranked maps).
+        A first run imports thousands of plays after this started once with none (fresh install
+        2026-10-02: 5,632 chart/rates never analysed, so PP suggested 4K Beginner maps to a 7K player)."""
         db = recdata.connect()
         try:
             fs = FeatureSource(db, self.rec.pub)
@@ -1958,15 +2064,36 @@ class Worker(threading.Thread):
             need += fs.missing([{"sha256": i["sha256"], "md5": i["md5"], "beatmap_id": None, "rate": r}
                                 for i in self.rec.newer_ranked() for r, _v in recdata.VARIANTS])
             if need:
-                self.emit({"type": "status", "text": f"analysing {len(need)} of your charts in the background…"})
-                fs.fill(need, stop=self.busy, workers=1, chunk=1, cancel=self._halt.is_set)
+                t0, refits, first = time.monotonic(), [0], self._first_learning()
+
+                def progress(done, total):
+                    rate = done / max(1e-3, time.monotonic() - t0)
+                    left = (total - done) / rate if rate > 0 else 0
+                    eta = f" · ~{left / 60:.0f} min left" if left >= 90 else f" · ~{left:.0f} s left" if left > 0 else ""
+                    text = (f"Analysing the charts you have played, to learn your level · {done:,} / {total:,} charts{eta}"
+                            if first else f"Analysing {total:,} new or updated maps in the background · {done:,} done{eta}")
+                    self._learning = text if first else None
+                    self.emit({"type": "status", "text": text, "progress": (done, total)})
+                    # Only while the level is unknown: each refit restarts the NPS/Skills build.
+                    if first and done - refits[0] >= max(200, total // 5) and done < total:
+                        refits[0] = done
+                        self.put("refit")           # suggestions sharpen while the rest is analysed
+                progress(0, len({sha for sha, _r in need}))
+                fs.fill(need, stop=self.busy, workers=3 if first else 1, chunk=12,
+                        cancel=self._halt.is_set, progress=progress)
+                self._learning = None
                 self.put("refit")
                 self.emit({"type": "status", "text": ""})
         except Exception:
             traceback.print_exc()
             self.emit({"type": "status", "text": "Some score analyses could not be completed; available recommendations are kept"})
         finally:
+            self._learning = None
             db.close()
+
+    def _first_learning(self):
+        """Nothing known about the player yet: analyse with more workers (it is all they wait for)."""
+        return not self.rec or len(self.rec.rows) < 30
 
     def _daily_check(self):
         last = recdata.kv_get(self.db, "snapshot_check", {}).get("t", 0)
@@ -1990,6 +2117,8 @@ class Worker(threading.Thread):
     def _publish(self, mode=None):
         if not self.rec or self._stats_visible:
             return
+        if len(self.rec.rows) < 30 and (self._learning or self._first_import):
+            return          # the player's level is still unknown: an empty list says why, not beginner maps
         for mode in (mode or self.mode,):
             phase, shown, note = self._pool(mode)
             shown = self._prepared_playlist(mode, shown)
@@ -2045,6 +2174,10 @@ class Worker(threading.Thread):
     def t_publish(self):
         self._publish()
 
+    def t_web_updated(self):
+        """A crawl published more website charts: rebuild NPS/Skills so they can be suggested now."""
+        self._request_nps()
+
     def _pool(self, mode):
         session = self._session()
         if not self.keys[mode]:
@@ -2073,11 +2206,13 @@ class Worker(threading.Thread):
                 self._taste_cache = (event_id, nps.taste(self.db))
             taste = self._taste_cache[1]
         weighted = self._local_weights.get(mode)
-        if weighted is None or weighted[0] is not session or weighted[1] is not candidates or weighted[2] is not taste:
-            choices = nps.weighted_candidates(candidates, session, self.keys[mode], taste, mode=mode)
-            self._local_weights[mode] = (session, candidates, taste, choices)
+        web = nps.web_factor(self.web_bias[mode])
+        if weighted is None or weighted[0] is not session or weighted[1] is not candidates or weighted[2] is not taste \
+                or weighted[3] != web:
+            choices = nps.weighted_candidates(candidates, session, self.keys[mode], taste, mode=mode, web=web)
+            self._local_weights[mode] = (session, candidates, taste, web, choices)
         else:
-            choices = weighted[3]
+            choices = weighted[4]
         consumed = set(self._playlist_consumed)
         available = [c for c in choices if event_key(c) not in consumed] or choices
         if mode == 'nps':
@@ -2087,17 +2222,28 @@ class Worker(threading.Thread):
             shown = pp_playlist.preview(available, 20, seed, focus=self.nps_focus)
         else:
             shown = available[:20]
-        note = f"target ~94% · 0.70–1.50× · {st['analyzed']:,}/{st['total']:,} charts analysed"
+        note = f"target ~{100 * self.acc_targets.get(mode, .94):.0f}% · 0.70–1.50×"
+        if not st["total"]:
+            note += " · no maps of these keymodes found yet"
+        elif st["analyzed"] < st["total"]:
+            note += (f" · {st['analyzed']:,} of {st['total']:,} maps analysed so far; "
+                     "the rest are analysed a few at a time while you use this playlist")
+        else:
+            note += f" · all {st['total']:,} maps analysed"
+        missing = sum(not c.get("installed", True) for c in shown)
+        if missing:
+            note += f" · {missing} of {len(shown)} not installed"
         if mode == "skills":
             note = skill_practice.label(self.practice_skills) + " · " + note
         if not shown:
-            note += " · analysing/refining suitable rates" if st["analyzed"] < st["total"] else " · no credible choices at this state"
+            note += (" · looking for maps that fit your target…" if st["analyzed"] < st["total"]
+                     else " · no map fits your accuracy target at 0.70–1.50× (try another target or keymode)")
         if st["failed"]:
             note += f" · {st['failed']} unavailable analyses"
         if st["error"]:
             note += " · " + st["error"]
         if st.get("restored"):
-            note += " · cached exact-rate shortlist ready; checking catalogue in background"
+            note += " · showing the last list while it updates"
         return session.phase(), shown, note
 
     def _prepare_local(self, mode, st, session):
@@ -2230,7 +2376,7 @@ class Worker(threading.Thread):
                 self._publish(mode)
 
     def t_configure(self, mode, keys_by_mode, action="auto", revision=0, practice_skills=None, nps_focus=None,
-                    acc_targets=None):
+                    acc_targets=None, web_bias=None):
         # Fast clicks need one search for the final selection, not a full
         # catalogue pass for every intermediate checkbox state. Other queued
         # events (including scores and gameplay) keep their original ordering.
@@ -2247,6 +2393,10 @@ class Worker(threading.Thread):
             if focus != self.nps_focus:
                 self.nps_focus = focus
                 self.playlists['nps'] = []
+        for m, value in (web_bias or {}).items():
+            if m in self.web_bias and value != self.web_bias[m]:
+                self.web_bias[m] = value
+                self.playlists[m] = []
         retarget = False
         for m, value in (acc_targets or {}).items():
             import nps
@@ -2330,7 +2480,7 @@ class Worker(threading.Thread):
                           difficulty=score_units.displayed_feature(f) if f else None,
                           expected=exp.get("acc_mid"), expected_lo=exp.get("acc_lo"), expected_hi=exp.get("acc_hi"),
                           shown_mu=exp.get("mu"),
-                          **{k: v for k, v in exp.items() if k in ("mu", "base_mu", "cold_penalty", "activation_minutes", "opening_acc", "rate_slope", "sd", "sdm", "keys", "skill", "ranked", "length", "md5",
+                          **{k: v for k, v in exp.items() if k in ("mu", "base_mu", "cold_penalty", "cold_scale", "activation_minutes", "opening_acc", "rate_slope", "sd", "sdm", "keys", "skill", "ranked", "length", "md5",
                               "display_mu","display_base_mu","display_cold_penalty","display_sdm","display_sda","display_sd")})
         self._current = key
 
@@ -2459,7 +2609,7 @@ class Worker(threading.Thread):
             except OSError:
                 self.emit({"type": "card", "c": None, "note": "Selected chart file is unavailable", "path":path, "rate":rate})
         else:
-            self.emit({"type":"card", "c":None, "note":"Loading prediction model…" if path else None,
+            self.emit({"type":"card", "c":None, "note":(getattr(self, "_loading", None) or "Loading prediction model…") if path else None,
                        "path":path, "rate":rate})
 
     def t_next(self, skip=False, mode=None, revision=None, candidate=None, result=None, selected_at=None, selection_id=0):
@@ -2627,7 +2777,8 @@ class Worker(threading.Thread):
         if self._import_thread is not None and self._import_thread.is_alive():
             return
         path=self.db.execute('PRAGMA database_list').fetchone()[2]
-        self.emit({"type":"status","text":"Using saved history · checking lazer changes in the background…"})
+        self.emit({"type":"status","text":"Reading your osu!lazer scores and installed maps (first time: about a minute)…"
+                   if self._first_import else "Using saved history · checking lazer for new plays in the background…"})
         def run():
             db=None
             try:
@@ -2667,14 +2818,22 @@ class Worker(threading.Thread):
         self._begin_import()
 
     def t_imported(self, result, recovered, changed, error=None):
+        first, self._first_import = self._first_import, False
+        if error and first:
+            self._stage(f"Could not read your osu!lazer scores: {error}", blocking=True)
+            return
         if error:
             self.emit({"type":"status","text":"Saved recommendations retained; lazer import pending: "+error})
             return
-        self.emit({"type": "status", "text": f"imported {result['new']} new plays · {recovered} predictions recovered"})
+        self.emit({"type": "status", "text": (f"Read {result['new']:,} new plays and {result['installed']:,} installed maps from osu!lazer"
+                                               if result['new'] else f"Up to date with osu!lazer ({result['installed']:,} maps)")
+                   + (f" · {recovered} predictions recovered" if recovered else "")})
         if result["new"] or recovered:
             rows = play_history(self.db, limit=1)
             if rows:
                 self.emit({"type": "result", "title": rows[0]["title"], "text": history_text(rows)})
+        if result['new'] and self.rec:
+            self._start_fill()          # before the refit: its publish must already know the level is pending
         if result['new'] or recovered or changed:
             self.t_refit()
 

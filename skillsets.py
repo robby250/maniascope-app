@@ -210,6 +210,16 @@ def analyze(path, rate, sv=True, *, cancelled=None):
 # ---------------------------------------------------------------------------
 # Observing lazer: tosu first, log tail as the rate-less fallback.
 # ---------------------------------------------------------------------------
+def _size(n):
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
+
+
+def _duration(s):
+    m = int(s // 60)
+    return ("under a minute" if m < 1 else f"{m} min" if m < 60 else
+            f"{m // 60} h {m % 60} min" if m < 1440 else f"{m // 1440} d {m // 60 % 24} h")
+
+
 class LazerWatcher(threading.Thread):
     """Emits an observation dict whenever the selection/rate/connection changes.
 
@@ -273,13 +283,13 @@ class LazerWatcher(threading.Thread):
                 d = json.load(resp)
         except urllib.error.HTTPError:
             return {"source": "tosu", "path": None, "rate": None,
-                    "note": "tosu is running but has not found osu!lazer"}
+                    "note": "Waiting for osu!lazer: start it and select a mania map"}
         except (OSError, ValueError):
             return None   # tosu not reachable → log fallback
         try:
             if d.get("error") or "beatmap" not in d:
                 return {"source": "tosu", "path": None, "rate": None,
-                        "note": "tosu is running but has not found osu!lazer"}
+                        "note": "Waiting for osu!lazer: start it and select a mania map"}
             self._track(d["state"]["name"].lower(), d)
             if d["state"]["name"] == "resultScreen":
                 self._note_score(d)
@@ -467,6 +477,11 @@ def card_markup(c, nps_mode=False, skills_mode=False, note=None):
     if skills_mode:
         pp = "Whole-map prediction · regular skill practice"
     skill = skill_calc.NAMES.get(c.get("skill"), c.get("skill") or "")
+    if c.get("plays_like"):
+        stars, n = c["plays_like"]
+        # User 2026-10-02 could not tell whose stars or whose scores ("7.4* osu SR? or our SR?").
+        pp = (pp + "\n" if pp else "") + (f"Top-1000 players score on it like a {stars:.1f}★ map "
+                                          f"(ManiaScope ★, their best of {n:,} scores at {c.get('rate', 1.):.2f}×)")
     return ("<small>SELECTED IN OSU!</small>\n" + _map_markup(c)
             + f"\n<b>Expected {acc}</b>"
             + f"\n<small>{c.get('rate', 1.):.2f}× · {m}:{sec:02d} · {GLib.markup_escape_text(skill)}</small>"
@@ -481,10 +496,14 @@ class ManiaScopeWindow(Gtk.Window):
         if self._rec_mode not in recommend.MODES:
             self._rec_mode = "pp"
         self._rec_keys = {"pp": recdata.normalize_keys(ui.get("pp_keys")),
-                          "nps": recdata.normalize_keys(ui.get("nps_keys", [7])),
-                          "skills": recdata.normalize_keys(ui.get("skills_keys", [7]))}
+                          "nps": recdata.normalize_keys(ui.get("nps_keys") if ui.get("nps_keys") is not None else [7]),
+                          "skills": recdata.normalize_keys(ui.get("skills_keys") if ui.get("skills_keys") is not None else [7])}
+        # Never chosen: follow the keymodes actually played (7K until the lazer history is imported).
+        self._keys_auto = {m for m in ("nps", "skills") if ui.get(f"{m}_keys") is None}
+        self._key_checks, self._keys_syncing = {}, False
         self._practice_skills = skill_practice.normalize(ui.get("practice_skills"))
         self._nps_focus = nps_playlist.normalize_focus(ui.get("nps_focus", .5))
+        self._web_bias = {m: nps_playlist.normalize_focus((ui.get("web_bias") or {}).get(m, .5)) for m in ("nps", "skills")}
         self._acc_targets = {m: nps_playlist.normalize_target(ui.get(f"{m}_acc_target", nps_playlist.DEFAULT_TARGET))
                              for m in ("nps", "skills")}
         self._display = dict(DISPLAY_DEFAULTS, **{k: v for k, v in (ui.get("display") or {}).items()
@@ -518,10 +537,18 @@ class ManiaScopeWindow(Gtk.Window):
         self._req_cv = threading.Condition()
         self._save_timer = 0
         self._tosu_proc = None
+        self._web_proc = self._web_win = None
+        self._web_polling = False
         self._tosu_tried = 0.0
         self._live = None           # playback position (ms) while lazer is in gameplay
         self._context = ""
         self.tracking_db = recdata.connect()
+        if self._keys_auto and recdata.played_keys(self.tracking_db):
+            for m in self._keys_auto:
+                self._rec_keys[m] = recdata.played_keys(self.tracking_db)
+            self._keys_auto = set()
+        elif self._keys_auto:
+            GLib.timeout_add_seconds(15, self._auto_keys)
 
         bar = Gtk.HeaderBar(show_close_button=True)
         bar.set_custom_title(Gtk.Box())   # no title text: the controls need the width
@@ -649,6 +676,7 @@ class ManiaScopeWindow(Gtk.Window):
         self.rec = recommend.Worker(lambda m: GLib.idle_add(self._on_rec, m), busy=lambda: self._live is not None)
         self._sync_rec()
         self.rec.start()
+        self._native_build()
         self.watcher = LazerWatcher(lambda o: GLib.idle_add(self._on_obs, o),
                                     lambda s: GLib.idle_add(self._on_status, s),
                                     lambda t: GLib.idle_add(self._on_progress, t),
@@ -805,79 +833,238 @@ class ManiaScopeWindow(Gtk.Window):
             widget.set_no_show_all(True)
             widget.set_visible(bool(self._display[key]))
 
-    def _recommended_stars(self):
-        """Nomod ★ range covering the player's recent plays at the usual 0.9–1.2× rates, or None."""
+    def _recommended_stars(self, keys):
+        """osu! ★ range (1.0×) covering the player's recent plays in these keymodes at 0.9–1.2×, or None."""
         try:
             rows = self.tracking_db.execute(
                 "SELECT info FROM events WHERE kind='start' ORDER BY id DESC LIMIT 400").fetchall()
         except Exception:
             return None
         stars = sorted(f["stars"] for f in ((json.loads(r[0]).get("features") or {}) for r in rows)
-                       if f.get("stars") and f.get("keys") in self._rec_keys["nps"])
+                       if f.get("stars") and f.get("keys") in keys)
+        if len(stars) < 30:
+            # A new install has no tracked starts yet: its imported lazer plays say the same thing.
+            calc = recdata.calc_id()
+            plays = self.tracking_db.execute(
+                "SELECT f.data FROM scores s JOIN feats f ON f.key = s.sha256 || '@' || printf('%.3f', s.rate) || '|' || ? "
+                "WHERE s.src != 'public' AND s.rate BETWEEN .9 AND 1.2 ORDER BY s.played DESC LIMIT 400", (calc,))
+            stars = sorted(f["stars"] for f in (json.loads(r[0]) for r in plays) if f.get("stars") and f.get("keys") in keys)
         if len(stars) < 30:
             return None
         lo, hi = stars[len(stars) // 10], stars[len(stars) * 9 // 10]
         return round(lo / 1.2 * 2) / 2, round(hi / .9 * 2) / 2
 
     def _web_charts_row(self):
-        """Settings → website charts: download chart text for maps you don't have, by nomod ★ range."""
+        """Settings → its own window, so size, time and progress are visible before and during a download."""
+        self.web_btn = Gtk.Button(label="Website charts…")
+        self.web_btn.set_tooltip_text("Add maps you don't have to the playlists (chart text only, no audio).")
+        self.web_btn.connect("clicked", lambda _b: self._web_window())
+        return self.web_btn
+
+    def _web_run(self, command, keys, stars=None):
+        argv = ([sys.executable, "--webmaps"] if getattr(sys, "frozen", False)
+                else [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "webmaps.py")])
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        self._web_proc = subprocess.Popen(
+            argv + [command, "--keys", ",".join(map(str, keys))] + (["--stars", "%g-%g" % stars] if stars else []),
+            stdout=open(os.path.join(CACHE_DIR, "webmaps.log"), "w"), stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self._web_poll()
+
+    def _web_window(self):
         import webmaps
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        row = Gtk.Box(spacing=6)
-        row.pack_start(Gtk.Label(label="Website charts ★"), False, False, 0)
-        saved = None
+        if self._web_win:
+            self._web_win.present()
+            return
+        win = self._web_win = Gtk.Window(title="ManiaScope — Website charts", transient_for=self, default_width=480)
+        win.connect("destroy", lambda _w: setattr(self, "_web_win", None))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        win.add(box)
+        intro = Gtk.Label(xalign=0, wrap=True, max_width_chars=60, label=(
+            "Downloads the chart text (no audio) of maps you don't have from osu.direct, analyses it and adds "
+            "those maps to the NPS and Skills playlists; Next then offers the download in osu!. Runs at low "
+            "priority. Pause any time; closing ManiaScope pauses it and Resume continues where it stopped."))
+        box.pack_start(intro, False, False, 0)
         try:
-            saved = webmaps._kv(webmaps._db(), "stars")
+            db = webmaps._db()
+            saved, saved_keys = webmaps._kv(db, "stars"), webmaps._kv(db, "want_keys")
+            db.close()
         except Exception:
-            pass
-        recommended = self._recommended_stars()
-        lo_v, hi_v = saved or recommended or (5., 10.)
+            saved = saved_keys = None
+        keys_row = Gtk.Box(spacing=6)
+        keys_row.pack_start(Gtk.Label(label="Keymodes"), False, False, 0)
+        checks = {}
+        for k in recdata.SUPPORTED_KEYS:
+            checks[k] = Gtk.CheckButton(label=f"{k}K", active=k in (saved_keys or set(self._rec_keys["nps"]) |
+                                                                     set(self._rec_keys["skills"])))
+            keys_row.pack_start(checks[k], False, False, 0)
+        box.pack_start(keys_row, False, False, 0)
+        row = Gtk.Box(spacing=6)
+        row.pack_start(Gtk.Label(label="osu! ★ at 1.0×"), False, False, 0)
+        selected = lambda: tuple(k for k, b in checks.items() if b.get_active())
+        recommended = self._recommended_stars(selected())
         spins = []
-        for value in (lo_v, hi_v):
+        for value in saved or recommended or (5., 10.):
             spin = Gtk.SpinButton(adjustment=Gtk.Adjustment(value=value, lower=0, upper=15, step_increment=.5),
                                   digits=1, numeric=True)
+            spin.connect("value-changed", lambda _s: self._web_poll())
             spins.append(spin)
             row.pack_start(spin, False, False, 0)
-        button = Gtk.Button(label="Download / update")
-        row.pack_end(button, False, False, 0)
+        hint = Gtk.Label()
+        row.pack_start(hint, False, False, 0)
         box.pack_start(row, False, False, 0)
-        note = Gtk.Label(xalign=0, wrap=True, max_width_chars=54)
-        note.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
-        note.set_text((f"Recommended from your plays: {recommended[0]:g}–{recommended[1]:g}★. " if recommended else "")
-                      + "Only chart text (no audio) for maps you don't have; runs in the background at low priority.")
-        box.pack_start(note, False, False, 0)
-        log = os.path.join(CACHE_DIR, "webmaps.log")
 
-        def poll():
-            proc = self._web_proc
+        def keys_changed(b=None):
+            r = self._recommended_stars(selected())
+            hint.set_text(f"(your plays suggest {r[0]:g}–{r[1]:g})" if r else "")
+            if b:
+                self._web_poll()
+        for b in checks.values():
+            b.connect("toggled", keys_changed)
+        keys_changed()
+        summary = Gtk.Label(xalign=0, wrap=True, selectable=True, max_width_chars=60,
+                            label="Counting the charts in this range…")
+        box.pack_start(summary, False, False, 0)
+        bar = Gtk.ProgressBar(show_text=True, no_show_all=True)
+        box.pack_start(bar, False, False, 0)
+        buttons = Gtk.Box(spacing=6)
+        check = Gtk.Button(label="Check for new charts")
+        go = Gtk.Button(label="Start", sensitive=False)
+        buttons.pack_end(go, False, False, 0)
+        buttons.pack_end(check, False, False, 0)
+        box.pack_start(buttons, False, False, 0)
+        self._web_view = dict(spins=spins, checks=checks, selected=selected, summary=summary, bar=bar, check=check, go=go, state=None)
+        check.connect("clicked", lambda _b: self._web_run("check", selected()))
+
+        def clicked(_b):
+            if self._web_view["state"] == "running":
+                open(os.path.join(webmaps.WEB_DIR, "stop"), "w").close()      # pauses after the current chart
+            else:
+                self._web_run("crawl", selected(), tuple(sorted(s.get_value() for s in spins)))
+        go.connect("clicked", clicked)
+        win.show_all()
+        self._web_poll()
+
+    def _web_poll(self):
+        """Read the crawl's progress off the UI thread; repeats while a crawl runs or the window is open."""
+        if self._web_polling:
+            return
+        self._web_polling = True
+        view = self._web_win and self._web_view
+        stars = tuple(sorted(s.get_value() for s in view["spins"])) if view else None
+        keys = set(view["selected"]()) if view else set()
+
+        def work():
+            import webmaps
             try:
-                with open(log, encoding="utf-8", errors="replace") as fh:
-                    last = (fh.read().strip().splitlines() or [""])[-1]
-            except OSError:
-                last = ""
-            if proc is not None and proc.poll() is None:
-                note.set_text("Website charts: " + last[:90])
-                return True
-            note.set_text("Website charts: done — restart ManiaScope to use them" if proc and proc.returncode == 0
-                          else f"Website charts stopped: {last[:90]}")
-            button.set_sensitive(True)
-            return False
+                db = webmaps._db()
+                run = webmaps.running()
+                info = dict(progress=webmaps._kv(db, "progress") or {}, running=run, disk=webmaps.disk_bytes(),
+                            estimate=webmaps.estimate(db, keys, stars) if view and not run else None)
+                p = info["progress"]
+                if info["running"] and p.get("fetch_total") is not None:
+                    info["left"] = webmaps.seconds(db, p["fetch_total"] - p.get("fetched", 0),
+                                                   p["analyse_total"] - p.get("analysed", 0))
+                    info["done"] = 1 - info["left"] / max(1., webmaps.seconds(db, p["fetch_total"], p["analyse_total"]))
+                db.close()
+            except Exception as exc:
+                info = dict(error=f"{type(exc).__name__}: {exc}")
+            GLib.idle_add(self._web_show, info)
+        threading.Thread(target=work, daemon=True).start()
 
-        def start(_b):
-            lo, hi = sorted(s.get_value() for s in spins)
-            keys = ",".join(str(k) for k in self._rec_keys["nps"]) or "7"
-            argv = ([sys.executable, "--webmaps"] if getattr(sys, "frozen", False)
-                    else [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "webmaps.py")])
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            self._web_proc = subprocess.Popen(
-                argv + ["crawl", "--keys", keys, "--stars", f"{lo:g}-{hi:g}"], stdout=open(log, "w"),
-                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            button.set_sensitive(False)
-            GLib.timeout_add_seconds(5, poll)
-        self._web_proc = None
-        button.connect("clicked", start)
-        return box
+    def _web_show(self, info):
+        self._web_polling = False
+        if self._closed:
+            return False
+        p, est = info.get("progress", {}), info.get("estimate")
+        run = info.get("running")
+        if p.get("ready", 0) != getattr(self, "_web_ready", None):
+            if getattr(self, "_web_ready", None) is not None:
+                self.rec.put("web_updated")      # new website charts join the open playlist without a restart
+            self._web_ready = p.get("ready", 0)
+        done = max(0., info.get("done", 0.))
+        self.web_btn.set_label(f"Website charts… {100 * done:.0f}%" if run and p.get("phase") != "check"
+                               else "Website charts… paused" if p.get("phase") in ("paused", "failed") else "Website charts…")
+        view = self._web_view if self._web_win else None
+        if view:
+            summary, bar, go, check = view["summary"], view["bar"], view["go"], view["check"]
+            if "error" in info:
+                summary.set_text("Could not read the website chart state: " + info["error"])
+            elif run and p.get("phase") == "check":
+                summary.set_text(f"Checking osu.direct: {p.get('sets', 0):,} map sets listed so far "
+                                 "(the first check reads the whole mania listing, about 15–30 min).")
+                bar.pulse()
+                bar.set_text("checking")
+            elif run:
+                summary.set_text(
+                    f"Downloaded {p.get('fetched', 0):,} of {p.get('fetch_total', 0):,}, analysed "
+                    f"{p.get('analysed', 0):,} of {p.get('analyse_total', 0):,}. "
+                    f"{p.get('ready', 0):,} charts are in the playlist already "
+                    f"(the first after 300, then in batches).\nAbout {_duration(info.get('left', 0))} left · "
+                    f"{_size(info['disk'])} on disk now.")
+                bar.set_fraction(min(1., done))
+                bar.set_text(f"{100 * done:.0f}%")
+            else:
+                lines = []
+                if p.get("phase") == "failed":
+                    lines.append(f"Stopped with an error: {p.get('error')}. Resume retries.")
+                elif p.get("phase") == "paused":
+                    lines.append("Paused.")
+                if est["unlisted"]:
+                    lines.append(f"{recdata.keys_label(est['unlisted'])} not listed yet. Start first reads osu.direct's "
+                                 "mania listing (about 15–30 min the first time, seconds after that), then downloads; "
+                                 "Check only reads the listing, to see the size first.")
+                if not view["selected"]():
+                    lines.append("Pick at least one keymode.")
+                elif est["fetch"] or est["analyse"]:
+                    lines.append(f"To do: {est['fetch']:,} charts to download (about {_size(est['new_bytes'])}) "
+                                 f"and {est['analyse']:,} to analyse, about {_duration(est['seconds'])} on this PC.")
+                    lines.append(f"On disk now {_size(est['disk'])}, afterwards about "
+                                 f"{_size(est['disk'] + est['new_bytes'])}. {est['ready']:,} charts in this range "
+                                 "are in the playlist already.")
+                elif not est["unlisted"]:
+                    lines.append(f"Up to date: {est['ready']:,} charts in this range are in the playlist, "
+                                 f"{_size(est['disk'])} on disk.")
+                if est["checked"]:
+                    lines.append(f"Listing checked {_duration(time.time() - est['checked'])} ago.")
+                summary.set_text("\n".join(lines))
+            bar.set_visible(bool(run))
+            for w in view["spins"] + list(view["checks"].values()):
+                w.set_sensitive(not run)
+            view["state"] = "running" if run else None
+            go.set_label("Pause" if run else "Resume" if p.get("phase") in ("download", "analyse", "paused", "failed")
+                         else "Start")
+            # Start lists unchecked keymodes itself: a first run needs no separate Check (fresh install).
+            go.set_sensitive(bool(run or (est and (est["fetch"] or est["analyse"] or est["unlisted"]))))
+            check.set_sensitive(not run and bool(view["selected"]()))
+        proc = self._web_proc
+        if view or run or (proc and proc.poll() is None):
+            GLib.timeout_add_seconds(2, lambda: (self._web_poll(), False)[1])
+        return False
+
+    def _web_bias_row(self, mode):
+        """Settings: how often this tab suggests website charts (maps you don't have) next to your own."""
+        row = Gtk.Box(spacing=8)
+        row.pack_start(Gtk.Label(label="Maps you don't have"), False, False, 0)
+        value = Gtk.Label(width_chars=14, xalign=0)
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0., 1., .05)
+        scale.set_draw_value(False)
+        scale.set_value(self._web_bias[mode])
+        scale.set_tooltip_text("Website charts (Settings → Website charts…). Middle: judged like your own maps, so "
+                               "a small library gets mostly downloads and a big one mostly its own. Left end: never.")
+        def changed(s, initial=False):
+            v = round(s.get_value() * 20) / 20
+            f = nps_playlist.web_factor(v)
+            value.set_text("never" if not f else "same as yours" if abs(f - 1) < .01
+                           else f"×{f:.1f} as often" if f > 1 else f"×{f:.2f} as often")
+            if not initial and v != self._web_bias[mode]:
+                self._web_bias[mode] = v
+                self._sync_rec()
+        scale.connect("value-changed", changed)
+        changed(scale, True)
+        row.pack_start(scale, True, True, 0)
+        row.pack_end(value, False, False, 0)
+        return row
 
     def _acc_target_row(self, mode):
         """Settings: the displayed-accuracy target this tab's picks aim at."""
@@ -900,6 +1087,30 @@ class ManiaScopeWindow(Gtk.Window):
         row.pack_end(value, False, False, 0)
         return row
 
+    def _native_build(self):
+        """Source installs: build the compiled calculator in the background when it is missing or stale
+        (after setup or a git pull). Pure Python makes every map switch ~2.5× slower (friend 2026-10-01)."""
+        if native_backend.CALCULATOR is not None or getattr(sys, "frozen", False):
+            return
+        say = lambda text: self._on_rec({"type": "status", "text": text, "pin": "native"})
+        import importlib.util
+        if not (importlib.util.find_spec("Cython") and importlib.util.find_spec("setuptools")):
+            say("Slow mode: map switching is ~2.5× slower without the compiled calculator. "
+                "Run ./setup.sh once to enable it.")
+            return
+        say("Building the fast calculator in the background (one-time, about 1–2 min)…")
+        proc = subprocess.Popen(["nice", "-n", "10", sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "native_backend.py")],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+        def wait():
+            err = proc.communicate()[1]
+            if proc.returncode:
+                print(err[-3000:], flush=True)
+            GLib.idle_add(say, "Fast calculator ready: restart ManiaScope to switch maps ~2.5× faster."
+                          if proc.returncode == 0 else
+                          "Could not build the fast calculator (see run.log); running in slow mode.")
+        threading.Thread(target=wait, daemon=True).start()
+
     def _recs_window(self):
         """Its own window, so the main one can stay an OBS source: selected-map card, pick, list."""
         win = self.recs = Gtk.Window(title="ManiaScope — Next", default_width=self._recs_size[0],
@@ -916,6 +1127,10 @@ class ManiaScopeWindow(Gtk.Window):
         self.rec_status.get_style_context().add_class("dim-label")
         self.rec_status.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
         box.pack_end(self.rec_status, False, False, 0)
+        # A first run waits minutes (download, analysis): it must show what and how far, never just "loading".
+        self.rec_progress = Gtk.ProgressBar(no_show_all=True)
+        box.pack_end(self.rec_progress, False, False, 0)
+        self._rec_pinned = {}              # lines later statuses must not hide: why nothing loads, slow mode
         self.result_lbl = Gtk.Label(xalign=0, wrap=True, no_show_all=True)
         box.pack_start(self.result_lbl, False, False, 0)
         self._rec_notebook = Gtk.Notebook()
@@ -934,6 +1149,8 @@ class ManiaScopeWindow(Gtk.Window):
             settings.pack_start(top, False, False, 0)
             if mode in self._acc_targets:
                 settings.pack_start(self._acc_target_row(mode), False, False, 0)
+            if mode in self._web_bias:
+                settings.pack_start(self._web_bias_row(mode), False, False, 0)
             if mode == "nps":
                 preference = Gtk.Box(spacing=8)
                 preference.pack_start(Gtk.Label(label="Variety"), False, False, 0)
@@ -947,6 +1164,7 @@ class ManiaScopeWindow(Gtk.Window):
                 preference.pack_end(Gtk.Label(label="High NPS"), False, False, 0)
                 settings.pack_start(preference, False, False, 0)
                 settings.pack_start(self._web_charts_row(), False, False, 0)
+                GLib.idle_add(self._web_poll)      # a paused download shows on the button after a restart
             if mode == "skills":
                 skill_row = Gtk.Box(spacing=8)
                 skill_row.pack_start(Gtk.Label(label="Skills", xalign=0), False, False, 0)
@@ -962,10 +1180,16 @@ class ManiaScopeWindow(Gtk.Window):
             sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
             listing = Gtk.ListBox(activate_on_single_click=True)
             listing.connect("row-activated", lambda _l, row, m=mode: self._activate_rec(m, row))
+            placeholder = Gtk.Label(label="Nothing to suggest yet.", wrap=True, max_width_chars=50,
+                                    justify=Gtk.Justification.CENTER, margin=24)
+            placeholder.get_style_context().add_class("dim-label")
+            placeholder.show()
+            listing.set_placeholder(placeholder)
             status = Gtk.Label(xalign=0, wrap=True, max_width_chars=54)
             status.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
             view = {"list": listing, "target": target, "note": note, "keys": key_btn,
-                    "status": status, "hover": False, "pending": None, "ready": False, "target_data": None}
+                    "status": status, "hover": False, "pending": None, "ready": False, "target_data": None,
+                    "placeholder": placeholder}
             self._rec_views[mode] = view
             sw.connect("enter-notify-event", lambda *_a, m=mode: self._rec_hover(m, True))
             sw.connect("leave-notify-event", lambda *_a, m=mode: self._rec_hover(m, False))
@@ -992,7 +1216,24 @@ class ManiaScopeWindow(Gtk.Window):
             self.stats_view.update(msg["data"])
         elif msg["type"] == "status":
             view = self._rec_views.get(msg.get("mode"))
-            (view["status"] if view else self.rec_status).set_text(msg["text"])
+            if view:
+                view["status"].set_text(msg["text"])
+                return False
+            if msg.get("pin"):
+                self._rec_pinned[msg["pin"]] = msg["text"]
+            elif msg.get("blocking"):
+                self._rec_pinned["blocker"] = msg["text"]
+            # A later import/replay note must not hide why there are no recommendations at all.
+            text = "\n".join(dict.fromkeys(t for t in (*self._rec_pinned.values(), msg["text"]) if t))
+            self.rec_status.set_text(text)
+            done, total = msg.get("progress") or (0, 0)
+            self.rec_progress.set_visible(bool(total))
+            if total:
+                self.rec_progress.set_fraction(min(1., done / total))
+            for v in self._rec_views.values():
+                v["placeholder"].set_text("Nothing to suggest yet." + (f"\n\n{text}" if text else ""))
+            if not self.next_btn.get_sensitive():   # a greyed-out Next says what it waits for
+                self.next_btn.set_tooltip_text(text or None)
         elif msg["type"] == "pool":
             mode = msg.get("mode", "pp")
             if (msg.get("revision", 0) != self._rec_revision or mode not in self._rec_views
@@ -1038,10 +1279,9 @@ class ManiaScopeWindow(Gtk.Window):
         pop.add(box)
         all_btn = Gtk.Button(label="All supported modes (4K–10K)")
         box.pack_start(all_btn, False, False, 0)
-        checks = {}
-        changing = [False]
+        checks = self._key_checks[mode] = {}
         def changed(_button):
-            if not changing[0]:
+            if not self._keys_syncing:
                 self._set_rec_keys(mode, [k for k, b in checks.items() if b.get_active()])
         for k in recdata.SUPPORTED_KEYS:
             b = Gtk.CheckButton(label=f"{k}K", active=k in self._rec_keys[mode])
@@ -1049,10 +1289,6 @@ class ManiaScopeWindow(Gtk.Window):
             box.pack_start(b, False, False, 0)
             b.connect("toggled", changed)
         def all_keys(_button):
-            changing[0] = True
-            for b in checks.values():
-                b.set_active(True)
-            changing[0] = False
             self._set_rec_keys(mode, recdata.SUPPORTED_KEYS)
         all_btn.connect("clicked", all_keys)
         box.show_all()
@@ -1082,8 +1318,20 @@ class ManiaScopeWindow(Gtk.Window):
         view["note"].set_text("Finding " + skill_practice.label(selected) + " maps at your current level…")
         self._sync_rec()
 
+    def _auto_keys(self):
+        """Until the first lazer import lands (or the player picks), recheck what they play."""
+        played = not self._closed and self._keys_auto and recdata.played_keys(self.tracking_db)
+        for m in sorted(self._keys_auto) if played else ():
+            self._set_rec_keys(m, played)
+        return bool(self._keys_auto) and not self._closed
+
     def _set_rec_keys(self, mode, keys):
         self._rec_keys[mode] = recdata.normalize_keys(keys)
+        self._keys_auto.discard(mode)
+        self._keys_syncing = True              # the picker shows keymodes set from outside it too
+        for k, b in self._key_checks.get(mode, {}).items():
+            b.set_active(k in self._rec_keys[mode])
+        self._keys_syncing = False
         if mode == "skills":
             self.practice_btn.set_keys(self._rec_keys[mode])
             self._skill_checks, self._any_skill_btn = self.practice_btn.checks, self.practice_btn.any_button
@@ -1140,7 +1388,7 @@ class ManiaScopeWindow(Gtk.Window):
         if hasattr(self, "rec"):
             self.rec.put("configure", self._rec_mode, {k: list(v) for k, v in self._rec_keys.items()},
                          self._next_action, self._rec_revision, list(self._practice_skills), self._nps_focus,
-                         dict(self._acc_targets))
+                         dict(self._acc_targets), dict(self._web_bias))
         self._next_sensitive()
         self._queue_save()
 
@@ -1232,6 +1480,8 @@ class ManiaScopeWindow(Gtk.Window):
             return
         for row in view["list"].get_children():
             view["list"].remove(row)
+        if msg["shown"]:
+            self._rec_pinned.pop("blocker", None)
         phase = {"warmup": "Session: warming up", "build": "Session: warmed up",
                  "push": "Session: strong form", "recover": "Session: easing off"}[msg["phase"]]
         view["note"].set_text(f"{phase}{' · ' + msg['note'] if msg['note'] else ''}")
@@ -1364,9 +1614,9 @@ class ManiaScopeWindow(Gtk.Window):
                 json.dump({"mode": "auto" if self._auto else "manual",
                            "recommendation_mode": self._rec_mode, "next_action": self._next_action,
                            "auto_next": self._auto_next,
-                           "pp_keys": list(self._rec_keys["pp"]), "nps_keys": list(self._rec_keys["nps"]),
-                           "skills_keys": list(self._rec_keys["skills"]), "practice_skills": list(self._practice_skills),
-                           "nps_focus": self._nps_focus,
+                           "pp_keys": list(self._rec_keys["pp"]), "nps_keys": None if "nps" in self._keys_auto else list(self._rec_keys["nps"]),
+                           "skills_keys": None if "skills" in self._keys_auto else list(self._rec_keys["skills"]), "practice_skills": list(self._practice_skills),
+                           "nps_focus": self._nps_focus, "web_bias": self._web_bias,
                            "nps_acc_target": self._acc_targets["nps"], "skills_acc_target": self._acc_targets["skills"],
                            "display": self._display,
                            "rate": self._manual_rate,   # observed rates are never persisted
@@ -1397,6 +1647,9 @@ class ManiaScopeWindow(Gtk.Window):
         self._save_ui()
         if self._tosu_proc and self._tosu_proc.poll() is None:
             self._tosu_proc.terminate()
+        if self._web_proc and self._web_proc.poll() is None:      # paused, not killed: Resume continues
+            import webmaps
+            open(os.path.join(webmaps.WEB_DIR, "stop"), "w").close()
         self.recs.destroy()
 
     # ---- rate / selection state ------------------------------------------
@@ -1680,7 +1933,7 @@ class ManiaScopeWindow(Gtk.Window):
         spans = []
         for e in entries:
             r = e["rating"] / entries[0]["rating"]
-            f = (r - 0.3) / 0.7
+            f = min(1., (r - 0.3) / 0.7)        # a later entry can outrate the first (Bracket over Delay): alpha caps at 100 %
             spans.append(f'<span size="{70 + 55 * f:.0f}%" alpha="{55 + 45 * f:.0f}%"'
                          f'{' weight="bold"' if r >= 0.85 else ""}>{e["name"]} {e["rating"]:.1f}</span>')
         tip = [f'{e["name"]}: {" + ".join(names[p] for p in e["parts"])}' for e in entries if len(e["parts"]) > 1]
@@ -1765,7 +2018,7 @@ class ManiaScopeWindow(Gtk.Window):
             if self._auto and obs["path"]:
                 text += " · showing 1.00×, set the rate manually"
         else:
-            text = obs["note"] + " — or Open a .osu"
+            text = obs["note"] + " (or ☰ → Open .osu…)"
         if self._shown and self._shown[2] and self._shown[2].keys != 7:
             text += "  ·  7K-first calibration"
         self.status.set_text(text)

@@ -111,6 +111,8 @@ def ladder(series_anchors):
 def detected(c):
     if c["series"] == "4K Vibro":
         return c["vibro"]["share"] >= dans.VIBRO_SHARE
+    if int(c["keys"]) == 4 and c["vibro"]["share"] >= dans.VIBRO_ONLY:
+        return False                    # shown as vibro alone at runtime
     return dans.SERIES.get((int(c["keys"]), dans.kind(c["ln"]))) == c["series"]
 
 

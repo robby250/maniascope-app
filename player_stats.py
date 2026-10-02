@@ -33,7 +33,7 @@ def _capacity(model, f, target_y):
     # calibrated difficulty coordinate is inverted. Unseen-chart predictions
     # omit an individual map's learned affinity/public residual.
     lo, hi = math.log(.1), math.log(60.)
-    for _ in range(24):
+    for _ in range(18):                     # 6.4 / 2^19: 0.001 % of the rating
         mid = (lo+hi)/2
         candidate = dict(f, overall=math.exp(mid))
         mu = model.predict(candidate, "profile:unseen", None, 1.)[0]
@@ -46,6 +46,28 @@ def _capacity(model, f, target_y):
     upper = model.predict(dict(f, overall=value*1.01), "profile:unseen", None, 1.)[0]
     slope = max(.25, (upper-lower)/math.log(1.01/.99))
     return value, slope
+
+
+HISTORY_BW = 1.0      # months: Gaussian smoothing of the monthly history (a peak month stays visible)
+
+
+def _history(model, keys, overall, support=20.):
+    """[(month, ability)]: today's overall ability moved by how much better or worse each month's recorded
+    plays went against their predictions (fewer misses → higher). Lazer keeps every play; website/stable
+    top-100s keep only bests and are left out, so a new install shows little or no history. Months
+    with less than `support` (smoothed) plays are left out."""
+    if overall.get("value") is None or keys not in getattr(model, "monthly", {}):
+        return []
+    start, se, sw = model.monthly[keys]
+    d = np.arange(len(sw))[:, None] - np.arange(len(sw))[None, :]
+    ker = np.exp(-.5 * (d / HISTORY_BW) ** 2)
+    num, den = ker @ se, ker @ sw
+    months = [i for i in range(len(sw)) if den[i] >= support and sw[i] > 0]
+    if not months:
+        return []
+    level = {i: num[i] / den[i] for i in months}
+    now = level[months[-1]]                 # the latest played month is today's ability
+    return [(int(start) + i, overall["value"] * math.exp((now - level[i]) / overall["slope"])) for i in months]
 
 
 def build(rec):
@@ -69,11 +91,14 @@ def build(rec):
                 charts[row["chart"]] = row
         floor = float(np.percentile([r["f"]["overall"] for r in charts.values()], 65))*.6 if charts else 0.
         representatives = [r for r in charts.values() if r["f"]["overall"] >= floor]
+        # Each chart's display numbers once, not once per skill group it belongs to.
+        factor = {r["chart"]: score_units.feature_display_factor(r["f"]) for r in representatives}
+        shown = {r["chart"]: score_units.displayed_feature(r["f"]) for r in representatives}
         groups = {}
         capacities = {}
         for group in ("overall", *skill_practice.dimensions(keys)):
             relevant = [r for r in representatives if group == "overall" or
-                        group in skill_practice.match(r["f"], [group])[1]]
+                        group in skill_practice.demanded(r["f"])]
             newest = max((r.get("ts") or 0 for r in relevant), default=0)
             count = len(relevant)
             if count < 3 or keys not in model.keys:
@@ -92,7 +117,7 @@ def build(rec):
                 values.append(value); slopes.append(slope)
                 # Ability has no single chart shape; use the same representative
                 # sample's median display correction, leaving its fitted value intact.
-                display_factors.append(score_units.feature_display_factor(row['f']))
+                display_factors.append(factor[row['chart']])
                 weights.append(.5**(max(0., model.now-row["t"])/12.))
             value = _quantile(values, weights)
             slope = _quantile(slopes, weights)
@@ -117,13 +142,15 @@ def build(rec):
                              "maps": count, "plays": sum(r["chart"] in members for r in rows),
                              "newest": newest, "confidence": confidence,
                              "references": len(chosen), "examples": examples,
-                             "tested_to": max(score_units.displayed_feature(r['f']) for r in relevant)}
+                             "tested_to": max(shown[r['chart']] for r in relevant)}
             if value > highest*1.35:
                 # Easy/near-perfect historical scores do not identify the
                 # player's limit. Do not present a huge extrapolated rating as
                 # a measured 5K/9K strength merely because the solver found it.
                 groups[group].update(value=None, confidence="Limit not measured", extrapolated=True)
-        result[keys] = {"keys": keys, "groups": groups, "maps": len(charts), "plays": len(rows),
+        history = _history(model, keys, groups.get("overall", {}))
+        result[keys] = {"keys": keys, "groups": groups, "history": history,
+                        "peak": max(history, key=lambda h: h[1]) if history else None, "maps": len(charts), "plays": len(rows),
                         "special": {"mash_maps": sum(r["f"].get("sk", {}).get("mash", 0.) >= .3 for r in charts.values())}}
     # Only frozen pre-play predictions can support a model-error diagnosis.
     # Collapse retries by exact chart, and require several charts before a label.
@@ -166,5 +193,11 @@ def current(profile, session):
                 if field in row:
                     row[field] = score_units.displayed_value(row[field], keys, factor=row.get('display_factor', 1.))
             page["groups"][group] = row
+        factor = old["groups"].get("overall", {}).get("display_factor", 1.)
+        shown = lambda v: score_units.displayed_value(v, keys, factor=factor)
+        page["history"] = [(m, shown(v)) for m, v in old.get("history", ())]
+        page["peak"] = (old["peak"][0], shown(old["peak"][1])) if old.get("peak") else None
+        # Before a session is warm the session marker only shows the cold start, not the player's form.
+        page["session"] = session.activation(keys) >= 1.5
         pages[keys] = page
     return {"target": TARGET, "pages": pages, "phase": session.phase()}
