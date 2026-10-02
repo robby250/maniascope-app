@@ -15,8 +15,9 @@ def session(z, keys=7):
 
 
 def test_pp_pool_has_no_top25_or_gain_relative_floor():
-    cands=[dict(_cand(i,.03+(i%10)*.01),acc_mid=.985,pp_mid=105.) for i in range(1,151)]
+    cands=[dict(_cand(i,.13+(i%10)*.01),acc_mid=.985,pp_mid=105.) for i in range(1,151)]
     cands.append(dict(_cand(1000,40.),acc_mid=.985,pp_mid=180.))
+    cands.append(dict(_cand(2000,.05),acc_mid=.985,pp_mid=105.))     # under the .1pp floor
     r=_FakeRec(cands);s=R.Session([],1000)
     _,shown,_,note=r.pool(s,rng=random.Random(4))
     assert len(shown)==20 and len(r.pp_choices)==151
@@ -170,3 +171,8 @@ def test_ht_is_offered_only_as_a_likely_improvement():
     likely,unlikely=offers(.03),offers(.043)
     assert likely and likely[0][0]==.75 and likely[0][1]>=.5
     assert unlikely==[]           # a 12–50% HT long shot is no longer offered
+    old=R.HT_MIN_GAIN;R.HT_MIN_GAIN=1e9
+    try:
+        assert offers(.03)==[]    # a likely HT that gains under the floor is not offered either
+    finally:
+        R.HT_MIN_GAIN=old

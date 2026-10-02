@@ -79,14 +79,14 @@ def preview(rows, count, seed, focus=0.):
 
 
 def prepare(rec, candidates, session):
-    from recommend import event_key, reason
+    from recommend import MIN_GAIN, event_key, reason
     rows = []
     k0 = session.current_keys() or rec.home_keys()
     ledger = getattr(rec, 'ledger', None)
     floor = float(ledger.P[99]) if ledger is not None and len(ledger.P)>=100 else 0.
     for source in candidates:
         c = dict(source)
-        if not c["ranked"] or c["gain"] <= .001 or c["sd_model"] >= 1. or c.get("p_up", 0.) < .12:
+        if not c["ranked"] or c["gain"] < MIN_GAIN or c["sd_model"] >= 1. or c.get("p_up", 0.) < .12:
             continue
         keys, skill = c["keys"], c.get("skill")
         acc = c.get("acc_mid", 1.)

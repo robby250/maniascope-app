@@ -45,6 +45,8 @@ SESSION_GAP = 50 * 60          # seconds without gameplay that start a new sessi
 ATT_SD = 1.0                   # attempt spread inflation over the within-chart residual sd (retro: 1.0 covers 83 %)
 QUANTS = (np.arange(21) + 0.5) / 21
 HT_MIN_P_UP = .5
+HT_MIN_GAIN = 5.      # pp: HT only for a real gain, at least an even chance (user 2026-10-03)
+MIN_GAIN = .1         # pp: below this expected gain a PP map is not worth offering (user 2026-10-03; was .001)
 # Push is a weighted up-down staircase (Kaernbach 1991), no threshold (user 2026-10-01):
 # a beaten PP-offered best is one step up; a PP attempt that neither beats its best nor
 # meets the prediction, or any clearly bad play, is PUSH_DOWN steps down. The walk
@@ -1502,7 +1504,7 @@ class Recommender:
         sustainable = chal <= ceiling
         credible = sustainable & (p_up >= np.where(normal, .12, .25))
         # The user dislikes HT: offer it only as a likely improvement (2026-09-30).
-        credible &= (A["rate"] >= 1.) | (p_up >= HT_MIN_P_UP)
+        credible &= (A["rate"] >= 1.) | ((p_up >= HT_MIN_P_UP) & (gain >= HT_MIN_GAIN))
         # The first play in an unactivated keymode is a comfortable probe. A
         # long 7K session never authorises cold 10K DT through global warmup.
         cold = {k: session.activation(k) < 1.5 for k in recdata.SUPPORTED_KEYS}
@@ -1542,7 +1544,7 @@ class Recommender:
         # A comfortable zero-gain variant must not hide another variant which
         # passes readiness and offers a real gain. Keep the former only as a
         # possible warmup when no useful variant of that chart exists.
-        order = np.lexsort(((A["rate"] != 1.0).astype(int), -variant_value, -(gain>.001).astype(int)))
+        order = np.lexsort(((A["rate"] != 1.0).astype(int), -variant_value, -(gain>=MIN_GAIN).astype(int)))
         order = order[credible[order]]
         seen, out = set(), []
         for ix in order:
