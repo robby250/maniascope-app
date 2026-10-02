@@ -9,6 +9,8 @@ export WINEPREFIX="$W/prefix" WINEDEBUG=-all
 C="$WINEPREFIX/drive_c"
 run() { wine "$@" </dev/null >"$W/dl/last.log" 2>&1 || { tail -20 "$W/dl/last.log"; exit 1; }; }  # a pipe would wait for wineserver
 cd "$W/dl"
+# Initialise the prefix before anything creates drive_c (else "could not load kernel32.dll"); no Mono/Gecko prompt.
+[ -e "$WINEPREFIX/system.reg" ] || { WINEDLLOVERRIDES="mscoree,mshtml=" wineboot -i </dev/null >/dev/null 2>&1; wineserver -w; }
 [ -e "$C/py/python.exe" ] || { curl -sLo py.nupkg https://www.nuget.org/api/v2/package/python/3.14.0
   rm -rf nug && mkdir nug && (cd nug && unzip -q ../py.nupkg) && mkdir -p "$C" && cp -r nug/tools "$C/py"; }
 [ -d "$C/gtk" ] || { curl -sLo gtk.zip https://github.com/wingtk/gvsbuild/releases/download/2026.8.0/GTK3_Gvsbuild_2026.8.0_x64.zip
