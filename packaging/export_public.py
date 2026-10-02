@@ -40,9 +40,11 @@ def main(dest):
         os.makedirs(os.path.dirname(os.path.join(dest, rel)) or dest, exist_ok=True)
         shutil.copy2(os.path.join(ROOT, rel), os.path.join(dest, rel))
     shutil.copy2(os.path.join(ROOT, "packaging", "PUBLIC_README.md"), os.path.join(dest, "README.md"))
-    # Pushing workflow files needs the "workflow" token scope, so the private repo keeps it as a template.
-    os.makedirs(os.path.join(dest, ".github", "workflows"), exist_ok=True)
-    shutil.copy2(os.path.join(ROOT, "packaging", "windows-workflow.yml"), os.path.join(dest, ".github", "workflows", "windows.yml"))
+    # Pushing workflow files needs the "workflow" token scope (this machine's token lacks it; the 0.3.0
+    # push was refused), so only refresh a workflow the public repo already has.
+    workflow = os.path.join(dest, ".github", "workflows", "windows.yml")
+    if os.path.exists(workflow):
+        shutil.copy2(os.path.join(ROOT, "packaging", "windows-workflow.yml"), workflow)
     # CI checks the frozen identity against the one whose public-<calc>.pkl this machine publishes.
     sys.path.insert(0, ROOT)
     import recdata

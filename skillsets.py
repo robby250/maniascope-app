@@ -1120,7 +1120,8 @@ class ManiaScopeWindow(Gtk.Window):
         win.connect("delete-event", lambda *_: (self.recs_btn.set_active(False), True)[1])
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
         win.add(box)
-        self.card_lbl = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        # Selectable for copying, but not focusable: the first focus selected the whole card text.
+        self.card_lbl = Gtk.Label(xalign=0, wrap=True, selectable=True, can_focus=False)
         self.card_lbl.set_markup("<small>select a map in lazer</small>")
         box.pack_start(self.card_lbl, False, False, 0)
         self.rec_status = Gtk.Label(xalign=0, wrap=True)
