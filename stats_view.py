@@ -138,6 +138,28 @@ class HistoryChart(Gtk.DrawingArea):
         return False
 
 
+class WaitBanner(Gtk.Box):
+    """What a tab still waits for, with a bar: a first run must never look finished or stuck."""
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4, no_show_all=True)
+        self.text = Gtk.Label(xalign=0, wrap=True, max_width_chars=60)
+        self.text.get_style_context().add_class("dim-label")
+        self.bar = Gtk.ProgressBar()
+        self.pack_start(self.text, False, False, 0)
+        self.pack_start(self.bar, False, False, 0)
+
+    def show_progress(self, text, done=0, total=0):
+        """None hides it."""
+        if not text:
+            self.hide()
+            return
+        self.text.set_text(text)
+        self.bar.set_fraction(min(1., done / total) if total else 0.)
+        self.bar.set_visible(bool(total))
+        self.text.show()
+        self.show()
+
+
 class StatsView(Gtk.Box):
     def __init__(self, practice):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
@@ -155,6 +177,8 @@ class StatsView(Gtk.Box):
         label.get_style_context().add_class("dim-label")
         top.pack_start(label, True, True, 0)
         self.pack_start(top, False, False, 0)
+        self.wait = WaitBanner()
+        self.pack_start(self.wait, False, False, 0)
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=3)
         scroll.add(self.body); self.pack_start(scroll, True, True, 0)
@@ -176,7 +200,7 @@ class StatsView(Gtk.Box):
         for child in self.body.get_children():
             child.destroy()
         if self.data is None:
-            self.body.pack_start(self.label("Reading your score history… (it appears here as soon as your plays are read and analysed; progress is shown at the bottom)"), False, False, 0)
+            self.body.pack_start(self.label("Reading your score history… (it appears here as soon as your plays are read and analysed; progress is shown above)"), False, False, 0)
             self.body.show_all()
             return
         pages = self.data["pages"]

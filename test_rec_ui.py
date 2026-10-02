@@ -52,6 +52,17 @@ def test_tabs_keys_clipboard_and_persistence():
                 assert not w.next_btn.get_sensitive()
                 w._on_rec(pool(w._rec_revision))
                 assert w.next_btn.get_sensitive() and w.next_btn.get_label() == "Next · NPS"
+                # First learning shows on every tab and on Stats, with a bar; then a playlist's own analysis.
+                w._on_rec(dict(type='status', text='Analysing…', progress=(30, 120), learning=True))
+                for v in w._rec_views.values():
+                    assert v['wait'].get_visible() and abs(v['wait'].bar.get_fraction() - .25) < 1e-9
+                assert w.stats_view.wait.get_visible() and '30 / 120' in w.stats_view.wait.text.get_text()
+                w._on_rec(dict(type='status', text='', learning=False))
+                assert not w.stats_view.wait.get_visible() and not w._rec_views['pp']['wait'].get_visible()
+                w._on_rec(dict(pool(w._rec_revision), progress=(5, 50)))
+                assert '5 / 50' in w._rec_views['nps']['wait'].text.get_text() and w._rec_views['nps']['wait'].get_visible()
+                w._on_rec(pool(w._rec_revision))
+                assert not w._rec_views['nps']['wait'].get_visible()
                 q = 'artist="Cosmo"! title="Cyber Shaman"! diff="Local difficulty"! cs=7'
                 # Fake worker never drains its queue: Next must still navigate.
                 with patch.object(ui.recdata, 'local_file', return_value=local):

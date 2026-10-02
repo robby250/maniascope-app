@@ -1183,6 +1183,9 @@ class ManiaScopeWindow(Gtk.Window):
             note = Gtk.Label(xalign=0, wrap=True, max_width_chars=54)
             note.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
             page.pack_start(note, False, False, 0)
+            from stats_view import WaitBanner
+            wait = WaitBanner()
+            page.pack_start(wait, False, False, 0)
             sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
             listing = Gtk.ListBox(activate_on_single_click=True)
             listing.connect("row-activated", lambda _l, row, m=mode: self._activate_rec(m, row))
@@ -1195,7 +1198,7 @@ class ManiaScopeWindow(Gtk.Window):
             status.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
             view = {"list": listing, "target": target, "note": note, "keys": key_btn,
                     "status": status, "hover": False, "pending": None, "ready": False, "target_data": None,
-                    "placeholder": placeholder}
+                    "placeholder": placeholder, "wait": wait, "learning": None, "analysing": None}
             self._rec_views[mode] = view
             sw.connect("enter-notify-event", lambda *_a, m=mode: self._rec_hover(m, True))
             sw.connect("leave-notify-event", lambda *_a, m=mode: self._rec_hover(m, False))
@@ -1233,6 +1236,16 @@ class ManiaScopeWindow(Gtk.Window):
             text = "\n".join(dict.fromkeys(t for t in (*self._rec_pinned.values(), msg["text"]) if t))
             self.rec_status.set_text(text)
             done, total = msg.get("progress") or (0, 0)
+            if "learning" in msg:          # first learning gates every tab, not just the footer
+                eta = msg["text"].rpartition(" · ~")[2] if " · ~" in msg["text"] else ""
+                learning = (f"Learning your level from your plays · {done:,} / {total:,} charts analysed"
+                            + (f" · ~{eta}" if eta else "") if msg["learning"] and total else None)
+                for v in self._rec_views.values():
+                    v["learning"] = (learning + " — suggestions appear and sharpen as this runs", done, total) \
+                        if learning else None
+                    self._show_wait(v)
+                self.stats_view.wait.show_progress(learning and learning + " — your stats fill in as this runs",
+                                                   done, total)
             self.rec_progress.set_visible(bool(total))
             if total:
                 self.rec_progress.set_fraction(min(1., done / total))
@@ -1479,6 +1492,10 @@ class ManiaScopeWindow(Gtk.Window):
             self._start_tosu()
         return True
 
+    @staticmethod
+    def _show_wait(view):
+        view["wait"].show_progress(*(view["learning"] or view["analysing"] or (None,)))
+
     def _flush_pool(self, mode):
         view = self._rec_views[mode]
         msg, view["pending"] = view["pending"], None
@@ -1491,6 +1508,10 @@ class ManiaScopeWindow(Gtk.Window):
         phase = {"warmup": "Session: warming up", "build": "Session: warmed up",
                  "push": "Session: strong form", "recover": "Session: easing off"}[msg["phase"]]
         view["note"].set_text(f"{phase}{' · ' + msg['note'] if msg['note'] else ''}")
+        done, total = msg.get("progress") or (0, 0)
+        view["analysing"] = ((f"Maps analysed for this playlist · {done:,} / {total:,} (more are analysed "
+                              "a few at a time while you use it)", done, total) if total else None)
+        self._show_wait(view)
         view["note"].set_tooltip_text(msg["summary"])
         for c in msg["shown"]:
             m, sec = divmod(int(c["length"]), 60)

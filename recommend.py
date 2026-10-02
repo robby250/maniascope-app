@@ -2073,7 +2073,7 @@ class Worker(threading.Thread):
                     text = (f"Analysing the charts you have played, to learn your level · {done:,} / {total:,} charts{eta}"
                             if first else f"Analysing {total:,} new or updated maps in the background · {done:,} done{eta}")
                     self._learning = text if first else None
-                    self.emit({"type": "status", "text": text, "progress": (done, total)})
+                    self.emit({"type": "status", "text": text, "progress": (done, total), "learning": first})
                     # Only while the level is unknown: each refit restarts the NPS/Skills build.
                     if first and done - refits[0] >= max(200, total // 5) and done < total:
                         refits[0] = done
@@ -2086,10 +2086,11 @@ class Worker(threading.Thread):
                         cancel=self._halt.is_set, progress=progress)
                 self._learning = None
                 self.put("refit")
-                self.emit({"type": "status", "text": ""})
+                self.emit({"type": "status", "text": "", "learning": False})
         except Exception:
             traceback.print_exc()
-            self.emit({"type": "status", "text": "Some score analyses could not be completed; available recommendations are kept"})
+            self.emit({"type": "status", "text": "Some score analyses could not be completed; available recommendations are kept",
+                       "learning": False})
         finally:
             self._learning = None
             db.close()
@@ -2125,8 +2126,11 @@ class Worker(threading.Thread):
         for mode in (mode or self.mode,):
             phase, shown, note = self._pool(mode)
             shown = self._prepared_playlist(mode, shown)
+            st = {"nps": self.nps_state, "skills": self.skills_state}.get(mode) or {}
+            progress = (st["analyzed"], st["total"]) if st.get("total") and st["analyzed"] < st["total"] else None
             self.emit({"type": "pool", "mode": mode, "revision": self.revision, "selection_id": self._selection_id,
-                       "phase": phase, "shown": shown, "note": note, "summary": summary(self.rec)})
+                       "phase": phase, "shown": shown, "note": note, "summary": summary(self.rec),
+                       "progress": progress})
 
     def _prepared_playlist(self, mode, fresh):
         """Keep the displayed order; update predictions, then append new maps."""
