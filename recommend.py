@@ -56,6 +56,11 @@ MIN_GAIN = .1         # pp: below this expected gain a PP map is not worth offer
 # the target, large enough to cross the user's safe→peak range within a session.
 PUSH_DOWN = 2.
 PUSH_STEP = .5
+# Shown "usual" accuracy range: ±BAND_Z × predicted sd. The full sd covered 89 % of the user's
+# 303 played predictions (2026-09-25..10-03), not 80 %; × .75 fitted on the first half covered
+# 80.7 % of the second half with better log-loss (−1.130 vs −1.054). Display only: p_beat and
+# PP quantiles keep the full spread.
+BAND_Z = 1.2816 * .75
 PESSIMISM = 0.25               # model uncertainty shifts the mean (in its sd), never widens the upside
 HALF_LIFE_MONTHS = 12.0
 LEVEL_BW = 4.0                 # months: level drift kernel
@@ -1566,8 +1571,8 @@ class Recommender:
                         "best_rank": getattr(self, "pp_ranks", {}).get(b, 100000),
                         "pp_mid": float(A["scale"][ix] * max(0., 1.-5.*math.exp(min(20., mu[ix])))),
                         "acc_mid": float(shown_acc[ix]), "mu": float(mu[ix]),
-                        "acc_lo": max(0.,1-math.exp(min(20.,display_mu[ix]+1.2816*display_sd[ix]))),
-                        "acc_hi": max(0.,1-math.exp(min(20.,display_mu[ix]-1.2816*display_sd[ix]))),
+                        "acc_lo": max(0.,1-math.exp(min(20.,display_mu[ix]+BAND_Z*display_sd[ix]))),
+                        "acc_hi": max(0.,1-math.exp(min(20.,display_mu[ix]-BAND_Z*display_sd[ix]))),
                         "push_only": not bool(normal[ix]),
                         "sd_model": float(A["sdm"][ix]), "sd": float(A["sda"][ix]), "challenge": float(chal[ix]),
                         "skill": A["skill"][ix], "length": f["length"] / 1000 / rate, "installed": meta["md5"] in self.installed,
@@ -1889,8 +1894,8 @@ class Predictor:
                 "rate_slope": slope,
                 "sd_model": sdm, "sdm": sdm, "sda": sda,
                 "sd": math.sqrt(sda * sda + sdm * sdm),
-                "acc_mid": shown(mid), "acc_lo": shown(mid + 1.2816 * spread),
-                "acc_hi": shown(mid - 1.2816 * spread)}
+                "acc_mid": shown(mid), "acc_lo": shown(mid + BAND_Z * spread),
+                "acc_hi": shown(mid - BAND_Z * spread)}
 
 
 class Worker(threading.Thread):
@@ -2930,7 +2935,7 @@ def retro(cut="2026-06-01"):
         if kind == "refarm":
             res[(kind, "own history mean")].append(r["y"] - float(np.mean(hist[r["chart"]])))
         z = (r["y"] - mu - PESSIMISM * sdm) / math.sqrt(sda ** 2 + sdm ** 2)
-        res[(kind, "cover80")].append(abs(z) < 1.2816)
+        res[(kind, "cover80")].append(abs(z) < BAND_Z)
         key = (r["b"], round(r["rate"], 2))
         if key in prior_best and r["f"].get("stars"):
             acc_best = prior_best[key]

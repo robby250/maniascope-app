@@ -41,6 +41,7 @@ def test_direct_display_head_does_not_change_pp_mean_or_spread():
     assert result['display_mu']==pytest.approx(math.log(.02))
     assert result['acc_mid']==pytest.approx(.98)
     assert result['acc_lo']<.98<result['acc_hi']
+    assert math.log(1-result['acc_lo'])-result['display_mu']==pytest.approx(R.BAND_Z*result['display_sd'])
     assert result['sdm']==.1 and result['sda']==.2
     # Local playlists can skip the unused PP calculation without changing any
     # displayed field, readiness or the full forecast recorded at play start.
