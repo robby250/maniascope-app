@@ -1,7 +1,7 @@
 """Local execution patterns used for recognition, never map-name overrides."""
 import math
 
-TECH_PROFILE_VERSION = 1
+TECH_PROFILE_VERSION = 2
 
 
 def smooth(x, lo, hi):
@@ -127,11 +127,25 @@ def tech_profile(chart, rate=1., info=None):
             trills[i-3:i+1] = [kind]*4
     inserted, switched = S._pattern_evidence(rows, trills)
     pattern = [0.]*len(counts)
+    global_rhythm = [0.]*len(counts)
     first = rows[0][0]
+    previous, previous_gap, pulse = None, 0., 0.
     for (t, _cs), ins, sw in zip(rows, inserted, switched):
         b = min(len(counts)-1, int((t-first)/S.BIN))
         pattern[b] += (ins + sw*info['switch'][b])*(1.-info['mash'][b])
-    rhythm = [v*n*(1.-m) for v,n,m in zip(info['regular'], counts, info['mash'])]
+        gap = t-previous if previous is not None else 0.
+        if 0. < gap < .5:
+            if pulse or 0. < previous_gap < .5:
+                global_rhythm[b] += S._off_grid(gap, pulse or previous_gap, pulse != 0.)
+            if previous_gap and abs(math.log2(gap/previous_gap)) < .06:
+                pulse = gap
+        else:
+            pulse = 0.
+        previous, previous_gap = t, gap
+    # Skipped hand strokes on a regular global pulse are not off-pulse rhythm.
+    # Both means share the original onset bins; do not alter peak skill demand.
+    rhythm = [min(v*n,g)*(1.-m) for v,n,g,m in
+              zip(info['regular'], counts, global_rhythm, info['mash'])]
     def window(values):
         out=[];total=0.;h=2
         for i in range(len(values)+h):
@@ -157,8 +171,10 @@ def technical_title(name, skills, profile):
     well as material technical demand, so a short awkward passage cannot name
     an otherwise smooth map. Inputs are identical in fresh and cached features.
     """
-    if not profile or profile.get('technical',0.) < .5 or skills.get('technical',0.) < .6:
+    if not profile:
         return name
+    if profile.get('technical',0.) < .5 or skills.get('technical',0.) < .6:
+        return name.removeprefix('Tech ')
     if name.startswith('Tech ') or name in ('SV','Fast SV','Slowjam SV','Accel SV','Stutter SV','Brakes','Vibro','Mash','Stamina'):
         return name
     return 'Tech ' + name

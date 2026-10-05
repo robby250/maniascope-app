@@ -21,6 +21,39 @@ def db():
     return recdata.connect(os.path.join(tempfile.mkdtemp(), "rec.db"))
 
 
+def test_manifest_file_checks_release_read_lock_and_preserve_playable_filter(tmp_path, monkeypatch):
+    path = str(tmp_path/'rec.db')
+    reader, writer = recdata.connect(path), recdata.connect(path)
+    writer.execute('PRAGMA busy_timeout=20')
+    with reader:
+        reader.executemany('INSERT INTO installed(sha256,md5,keys) VALUES (?,?,?)',
+                           [(sha,sha*32,7 if sha!='e' else 3) for sha in ('a','b','c','d','e')])
+        reader.executemany('INSERT INTO installed_local(sha256,audio_sha,audio_required) VALUES (?,?,?)',
+                           [('c','c_audio',1),('d','d_audio',1)])
+    for sha in ('a','c','d','e','c_audio'):
+        (tmp_path/sha).write_text('local fixture')
+    monkeypatch.setattr(recdata,'local_file',lambda sha:str(tmp_path/sha) if sha else None)
+    isfile = os.path.isfile
+    checked = []
+
+    def file_check(path):
+        # The actual filesystem check may block on disk while another app
+        # connection commits a live event; no SELECT cursor may survive here.
+        recdata.log_event(writer,'start',os.path.basename(path),t=1.)
+        checked.append(os.path.basename(path))
+        return isfile(path)
+
+    monkeypatch.setattr(nps.os.path,'isfile',file_check)
+    try:
+        catalog, error = nps.installed(reader)
+        assert set(catalog)=={'a','c'} and error==''
+        assert set(checked)=={'a','b','c','c_audio','d','d_audio'}
+        assert writer.execute("SELECT COUNT(*) FROM events WHERE kind='start'").fetchone()[0]==6
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_keys_and_identity():
     assert recdata.normalize_keys(None) == tuple(range(4, 11))
     assert recdata.normalize_keys([9, 4, 6, 4]) == (4, 6, 9)
@@ -282,6 +315,135 @@ def test_prepared_queue_updates_the_same_chart_rate_before_dropping_it():
     assert mid['rate'] == 1. and mid['acc_mid'] == .967
 
 
+@pytest.mark.parametrize('mode', ['nps', 'skills'])
+def test_prepared_queue_refreshes_same_rate_features_without_changing_offered_snapshots(mode):
+    from unittest.mock import Mock
+    worker = R.Worker(lambda msg: None)
+    predict = Mock(side_effect=lambda f, *a, **k: f['expected'])
+    worker.rec = SimpleNamespace(local_shas=set(), predictor=SimpleNamespace(predict=predict))
+    old_forecast = dict(calculator='old', predictor='old', generated_at=1000., rate=1.)
+    new_forecast = dict(calculator='current', predictor='current', generated_at=2000., rate=1.)
+    old_f = dict(keys=7, description='Tech Delay', tech_profile={'version': 1, 'technical': .8},
+                 expected={'acc_mid': .94, 'accuracy_forecast': old_forecast})
+    new_f = dict(old_f, description='Delay', tech_profile={'version': 2, 'technical': .3},
+                 expected={'acc_mid': .945, 'accuracy_forecast': new_forecast})
+    offered = dict(sha='a', md5='m-a', bid=1, keys=7, rate=1., var='NM', purpose=mode,
+                   installed=False, f=old_f, skill='Tech Delay', description='Tech Delay',
+                   practice_skills=(), accuracy_forecast=old_forecast)
+    fresh = dict(offered, f=new_f, skill='Delay', description='Delay', matched_skills=('delay',))
+    other = dict(offered, sha='b', md5='m-b', bid=2)
+    consumed = dict(offered, sha='c', md5='m-c', bid=3)
+    worker.playlists[mode] = [offered, other]
+    worker._playlist_consumed = [R.event_key(consumed)]
+    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+        shown = worker._prepared_playlist(mode, [consumed, other, fresh])
+    assert [c['sha'] for c in shown] == ['a', 'b']
+    assert shown[0]['rate'] == 1. and shown[0]['f'] is new_f
+    assert shown[0]['skill'] == shown[0]['description'] == 'Delay'
+    assert shown[0]['matched_skills'] == ('delay',) and shown[0]['acc_mid'] == .945
+    assert shown[0]['accuracy_forecast'] == dict(new_forecast, sha256='a', md5='m-a')
+    assert predict.call_count == 2 and predict.call_args_list[0].args[0] is new_f
+    assert offered['f'] is old_f and offered['description'] == 'Tech Delay'
+    assert offered['accuracy_forecast'] is old_forecast
+    assert 'sha256' not in old_forecast and 'sha256' not in new_forecast
+
+
+@pytest.mark.parametrize('identity', ['md5_mismatch', 'bid_only'])
+def test_prepared_queue_does_not_refresh_another_revision_or_an_id_without_exact_identity(identity):
+    worker = R.Worker(lambda msg: None)
+    worker.rec = SimpleNamespace(local_shas=set(), predictor=SimpleNamespace(predict=lambda f, *a, **k: f['expected']))
+    old_f = dict(keys=7, description='Tech Delay', expected={'acc_mid': .94})
+    offered = dict(bid=1, keys=7, rate=1., var='NM', purpose='nps', installed=False,
+                   f=old_f, description='Tech Delay')
+    fresh = dict(offered, f=dict(old_f, description='Delay'), description='Delay')
+    if identity == 'md5_mismatch':
+        offered.update(sha='a', md5='m-a')
+        fresh.update(sha='b', md5='m-b')
+    worker.playlists['nps'] = [offered]
+    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+        shown = worker._prepared_playlist('nps', [fresh])
+    assert shown[0]['f'] is old_f and shown[0]['description'] == 'Tech Delay'
+    assert offered['description'] == 'Tech Delay'
+
+
+@pytest.mark.parametrize('authority', ['public', 'sqlite', 'queued', 'none', 'map_md5', 'feature_md5', 'calc', 'keys', 'rate'])
+def test_ready_refreshes_omitted_prepared_features_and_rechecks_technical_membership(tmp_path, authority):
+    from unittest.mock import Mock
+    from test_skill_practice import feature
+    old = dict(feature({'delay': 1., 'technical': .8}), description='Tech Delay',
+               tech_profile={'version': 1, 'technical': .6})
+    removed = dict(old, description='Delay', tech_profile={'version': 2, 'technical': .3})
+    sql = dict(old, description='SQL Tech Delay', tech_profile={'version': 2, 'technical': .7})
+    public_maps = {1: {'md5': 'm-a'}, 2: {'md5': 'm-b'}}
+    public_feats = {1: {'calc': 'current', 'md5': 'm-a', 1.: removed},
+                    2: {'calc': 'current', 'md5': 'm-b', 1.: removed}}
+    if authority == 'none':
+        public_feats.pop(1)
+    elif authority == 'map_md5':
+        public_maps[1]['md5'] = 'another revision'
+    elif authority == 'feature_md5':
+        public_feats[1]['md5'] = 'another revision'
+    elif authority == 'calc':
+        public_feats[1]['calc'] = 'old'
+    elif authority == 'keys':
+        public_feats[1][1.] = dict(removed, keys=4)
+    elif authority == 'rate':
+        public_feats[1][1.5] = public_feats[1].pop(1.)
+    db = recdata.connect(str(tmp_path/'rec.db'))
+    with patch.object(recdata, 'calc_id', return_value='current'):
+        source = R.FeatureSource(db, {'maps': public_maps, 'feats': public_feats})
+    worker = R.Worker(lambda *_: None)
+    worker.db, worker.mode, worker.practice_skills = db, 'skills', ('technical',)
+    predict = Mock(return_value={'acc_mid': .94})
+    worker.rec = SimpleNamespace(feats=source, local_shas=set(), predictor=SimpleNamespace(predict=predict))
+    offered = [dict(sha=sha, md5='m-'+sha, bid=bid, keys=7, rate=1., var='NM', purpose='skills',
+                    installed=False, f=old, description=old['description'], skill=old['description'],
+                    practice_skills=('technical',), accuracy_forecast={'calculator': 'old'})
+               for bid, sha in enumerate(('a', 'b', 'legacy'), 1)]
+    worker.playlists['skills'] = offered[:]
+    worker.skills_state = {'candidates': [], 'restored': False}
+    worker._playlist_consumed = ['md5:m-consumed']
+    for c in offered:
+        source.cache[source.key(c['sha'], 1.)] = old
+    source._store('b', {1.: sql})       # a genuine current SQLite/_store result beats public
+    if authority == 'sqlite':
+        source._store('a', {1.: sql})
+        source.cache[source.key('a', 1.)] = old     # an earlier legacy publication masked the row
+    data = dict(generation=worker.generation, revision=worker._local_request_id,
+                keys_by_mode=worker.keys, selected_skills=worker.practice_skills,
+                states={'skills': dict(candidates=[], analyzed=1, total=20, failed=0, error='')})
+    if authority == 'queued':
+        source._store('a', {1.: removed})
+        data['states']['skills']['candidates'] = [dict(offered[0], base_value=1.)]
+        worker._nps_predictions['a', 1.] = {'acc_mid': .95}
+    queries = []
+    db.set_trace_callback(queries.append)
+    try:
+        with patch.object(worker, '_publish'), patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+            worker.t_nps_update('ready', data)
+            predict.assert_not_called()
+            if authority == 'queued':
+                worker._local_pool_cache['skills'] = (None, None, worker.skills_state['candidates'])
+                assert worker.skills_state['candidates'][0]['f'] == removed
+                assert ('a', 1.) not in worker._nps_predictions
+            consumed = dict(offered[0], sha='consumed', md5='m-consumed')
+            shown = worker._prepared_playlist('skills', [consumed])
+        assert [c['sha'] for c in shown] == (['b', 'legacy'] if authority in ('public', 'queued') else ['a', 'b', 'legacy'])
+        assert shown[-2]['description'] == 'SQL Tech Delay' and shown[-1]['description'] == 'Tech Delay'
+        if authority == 'sqlite':
+            assert shown[0]['f'] == sql
+        elif authority not in ('public', 'queued'):
+            assert shown[0]['f'] is old
+        assert all(c['f'] is old and c['description'] == 'Tech Delay' for c in offered)
+        assert all(c['accuracy_forecast'] == {'calculator': 'old'} for c in offered)
+        assert worker._playlist_consumed == ['md5:m-consumed']
+        reads = [q for q in queries if q.startswith('SELECT data FROM feats')]
+        assert len(reads) == 3 and all('WHERE key=' in q for q in reads)
+        assert predict.call_count == 3
+    finally:
+        db.close()
+
+
 def test_nps_focus_changes_selection_without_refitting_or_changing_rate_targets(tmp_path):
     import pp_playlist
     rows = [dict(keys=7, sha=str(i), md5=str(i), family=str(i), rate=1.1,
@@ -368,6 +530,66 @@ def test_website_charts_join_nps_as_downloads_with_a_mild_popularity_prior(tmp_p
     assert more['popular'] / more['local'] == pytest.approx(4.) and nps.web_factor(.5) == 1.
 
 
+def test_builder_prefers_exact_current_public_web_packets_below_current_sqlite(tmp_path, monkeypatch):
+    import pickle
+    from unittest.mock import Mock
+    import webmaps
+    from test_skill_practice import feature
+    monkeypatch.setattr(webmaps, 'WEB_DIR', str(tmp_path/'web'))
+    chart_dir = tmp_path/'web'/'osu'
+    chart_dir.mkdir(parents=True)
+    names = ('matched', 'cached', 'mismatch', 'feature_mismatch', 'stale', 'wrongkeys', 'nonoverlap')
+    maps, feats, public_maps, public_feats = {}, {}, {}, {}
+    old = dict(feature({'delay': 1., 'technical': .8}), description='Tech Delay',
+               tech_profile={'version': 1, 'technical': .8})
+    current = dict(old, description='Delay', tech_profile={'version': 2, 'technical': .3})
+    for bid, sha in enumerate(names, 1):
+        (chart_dir/f'{sha}.osu').write_text('not a parsed chart')
+        maps[sha] = dict(bid=bid, set_id=bid, status=-2, keys=7, file_md5=sha, playcount=10,
+                         artist='A', title=sha, version='V', creator='C', overall={.7: 6., 1.: 6., 1.5: 6.})
+        feats[sha] = {r: pickle.dumps(old) for r in (.7, 1., 1.5)}
+        if sha != 'nonoverlap':
+            public_maps[bid] = {'md5': 'another revision' if sha == 'mismatch' else sha}
+            f = dict(current, keys=4) if sha == 'wrongkeys' else current
+            public_feats[bid] = {'calc': 'old' if sha == 'stale' else 'current',
+                                 'md5': 'another revision' if sha == 'feature_mismatch' else sha,
+                                 1.: f, 1.5: f}
+    with open(tmp_path/'web'/'web.pkl', 'wb') as fh:
+        pickle.dump({'format': 3, 'calc': 'old', 'maps': maps, 'feats': feats}, fh)
+    predictor = SimpleNamespace(calc='current', pub={'maps': public_maps, 'feats': public_feats},
+                                md5_bid={sha: bid for bid, sha in enumerate(names, 1)}, predict=Mock())
+    db = recdata.connect(str(tmp_path/'rec.db'))
+    sqlite_feature = dict(current, description='Current SQLite')
+    with db:
+        db.execute('INSERT INTO feats VALUES (?,?)', ('cached@1.000|current', json.dumps(sqlite_feature)))
+    captured = {}
+    builder = nps.Builder(lambda *args: None)
+    def inspect(catalog, analyses, *args, **kwargs):
+        captured.update({sha: dict(fs.items()) for sha, fs in analyses.items()})
+        assert set(catalog) == set(names) and all(not inst['installed'] for inst in catalog.values())
+        builder.stop()
+        return [], []
+    monkeypatch.setattr(nps, 'candidates_from', inspect)
+    monkeypatch.setattr(nps, 'installed', lambda _db: ({}, ''))
+    monkeypatch.setattr(nps, 'reach', lambda *args: None)
+    executor = Mock()
+    session = R.Session([], 1000.)
+    try:
+        builder._build(db, executor, (predictor, session, (7,), 1, 0, (7,), (), 'nps'))
+        assert captured['matched'][1.] is current and captured['matched'][1.5] is current
+        assert captured['cached'][1.] == sqlite_feature and captured['cached'][1.5] is current
+        for sha in names:
+            assert set(captured[sha]) == {.7, 1., 1.5}
+            assert captured[sha][.7] == old
+        for sha in ('mismatch', 'feature_mismatch', 'stale', 'wrongkeys', 'nonoverlap'):
+            assert captured[sha][1.] == captured[sha][1.5] == old
+        executor.submit.assert_not_called()
+        predictor.predict.assert_not_called()
+        assert db.execute('SELECT COUNT(*) FROM feats').fetchone()[0] == 1
+    finally:
+        db.close()
+
+
 def test_website_star_filter_keeps_unrated_charts():
     import webmaps
     rated = lambda s: {"stars": s}
@@ -415,7 +637,7 @@ def test_first_real_build_replaces_the_installed_only_restart_list(tmp_path):
     import recommend as R
     w = R.Worker(lambda m: None)
     w.db = recdata.connect(str(tmp_path / "rec.db"))
-    w.rec = SimpleNamespace(feats=SimpleNamespace(cache={}, key=lambda s, r: (s, r), calc="x"))
+    w.rec = SimpleNamespace(feats=R.FeatureSource(w.db, {"maps": {}, "feats": {}}))
     w.nps_state = {"candidates": [], "restored": True}
     w.playlists["nps"] = [{"sha": "old"}]
     data = {"generation": w.generation, "revision": w._local_request_id, "selected_skills": w.practice_skills,
@@ -424,7 +646,8 @@ def test_first_real_build_replaces_the_installed_only_restart_list(tmp_path):
     with patch.object(w, "_publish"):
         w.t_nps_update("ready", data)
         assert w.playlists["nps"] == []
-        w.playlists["nps"] = [{"sha": "kept"}]
+        kept = dict(sha="kept", md5="m-kept", keys=7, rate=1., f={})
+        w.playlists["nps"] = [kept]
         w.t_nps_update("ready", data)          # later builds keep the displayed order
-        assert w.playlists["nps"] == [{"sha": "kept"}]
+        assert w.playlists["nps"] == [kept]
     w.db.close()

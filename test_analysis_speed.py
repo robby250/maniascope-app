@@ -179,6 +179,58 @@ def test_phase_buffers_and_attribution_ignore_unused_work():
     assert S._attribute(parts, total, c.keys) == expected
 
 
+def test_benchmark_requires_native_modules_before_importing_ui(tmp_path, monkeypatch):
+    import builtins
+    import sys
+    from calib import benchmark_analysis as B
+    source, native = tmp_path/'source', tmp_path/'native'
+    source.mkdir(); native.mkdir()
+    extension = native/'probe.so'
+    extension.write_bytes(b'native fixture')
+    calls = []
+    available = [True]
+    module = SimpleNamespace(__file__=str(extension))
+    def activate(directory):
+        assert sys.path[0] == str(source) and directory == native
+        calls.append('activate')
+        sys.path.insert(0, str(native))
+        return available[0]
+    def load(name):
+        assert name == 'probe' and sys.path[0] == str(native)
+        calls.append('module')
+        return module
+    class ReachedUI(Exception):
+        pass
+    original_import = builtins.__import__
+    def observe_import(name, *args, **kwargs):
+        if name == 'skillsets':
+            calls.append('ui')
+            raise ReachedUI
+        return original_import(name, *args, **kwargs)
+    monkeypatch.setattr(sys, 'path', sys.path.copy())
+    monkeypatch.setitem(sys.modules, 'native_backend', SimpleNamespace(
+        ROOT=source, activate=activate, MODULES=('probe',), SUFFIX='.so', CALCULATOR='fixture',
+        INPUTS=(), hashes=lambda root, names: {}, location=lambda inputs, directory: directory))
+    monkeypatch.setattr(B, 'references', lambda _: [])
+    monkeypatch.setattr(B.importlib, 'import_module', load)
+    monkeypatch.setattr(builtins, '__import__', observe_import)
+    with pytest.raises(ReachedUI):
+        B.run(source, 'manifest', tmp_path/'output', native=True, native_directory=native)
+    assert calls == ['activate', 'module', 'ui']
+    calls.clear(); available[0] = False
+    with pytest.raises(RuntimeError, match='unavailable'):
+        B.run(source, 'manifest', tmp_path/'output', native=True, native_directory=native)
+    assert calls == ['activate']
+    calls.clear(); available[0] = True; module.__file__ = str(source/'probe.py')
+    with pytest.raises(RuntimeError, match='same native backend'):
+        B.run(source, 'manifest', tmp_path/'output', native=True, native_directory=native)
+    assert calls == ['activate', 'module']
+    calls.clear(); module.__file__ = str(tmp_path/'other-native'/'probe.so')
+    with pytest.raises(RuntimeError, match='same native backend'):
+        B.run(source, 'manifest', tmp_path/'output', native=True, native_directory=native)
+    assert calls == ['activate', 'module']
+
+
 def test_memory_disk_and_native_feature_inputs_are_exact(tmp_path):
     import recdata
     path=fixture()

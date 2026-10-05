@@ -21,6 +21,33 @@ def _db():
     return recdata.connect(os.path.join(tempfile.mkdtemp(), "rec.db"))
 
 
+def test_feature_loading_does_not_hold_a_read_lock_against_live_events(tmp_path):
+    path = str(tmp_path/'rec.db')
+    reader = recdata.connect(path)
+    writer = recdata.connect(path)
+    try:
+        writer.execute('PRAGMA busy_timeout=20')
+        with reader:
+            reader.executemany(
+                'INSERT INTO scores(key,src,md5,played,mods,rate,stats,acc,n) VALUES (?,?,?,?,?,?,?,?,?)',
+                [(str(i),'live',str(i),'2026-09-24T12:00:00Z','[]',1.,'[100,0,0,0,0,0]',.99,100)
+                 for i in range(4)])
+
+        def features(score, _installed):
+            # Another app connection records a play while this potentially slow
+            # callback retrieves/decodes the exact-rate feature cache.
+            recdata.log_event(writer,'start',score['md5'],t=1.)
+            return dict(keys=7,notes=100,ln=0.),1
+
+        rows, skipped = R.evidence_rows(reader,{},features)
+        assert len(rows) == 4 and not skipped
+        assert writer.execute("SELECT COUNT(*) FROM events WHERE kind='start'").fetchone()[0] == 4
+        assert {r['key'] for r in rows} == {'0','1','2','3'}
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_start_keeps_displayed_difficulty_with_the_actual_rate(tmp_path):
     from types import SimpleNamespace
     db = recdata.connect(str(tmp_path/'rec.db'))

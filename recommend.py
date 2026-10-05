@@ -36,6 +36,7 @@ import recdata
 import navigation
 import skill_practice
 import score_units
+import accuracy_targets
 
 MODES = ("pp", "nps", "skills")
 LOCAL_MODES = ("nps", "skills")
@@ -508,7 +509,7 @@ class Personal:
         last, diffs = {}, []
         for i in seq:
             r = rows[i]
-            if r["src"] == "public" or not r["ts"]:
+            if r["src"] == "public" or not r["ts"] or r.get("rd"):
                 continue
             p = last.get(r["chart"])
             if p is not None and 0 < r["ts"] - rows[p]["ts"] < SESSION_GAP:
@@ -623,7 +624,9 @@ def evidence_rows(db, pub, feats_of, since=None, until=None):
     """Personal rows with features: → list of dicts (y, base, keys, t, chart, f, src, ts)."""
     out, skipped = [], collections.Counter()
     installed = installed_by_md5(db)
-    for r in db.execute("SELECT * FROM scores"):
+    # Feature lookup/decoding can take seconds. Exhaust the small score table
+    # first so its read cursor cannot block live event commits on other connections.
+    for r in db.execute("SELECT * FROM scores").fetchall():
         if until and (r["played"] or "") >= until:
             continue
         mods = json.loads(r["mods"] or "[]")
@@ -675,8 +678,8 @@ class FeatureSource:
         # entire catalogue after every score.
         self.cache = {}
 
-    def lookup(self, key):
-        f = self.cache.get(key)
+    def lookup(self, key, refresh=False):
+        f = None if refresh else self.cache.get(key)
         if f is None:
             row = self.db.execute("SELECT data FROM feats WHERE key=?", (key,)).fetchone()
             if row:
@@ -689,7 +692,7 @@ class FeatureSource:
     def key(self, sha, rate):
         return f"{sha}@{rate:.3f}|{self.calc}"
 
-    def __call__(self, r, installed=None):
+    def __call__(self, r, installed=None, *, refresh=False):
         if r["rate"] is None:
             return None, None
         md5 = r["md5"]
@@ -698,17 +701,22 @@ class FeatureSource:
             b = None                                   # a stale id: not the snapshot's chart
         rate = round(r["rate"] or 1.0, 3)
         if r["sha256"]:
-            f = self.lookup(self.key(r["sha256"], rate))
+            f = self.lookup(self.key(r["sha256"], rate), refresh=refresh)
             if f:
                 pf = self.pub["feats"].get(b, {}) if b else {}
-                if "stars" not in f and pf.get("calc") == self.calc and "stars" in pf.get(rate, {}):
+                if ("stars" not in f and pf.get("calc") == self.calc and pf.get("md5") == md5
+                        and pf.get(rate, {}).get("keys") == f.get("keys") and "stars" in pf.get(rate, {})):
                     f = dict(f, stars=pf[rate]["stars"], hits=pf[rate]["hits"])
                 return f, b
         pf = self.pub["feats"].get(b) if b else None
-        if pf and pf.get(rate) and pf.get("calc") == self.calc:
+        if (pf and pf.get(rate) and pf.get("calc") == self.calc and pf.get("md5") == md5
+                and (not refresh or pf[rate].get("keys") == r["keys"])):
+            if refresh and r["sha256"]:
+                self.cache[self.key(r["sha256"], rate)] = pf[rate]
             return pf[rate], b
         if r["sha256"]:
-            f = self.lookup(self.key(r["sha256"], rate))
+            key = self.key(r["sha256"], rate)
+            f = self.cache.get(key) if refresh else self.lookup(key)
             if f:
                 return f, b
         return None, b
@@ -869,6 +877,13 @@ class Session:
             if a.get("meaningful") and a.get("ability_evidence", True) and actual and offered and actual < offered-.025:
                 self._downrates[str(a["beatmap"])].append(a)
         self.played = {a["beatmap"] for a in self.attempts if a.get("meaningful") and a.get("ability_evidence", True)}
+        # Shuffled effort still counts as played, but cannot establish normal
+        # chart familiarity. Old logs without mod metadata retain their meaning.
+        self.retry_played = {a["beatmap"] for a in self.attempts
+                             if a.get("meaningful") and a.get("ability_evidence", True)
+                             and not any(str(m.get("acronym", "") if isinstance(m, dict) else m).upper() == "RD"
+                                         for name in ("mods_list", "mods")
+                                         for m in (a.get(name) if isinstance(a.get(name), (list, tuple)) else ()))}
 
     def bind_warmup(self, model):
         if model is not None and self._warmup_model is not model:
@@ -1025,10 +1040,21 @@ class Session:
         baseline, prior 1 worth COLD_PRIOR. Recorded penalties are unscaled by their own scale."""
         key = ('cold_scale', keys)
         if key not in self._corrections:
-            obs = [(a['cold_penalty'] / (a.get('cold_scale') or 1.), a['y'] - a['base_mu']) for a in self.history_attempts
-                   if a.get('keys') == keys and a['kind'] == 'finish' and a.get('ability_evidence', True)
-                   and a.get('y') is not None and a.get('base_mu') is not None and a.get('cold_penalty') is not None
-                   and (a.get('cold_scale') or 1.) > 0]
+            obs = []
+            for a in self.history_attempts:
+                if a.get('keys') != keys or a['kind'] != 'finish' or not a.get('ability_evidence', True) \
+                        or a.get('y') is None or a.get('base_mu') is None or a.get('cold_penalty') is None:
+                    continue
+                scale = a.get('cold_scale')
+                if scale is None:
+                    scale = 1.  # older forecasts used the unscaled curve
+                if scale <= 0:
+                    continue    # a zero-scaled penalty cannot identify its original curve
+                if not getattr(self, '_display_target', False) and a.get('cold_scale') is not None \
+                        and a.get('display_cold_scale') is None and a.get('display_base_mu') is not None \
+                        and a.get('display_cold_penalty') is not None:
+                    continue    # old paired records saved the display scale, not this PP scale
+                obs.append((a['cold_penalty'] / scale, a['y'] - a['base_mu']))
             warm = [e for c, e in obs if c < .02]
             base = sum(warm) / len(warm) if len(warm) >= 5 else 0.
             num = sum(c * (e - base) for c, e in obs) + COLD_PRIOR
@@ -1236,14 +1262,17 @@ def recover_results(db):
     return added
 
 
-def play_history(db, limit=100, outliers=False):
+def play_history(db, limit=100, outliers=False, until=None):
     """Saved results and their frozen predictions; unobserved historical plays have no prediction."""
+    if until is not None and (not isinstance(until, (int, float)) or not math.isfinite(until)):
+        raise ValueError("until must be a finite timestamp")
     pauses = {}
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='replay_evidence'").fetchone():
         pauses = {r[0]: json.loads(r[1]) if r[1] else None
                   for r in db.execute("SELECT score_key,pauses FROM replay_evidence")}
     paired, pending = {}, None
-    events = db.execute("SELECT * FROM events WHERE kind IN ('start','finish','void') ORDER BY t,id").fetchall()
+    events = db.execute("SELECT * FROM events WHERE kind IN ('start','finish','void') "
+                        "AND (? IS NULL OR t<=?) ORDER BY t,id", (until, until)).fetchall()
     starts = {r["id"]: r for r in events if r["kind"] == "start"}
     for e in events:
         info = json.loads(e["info"])
@@ -1254,18 +1283,25 @@ def play_history(db, limit=100, outliers=False):
         elif e["kind"] == "finish":
             start = starts.get(info.get("start_id")) if "start_id" in info else pending
             if start and start["beatmap"] == e["beatmap"]:
-                paired[info.get("key")] = (start, info)
+                paired[info.get("key")] = (start, e, info)
             pending = None
     out = []
     for r in db.execute("SELECT s.*, i.artist,i.title,i.version,i.keys FROM scores s "
                         "LEFT JOIN installed i ON i.sha256=s.sha256 WHERE s.src!='public' ORDER BY s.played DESC"):
+        t = _ts(r["played"])
+        if until is not None and (t is None or t > until):
+            continue
         st = json.loads(r["stats"])
         actual = recdata.acc_lazer(st)
-        start, finish = paired.get(r["key"], (None, {}))
+        start, end, finish = paired.get(r["key"], (None, None, {}))
         info = json.loads(start["info"]) if start else {}
-        t = _ts(r["played"])
+        forecast_at = info.get("predicted_at", start["t"]) if start else None
+        valid_time = isinstance(forecast_at, (int, float)) and not isinstance(forecast_at, bool) and math.isfinite(forecast_at)
+        forecast_status = "saved" if info.get("expected") is not None else "missing"
         if start and (info.get("sha") != r["sha256"] or info.get("rate") != r["rate"]
-                      or (t is not None and info.get("predicted_at", start["t"]) > t)):
+                      or not valid_time or (t is not None and forecast_at > t)
+                      or (until is not None and (start["t"] > end["t"] or forecast_at > until))):
+            forecast_status = "identity_or_time_mismatch"
             info = {}
         z = None
         if info.get('display_mu') is not None and info.get('display_sd'):
@@ -1278,6 +1314,10 @@ def play_history(db, limit=100, outliers=False):
                     "actual": actual, "expected": info.get("expected"), "z": z, "prediction": info,
                     "sha256": r["sha256"], "mods": json.loads(r["mods"] or "[]"), "stats": st,
                     "pause_positions_ms": pauses.get(r["key"]),
+                    "start_id": start["id"] if start else None, "start_t": start["t"] if start else None,
+                    "finish_id": end["id"] if end else None, "finish_t": end["t"] if end else None,
+                    "forecast_at": forecast_at, "forecast_status": forecast_status,
+                    "prediction_valid": finish.get("prediction_valid"),
                     "recovered": finish.get("recovered", False)})
     out.sort(key=lambda r: _ts(r["played"]) or 0, reverse=True)
     if outliers:
@@ -1487,7 +1527,7 @@ class Recommender:
                           self.model.rate_response(c[3],c[4]['md5'],c[0],c[1]),
                           lambda loss, c=c: self.model.rate_loss(c[3],c[4]['md5'],c[0],c[1],loss))
                       for k,sk,c in zip(A['keys'].tolist(),A['skill'],cands)])
-        tried = np.isin(A["identity"], list(session.played))
+        tried = np.isin(A["identity"], list(session.retry_played))
         penalties = np.array([session.rate_penalty(c[4]["md5"], c[1]) for c in cands])
         learned=np.array([session.chart_correction(c[4]['md5'],c[1],c[3],self.model,A['sdm'][i]**2)
                           for i,c in enumerate(cands)])
@@ -1552,6 +1592,8 @@ class Recommender:
         order = np.lexsort(((A["rate"] != 1.0).astype(int), -variant_value, -(gain>=MIN_GAIN).astype(int)))
         order = order[credible[order]]
         seen, out = set(), []
+        generated_at = time.time()
+        code_id = getattr(getattr(self, 'predictor', None), 'predictor_id', None) or predictor_id()
         for ix in order:
             b = int(A["bid"][ix])
             if b in seen:
@@ -1577,6 +1619,13 @@ class Recommender:
                         "sd_model": float(A["sdm"][ix]), "sd": float(A["sda"][ix]), "challenge": float(chal[ix]),
                         "skill": A["skill"][ix], "length": f["length"] / 1000 / rate, "installed": meta["md5"] in self.installed,
                         "stars": f["stars"], "f": f})
+            state = dict(acc_mid=out[-1]['acc_mid'], acc_lo=out[-1]['acc_lo'], acc_hi=out[-1]['acc_hi'])
+            if display is not None:
+                state.update(display_mu=float(display_mu[ix]), display_sdm=float(A['display_sdm'][ix]),
+                             display_sda=float(A['display_sda'][ix]), display_sd=float(display_sd[ix]))
+            out[-1]['accuracy_forecast'] = accuracy_targets.forecast_state(state,
+                generated_at=generated_at, calculator=getattr(getattr(self, 'feats', None), 'calc', self.pub.get('calc')),
+                predictor=code_id, rate=rate, band_z=BAND_Z, sha256=inst.get('sha256'), md5=meta['md5'])
         self._score_cache = {cache_key: out}
         return out, session
 
@@ -1669,6 +1718,8 @@ class Recommender:
                         "purpose": "warmup", "weight": math.exp(-(ch + 1.0) ** 2) * fr * (1 + min(len(rs), 5) / 5)
                         * math.exp(-max(0.0, r["f"]["length"] / 1000 / rate - 240) / 120),      # short ones warm up
                         "why": f"warmup · played {len(rs)}×", "skill": top_skill(r["f"]), "md5": chart, "f": r["f"]})
+            out[-1]['accuracy_forecast'] = accuracy_targets.forecast_chart(
+                expected.get('accuracy_forecast'), inst['sha256'], inst['md5'])
         out.sort(key=lambda c: -c["weight"])
         return out
 
@@ -1691,6 +1742,7 @@ class Recommender:
                 return {"md5": md5}
         session = Session(load_events(self.db))
         e = self.predictor.predict(f, md5, b, round(rate, 3), session)
+        e['accuracy_forecast'] = accuracy_targets.forecast_chart(e.get('accuracy_forecast'), sha, md5)
         meta = self.pub["maps"].get(b, {}) if b else {}
         return {**e, "md5": md5, "bid": b, "keys": f["keys"], "skill": top_skill(f),
                 "ranked": meta.get("approved") in recdata.RANKED_STATUS, "length": f["length"] / 1000 / rate,
@@ -1832,15 +1884,27 @@ def legacy_key(value):
     return f"bid:{bid}" if bid else None
 
 
+def predictor_id():
+    """The existing source fingerprint identifies code, not a fitted snapshot."""
+    import hashlib
+    import warmup, personal_support, session_form
+    digest = hashlib.sha256()
+    for path in (__file__, warmup.__file__, personal_support.__file__, accuracy_targets.__file__, session_form.__file__):
+        with open(path, 'rb') as fh:
+            digest.update(fh.read())
+    return digest.hexdigest()[:12]
+
+
 class Predictor:
     """Immutable model snapshot shared with rate work; no DB or GTK ownership."""
-    def __init__(self, rec, *, model=None, shown=None):
+    def __init__(self, rec, *, model=None, shown=None, source_id=None):
         self.model, self.pub = model or rec.model, rec.pub
         self.calc, self.md5_bid = rec.feats.calc, rec.feats.md5_bid
         self.shown = rec._shown if shown is None else shown
+        self.predictor_id = predictor_id() if source_id is None else source_id
         self._base_cache = {}
         direct=getattr(rec,'accuracy_model',None)
-        self.display=Predictor(rec,model=direct,shown=(0.,1.)) if model is None and direct is not None else None
+        self.display=Predictor(rec,model=direct,shown=(0.,1.),source_id=self.predictor_id) if model is None and direct is not None else None
 
     def predict(self, f, chart, bid, rate, session, *, accuracy_only=False):
         # NPS/Skills rank displayed accuracy; PP and recorded play forecasts
@@ -1848,14 +1912,19 @@ class Predictor:
         session.bind_warmup(getattr(self.model,'warmup',None))
         out={} if accuracy_only and getattr(self,'display',None) is not None else self._predict(f,chart,bid,rate,session)
         if getattr(self,'display',None) is not None:
-            import accuracy_targets
             view=session.for_accuracy(self.display.model.warmup)
             expected=self.display._predict(f,chart,bid,rate,view)
             out.update({'display_'+k:expected[k] for k in accuracy_targets.FIELDS})
             # PP means/spreads remain untouched; playlist quality and displayed
             # intervals use the directly fitted display target.
-            out.update({k:expected[k] for k in ('acc_mid','acc_lo','acc_hi','opening_acc','activation_minutes','cold_scale',
+            out.update({k:expected[k] for k in ('acc_mid','acc_lo','acc_hi','opening_acc','activation_minutes',
                                                'rate_slope','sd_model','warmup_tau')})
+            if accuracy_only:
+                out['cold_scale']=expected['cold_scale']
+        out['accuracy_forecast'] = accuracy_targets.forecast_state(out, generated_at=time.time(),
+            calculator=self.calc, predictor=self.predictor_id, rate=rate, band_z=BAND_Z,
+            sha256=chart if isinstance(chart,str) and len(chart)==64 else None,
+            md5=chart if isinstance(chart,str) and len(chart)==32 else None)
         return out
 
     def _predict(self, f, chart, bid, rate, session):
@@ -1877,7 +1946,7 @@ class Predictor:
         mu += (session.correction(f["keys"], skill, f) + cold
                + session.rate_penalty(chart, rate)
                + session.chart_correction(chart,rate,f,self.model,sdm**2))
-        if "md5:" + chart in session.played or "sha:" + chart in session.played:
+        if "md5:" + chart in session.retry_played or "sha:" + chart in session.retry_played:
             mu -= self.model.retry
         a, b = self.shown
         def shown(y):
@@ -1942,13 +2011,7 @@ class Worker(threading.Thread):
         self._last_refit = time.time()
         self._stats_visible = False
         self._stats_cache = (None, None)
-        import hashlib
-        import warmup
-        digest=hashlib.sha256()
-        import personal_support, accuracy_targets, session_form
-        for path in (__file__,warmup.__file__,personal_support.__file__,accuracy_targets.__file__,session_form.__file__):
-            with open(path,'rb') as fh:digest.update(fh.read())
-        self.predictor_id=digest.hexdigest()[:12]
+        self.predictor_id=predictor_id()
 
     def put(self, *task):
         if task[0] == 'configure' and len(task) > 4:
@@ -2152,7 +2215,7 @@ class Worker(threading.Thread):
             st = {"nps": self.nps_state, "skills": self.skills_state}.get(mode) or {}
             # Charts that cannot be analysed (converts, broken files) are done too, or the bar waits forever.
             done = st.get("analyzed", 0) + st.get("failed", 0)
-            progress = (done, st["total"]) if st.get("total") and done < st["total"] else None
+            progress = (done, st["total"]) if not st.get("build_failed") and st.get("total") and done < st["total"] else None
             self.emit({"type": "pool", "mode": mode, "revision": self.revision, "selection_id": self._selection_id,
                        "phase": phase, "shown": shown, "note": note, "summary": summary(self.rec),
                        "progress": progress})
@@ -2173,19 +2236,25 @@ class Worker(threading.Thread):
             sha = c.get('sha') or c.get('sha256')
             if c.get('installed') and sha not in self.rec.local_shas:
                 continue
+            alternative = ready.get(event_key(c))
+            if alternative and alternative['rate'] == c['rate'] and (c.get('md5') or sha):
+                c = alternative             # refresh exact features without changing queue order
             f = c['f']
             expected = self.rec.predictor.predict(f, c.get('md5') or sha, c.get('bid'), c['rate'], session,
                                                   accuracy_only=mode != 'pp')
-            alternative = ready.get(event_key(c))
             if alternative and alternative['rate'] != c['rate']:
                 target = nps.central_target(session, sha)
                 if abs(alternative['acc_mid']-target) < abs(expected['acc_mid']-target):
                     c, f = alternative, alternative['f']
                     expected = self.rec.predictor.predict(f, c.get('md5') or sha, c.get('bid'), c['rate'], session,
                                                           accuracy_only=True)
+            if mode == 'skills' and not skill_practice.match(f, self.practice_skills)[0]:
+                continue
             if mode in LOCAL_MODES and not nps.eligible(expected, session, f):
                 continue
             updated = dict(c, **expected)
+            updated['accuracy_forecast'] = accuracy_targets.forecast_chart(
+                expected.get('accuracy_forecast'), c.get('sha') or c.get('sha256'), c.get('md5'))
             if mode == 'pp' and c['purpose'] != 'warmup':
                 updated.update(pp_estimates(expected, f, c.get('bid'), self.rec.ledger))
             shown.append(updated)
@@ -2255,7 +2324,9 @@ class Worker(threading.Thread):
         else:
             shown = available[:20]
         note = f"target ~{100 * self.acc_targets.get(mode, .94):.0f}% · 0.70–1.50×"
-        if not st["total"]:
+        if st.get("build_failed"):
+            note += " · local map analysis stopped"
+        elif not st["total"]:
             note += " · no maps of these keymodes found yet"
         elif st["analyzed"] + st["failed"] < st["total"]:
             note += (f" · {st['analyzed']:,} of {st['total']:,} maps analysed so far; "
@@ -2267,14 +2338,14 @@ class Worker(threading.Thread):
             note += f" · {missing} of {len(shown)} not installed"
         if mode == "skills":
             note = skill_practice.label(self.practice_skills) + " · " + note
-        if not shown:
+        if not shown and not st.get("build_failed"):
             note += (" · looking for maps that fit your target…" if st["analyzed"] + st["failed"] < st["total"]
                      else " · no map fits your accuracy target at 0.70–1.50× (try another target or keymode)")
         if st["failed"]:
             note += f" · {st['failed']} unavailable analyses"
         if st["error"]:
             note += " · " + st["error"]
-        if st.get("restored"):
+        if st.get("restored") and not st.get("build_failed"):
             note += " · showing the last list while it updates"
         return session.phase(), shown, note
 
@@ -2320,6 +2391,8 @@ class Worker(threading.Thread):
                                    practice_skills=self.practice_skills if mode == "skills" else (),
                                    practice_description=skill_practice.describe_match(f,self.practice_skills) if mode == "skills" else "",
                                    _profile_penalty=(profile_key, .18*similar)))
+            candidates[-1]['accuracy_forecast'] = accuracy_targets.forecast_chart(
+                e.get('accuracy_forecast'), sha, old.get('md5'))
             memo[item_key]=(f,candidates[-1])
         return candidates
 
@@ -2376,14 +2449,19 @@ class Worker(threading.Thread):
         self.emit({"type": "stats", "data": player_stats.current(self._stats_cache[1], session)})
 
     def t_nps_update(self, kind, data):
-        if kind == "error":
-            for mode in LOCAL_MODES:
-                self.emit({"type": "status", "mode": mode, "text": "Local map analysis: " + data})
-            return
         if data["generation"] != self.generation or data["revision"] != self._local_request_id:
             return
         if any(tuple(data["keys_by_mode"][m]) != self.keys[m] for m in LOCAL_MODES) \
                 or tuple(data["selected_skills"]) != self.practice_skills:
+            return
+        if kind == "error":
+            mode = data["mode"]
+            # Keep the usable shortlist and restart references; a later ready
+            # publication replaces this terminal status with the recovered state.
+            setattr(self, mode+"_state", dict(getattr(self, mode+"_state"),
+                                            error=data["error"], build_failed=True))
+            if mode == self.mode:
+                self._publish(mode)
             return
         # Exact proposed features are immediately available to selected-map and
         # start-event predictions, without recalculating them on a Next click.
@@ -2392,9 +2470,35 @@ class Worker(threading.Thread):
             # that placeholder list instead of keeping it, or website charts never show up.
             if getattr(self, mode+"_state", {}).get("restored"):
                 self.playlists[mode] = []
-            setattr(self, mode+"_state", state)
             for c in state["candidates"]:
                 self.rec.feats.cache[self.rec.feats.key(c["sha"], c["rate"])] = c["f"]
+            # A filtered-out chart has no fresh candidate. Refresh only the
+            # retained queue at this publication; Next keeps its cheap cache reads.
+            import nps
+            refreshed = {}
+            for i, c in enumerate(self.playlists[mode]):
+                f, _ = self.rec.feats({"sha256": c.get("sha") or c.get("sha256"),
+                                      "md5": c.get("md5"), "beatmap_id": c.get("bid"),
+                                      "rate": c["rate"], "keys": c["keys"]}, refresh=True)
+                if f and f is not c['f']:
+                    st = f.get('nps', {})
+                    metadata = dict(f=f, skill=nps.description(f), description=nps.description(f),
+                        group=nps.group(f), profile=nps.profile(f).tolist(), family=st.get('family', c.get('family')),
+                        nps=st.get('nps', c.get('nps')), length=st.get('play_span', f.get('length', 0.)/1000)/c['rate'],
+                        matched_skills=skill_practice.match(f, self.practice_skills)[1] if mode == 'skills' else (),
+                        practice_description=skill_practice.describe_match(f, self.practice_skills) if mode == 'skills' else '')
+                    self.playlists[mode][i] = dict(c, **metadata)
+                    refreshed[event_key(c), c['rate']] = metadata
+                    self._nps_predictions.pop((c.get('sha') or c.get('sha256'), c['rate']), None)
+            if refreshed:
+                # SQLite may advance after the Builder queued this publication.
+                # Its same-rate alternative must not undo the authoritative refresh.
+                choices = []
+                for c in state['candidates']:
+                    metadata = refreshed.get((event_key(c), c['rate']))
+                    choices.append(dict(c, **metadata) if metadata else c)
+                state = dict(state, candidates=choices)
+            setattr(self, mode+"_state", state)
             # Small restart cache of references, never frozen predictions or a
             # duplicate copy of the feature database. Preserve broad coverage.
             import hashlib
@@ -2496,6 +2600,10 @@ class Worker(threading.Thread):
         key = event_key({"md5": exp.get("md5"), "sha": play["sha"]})
         for mode in MODES:
             self.playlists[mode] = [p for p in self.playlists[mode] if event_key(p) != key]
+        import accuracy_targets
+        forecast = accuracy_targets.forecast_chart(exp.get('accuracy_forecast'), play['sha'], exp.get('md5'))
+        forecast_fields=("mu", "base_mu", "cold_penalty", "cold_scale", "activation_minutes", "opening_acc", "rate_slope", "sd", "sdm", "keys", "skill", "ranked", "length", "md5") + tuple(
+            'display_'+k for k in accuracy_targets.FIELDS)
         recdata.log_event(self.db, "start", key, t=play["t"], sha=play["sha"], rate=play["rate"], purpose=purpose,
                           mode=c.get("mode") if matched else "manual", offer_id=c.get("offer_id") if matched else None,
                           offered_rate=c.get("rate") if matched else None,
@@ -2506,14 +2614,15 @@ class Worker(threading.Thread):
                           profile=pattern or (c.get("profile") if matched else None),
                           family=family or (c.get("family") if matched else None),
                           mods=[m.get("acronym") for m in play.get("mods") or []], mods_list=play.get("mods"),
-                          title=title, predicted_at=time.time(), predictor=self.predictor_id,
-                          calculator=self.rec.pub.get("calc") if self.rec else None,
+                          title=title, predicted_at=time.time(), predictor=forecast['predictor'] if forecast is not None else self.predictor_id,
+                          calculator=forecast['calculator'] if forecast is not None else self.rec.pub.get("calc") if self.rec else None,
                           snapshot=self.rec.pub.get("snapshot") if self.rec else None, features=exp.get("f"),
                           difficulty=score_units.displayed_feature(f) if f else None,
                           expected=exp.get("acc_mid"), expected_lo=exp.get("acc_lo"), expected_hi=exp.get("acc_hi"),
+                          accuracy_forecast=forecast,
+                          accuracy_forecast_recorded_at=time.time(),
                           shown_mu=exp.get("mu"),
-                          **{k: v for k, v in exp.items() if k in ("mu", "base_mu", "cold_penalty", "cold_scale", "activation_minutes", "opening_acc", "rate_slope", "sd", "sdm", "keys", "skill", "ranked", "length", "md5",
-                              "display_mu","display_base_mu","display_cold_penalty","display_sdm","display_sda","display_sd")})
+                          **{k: v for k, v in exp.items() if k in forecast_fields})
         self._current = key
 
     def t_abort(self, play):
@@ -2687,6 +2796,7 @@ class Worker(threading.Thread):
         if result.get('unavailable'):
             self.emit({"type": "status", "text": result['msg']})
             return
+        forecast = c.get('accuracy_forecast')
         c["offer_id"] = recdata.log_event(self.db, "offer", key, t=selected_at, mode=mode, keys=c["keys"],
                                          group=c.get("group"), bid=c.get('bid'), rate=c["rate"], selection=selection,
                                          length=c.get("length"), accuracy=c.get("acc_mid"), title=c.get("title"),
@@ -2695,7 +2805,9 @@ class Worker(threading.Thread):
                                          p_up=c.get("p_up"), gain=c.get("gain"), best_pp=c.get("best"), pp_mid=c.get("pp_mid"),
                                          practice_skills=c.get("practice_skills") if mode == "skills" else None,
                                          matched_skills=c.get("matched_skills") if mode == "skills" else None,
-                                         predictor=self.predictor_id, calculator=self.rec.feats.calc)
+                                         accuracy_forecast=forecast, accuracy_forecast_recorded_at=time.time(),
+                                         predictor=forecast['predictor'] if forecast is not None else self.predictor_id,
+                                         calculator=forecast['calculator'] if forecast is not None else self.rec.feats.calc)
         self.target = self.targets[mode] = c
         if result["sent"]:
             recdata.log_event(self.db, "open", key, t=selected_at, var=c["var"], mode=mode)

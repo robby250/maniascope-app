@@ -1597,13 +1597,17 @@ def card(res):
     sc = res["scores"]
     if sc["overall"] < 0.1:
         return []
+    import pattern_control
+    technical_sk = {'technical': round(sc['technical']/max(.05,sc['overall']),4)}
     names = dict(skill_names(res["keys"]), sv=res.get("sv_name", "SV"))
     # an archetype competes at the rating of its strongest component, so X Stamina / Longjack stand in
     # for Stamina / Jack wherever those would have been shown
     # (a descriptor's archetype — Tech Dump — before one of the pattern it describes on a tie)
     cands = [(max([a["rating"]] + [sc[p] for p in a["parts"] if p not in TECH_KEYS]),
               0 if a.get("of") in DESCRIBES or "ln" in a["parts"] and any(
-                  p in LN_KINDS for p in a["parts"]) else 1, a) for a in res.get("archetypes", ())]
+                  p in LN_KINDS for p in a["parts"]) else 1, a) for a in res.get("archetypes", ())
+              if not a['name'].startswith('Tech ') or pattern_control.technical_title(
+                  a['name'], technical_sk, res.get('tech_profile')) == a['name']]
     cands += [(sc[k], 2, {"name": names[k], "rating": sc[k], "parts": (k,)})
               for k in ranked(res) if k not in TECH_KEYS + SV_KINDS and sc[k] > 0]
     picked, used = [], set()
@@ -1619,10 +1623,8 @@ def card(res):
     picked = sorted(picked, key=lambda e: -max(e["rating"], sc["ln"] if "ln" in e["parts"]
         and any(p in LN_KINDS for p in e["parts"]) else 0.))
     if picked:
-        import pattern_control
         first = picked[0]
-        name = pattern_control.technical_title(first['name'],
-            {'technical': round(sc['technical']/max(.05,sc['overall']),4)}, res.get('tech_profile'))
+        name = pattern_control.technical_title(first['name'], technical_sk, res.get('tech_profile'))
         if name != first['name']:
             first['name'] = name
             first['parts'] = tuple(dict.fromkeys((*first['parts'], 'technical')))

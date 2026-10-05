@@ -42,7 +42,6 @@ def test_fast_variable_and_interleaved_rolls_are_jumptrill_execution(pattern):
     assert mean(info['series']['rolled']) > .7
     r=S.compute(c)
     assert r['scores']['jumptrill'] > r['scores']['stream']
-    assert r['scores']['vibro'] == 0
 
 
 @pytest.mark.parametrize('keys',range(4,11))

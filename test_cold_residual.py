@@ -96,7 +96,9 @@ def test_fresh_calculation_and_feature_transform_share_structural_inputs():
     with patch.object(C,'parse_osu',return_value=c), patch('feedback._od',return_value=c.od):
         f=recdata.chart_feats('/unavailable-structural-control.osu',(rate,),analyses={rate:r})[rate]
     t=transform(f,rate)
-    assert t['overall']==pytest.approx(r['scores']['overall'],abs=1e-9)
+    # Feature caches carry prediction units; the shown card (r['scores']) has its own display scale.
+    assert t['preunit_overall']==pytest.approx(r['preunit_overall'],abs=1e-9)
+    assert t['overall']==pytest.approx(f['overall'],abs=1e-9)
     assert t['execution']['residual_vector']==pytest.approx(r['execution']['residual_vector'],abs=1e-10)
     assert t['sk']==f['sk'] and t['stam']==f['stam']
     # Inference does not modify public scores or return a cached map-ID answer.

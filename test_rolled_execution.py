@@ -142,6 +142,51 @@ def test_sv_and_cached_feature_prediction_use_same_final_difficulty():
         assert D.final_rating(4,full['raw_overall'],full['calibration_features'],full['execution'])==pytest.approx(full['scores']['overall'],rel=1e-12)
 
 
+@pytest.mark.parametrize('keys,strength', [(4, 1.), (4, 0.), (7, 0.)])
+def test_training_tree_input_matches_runtime_before_roll_and_units(keys, strength):
+    import recdata
+    import structural_residual as SR
+    from calib.fit_structural_residual import additive_inputs, tree_inputs
+    from calib.publish_structural import transform
+    cols = (0,1,2,3) if keys==4 else (0,1,2,4,5,6)
+    c = rolls(cols, gap=27, n=1600, keys=keys)
+    rate = .83
+    params = deepcopy(D.parameters())
+    params['rolled_execution'] = {'modes': {str(keys): {'strength': strength}}}
+    with patch.object(D, 'parameters', return_value=params):
+        result = S.compute(c, rate)
+        with patch.object(S, 'parse_osu', return_value=c), patch('feedback._od', return_value=c.od):
+            f = recdata.chart_feats('/tree-coordinate-control.osu', (rate,), analyses={rate: result})[rate]
+        with patch.object(SR, 'tree_shift', wraps=SR.tree_shift) as runtime:
+            D.final_rating(keys, result['raw_overall'], result['calibration_features'], result['execution'])
+        baseline = runtime.call_args.args[1]
+        values = runtime.call_args.args[2]
+        if strength:
+            assert f['execution']['rolled_factor'] < 1.
+            assert f['baseline_overall'] != pytest.approx(baseline)
+        if strength or keys==7:
+            assert SR.vector(dict(f, rate=rate)) != values  # Former additive fitting path.
+        before = deepcopy(f)
+        for cached in (f, transform(f, rate)):
+            assert tree_inputs(cached)[-1] == pytest.approx(math.log(max(.05, baseline)), abs=1e-12)
+            assert additive_inputs(cached, rate) == values
+        assert f == before
+
+
+@pytest.mark.parametrize('factor', [0., -1., math.nan, math.inf])
+def test_training_tree_input_rejects_unidentified_roll_coordinates(factor):
+    from calib.fit_structural_residual import tree_inputs
+    with pytest.raises(ValueError, match='finite positive rolled_factor'):
+        tree_inputs({'overall':8., 'baseline_overall':7., 'execution':{'rolled_factor':factor}})
+
+
+def test_training_tree_input_requires_a_baseline_only_for_non_neutral_rolls():
+    from calib.fit_structural_residual import tree_inputs
+    assert tree_inputs({'overall':8.}) == [math.log(8.)]
+    with pytest.raises(ValueError, match='require baseline_overall'):
+        tree_inputs({'overall':8., 'execution':{'rolled_factor':.8}})
+
+
 def test_invalid_strength_and_cancelled_reference_are_explicit():
     b={'phases':[[1.,2.,3.]]*8,'removable':[[.1,.2,.3]]*8}
     for strength in (-.1,1.1,math.nan,math.inf):

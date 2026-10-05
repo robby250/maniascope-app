@@ -11,7 +11,7 @@ import os
 import random
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
 from multiprocessing import get_context
 
 import numpy as np
@@ -201,8 +201,10 @@ def installed(db):
     if origin and origin != recdata.local_origin():
         return {}, "Library belongs to another location — import local lazer maps"
     out = {}
+    # Exhaust the metadata cursor before file checks, which can wait on disk
+    # while another app connection needs to commit a live event.
     for row in db.execute("SELECT i.*,l.online_md5,l.audio_sha,l.audio_required,l.creator "
-                          "FROM installed i LEFT JOIN installed_local l USING(sha256)"):
+                          "FROM installed i LEFT JOIN installed_local l USING(sha256)").fetchall():
         d = dict(row)
         path = recdata.local_file(d["sha256"])
         if d["keys"] not in recdata.SUPPORTED_KEYS or not path or not os.path.isfile(path):
@@ -243,32 +245,39 @@ class Builder(threading.Thread):
             self.cv.notify_all()
 
     def run(self):
-        db = recdata.connect()
-        executor = None
+        db = executor = None
         try:
-            executor = ProcessPoolExecutor(max_workers=2, mp_context=get_context("spawn"), initializer=_nice)
             while not self.halt.is_set():
                 with self.cv:
                     while self.request is None and not self.halt.is_set():
                         self.cv.wait(2)
                     request = self.request
                     self.request = None
-                if request is None:
+                if request is None or request[-1] not in ("nps", "skills"):
                     continue
                 try:
+                    if db is None:
+                        db = recdata.connect()
+                    if executor is None:
+                        executor = ProcessPoolExecutor(max_workers=2, mp_context=get_context("spawn"), initializer=_nice)
                     self._build(db, executor, request)
                 except Exception as exc:
                     import traceback
                     traceback.print_exc()
-                    self.emit("error", str(exc))
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            self.emit("error", str(exc))
+                    self._catalog_key = None     # an interrupted catalogue is not reusable
+                    if isinstance(exc, BrokenExecutor) and executor is not None:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        executor = None          # recreate only on the next requested build
+                    _pred, _session, keys, revision, generation, skills_keys, selected_skills, mode = request
+                    self.emit("error", {"error": f"{type(exc).__name__}: {exc}", "mode": mode,
+                                        "keys_by_mode": {"nps": keys, "skills": skills_keys},
+                                        "selected_skills": selected_skills, "revision": revision,
+                                        "generation": generation})
         finally:
             if executor:
                 executor.shutdown(wait=False, cancel_futures=True)
-            db.close()
+            if db is not None:
+                db.close()
 
     def _build(self, db, executor, request):
         pred, session, keys, revision, generation, skills_keys, selected_skills, active_mode = request
@@ -296,26 +305,54 @@ class Builder(threading.Thread):
                     self._catalog[sha] = inst
                     if sha in web_feats:
                         self._analyses[sha] = web_feats[sha]
+                        b = pred.md5_bid.get(inst["md5"])
+                        pub = pred.pub["feats"].get(b, {})
+                        if (pub.get("calc") == calc and inst["md5"] and pub.get("md5") == inst["md5"]
+                                and pred.pub["maps"].get(b, {}).get("md5") == inst["md5"]):
+                            # Replace only offered web anchors; current SQLite below still wins.
+                            for rate in self._analyses[sha]:
+                                if rate in pub and pub[rate].get("keys") == inst["keys"]:
+                                    self._analyses[sha][rate] = pub[rate]
         catalog, error, analyses = self._catalog, self._catalog_error, self._analyses
         catalogs = {active_mode: catalog}
         # Reuse decoded features across scores/filter changes. SQLite rowids are
         # monotone for the append/replace-only derived feature table. A fresh
         # import/calculator/catalogue resets this cursor.
-        for row in db.execute("SELECT rowid,key,data FROM feats WHERE rowid>? AND key LIKE ?",
-                              (self._loaded_rowid, f"%|{calc}")):
-            self._loaded_rowid = max(self._loaded_rowid, row["rowid"])
-            try:
-                sha, rate = row["key"].split("@", 1)
-                if sha in catalog:
-                    analyses[sha][float(rate.split("|")[0])] = json.loads(row["data"])
-            except (ValueError, TypeError):
-                continue                       # recompute a damaged derived entry
+        upper = db.execute("SELECT COALESCE(MAX(rowid),0) FROM feats").fetchone()[0]
+        while self._loaded_rowid < upper:
+            if self.halt.is_set():
+                return
+            with self.cv:
+                if self.request is not None:
+                    return
+            if self.busy():
+                self.halt.wait(1)               # the existing gameplay pause policy
+                continue
+            # Exhaust each bounded page before decoding: a live read cursor
+            # would block event commits on another rollback-journal connection.
+            # New append/replacement rows above this request's bound wait for
+            # the next request, so concurrent cache filling cannot prolong it.
+            rows = db.execute("SELECT rowid,key,data FROM feats WHERE rowid>? AND rowid<=? "
+                              "AND key LIKE ? ORDER BY rowid LIMIT 256",
+                              (self._loaded_rowid, upper, f"%|{calc}")).fetchall()
+            if not rows:
+                self._loaded_rowid = upper      # skip an irrelevant calculator tail
+                break
+            for row in rows:
+                self._loaded_rowid = row["rowid"]
+                try:
+                    sha, rate = row["key"].split("@", 1)
+                    if sha in catalog:
+                        analyses[sha][float(rate.split("|")[0])] = json.loads(row["data"])
+                except (ValueError, TypeError):
+                    continue                   # recompute a damaged derived entry
         for sha, inst in catalog.items():
             b = pred.md5_bid.get(inst["md5"])
             pub = pred.pub["feats"].get(b, {})
-            if pub.get("calc") == calc:
+            if (pub.get("calc") == calc and inst["md5"] and pub.get("md5") == inst["md5"]
+                    and pred.pub["maps"].get(b, {}).get("md5") == inst["md5"]):
                 for rate, f in pub.items():
-                    if isinstance(rate, float):
+                    if isinstance(rate, float) and f.get("keys") == inst["keys"]:
                         analyses[sha].setdefault(rate, f)
         # Deterministic per-chart order spreads unplayed coverage across collections.
         unknown = sorted((s for s in catalog if not analyses[s]), key=lambda s: hashlib.sha256(s.encode()).digest())
@@ -425,7 +462,19 @@ class Builder(threading.Thread):
                     return
                 batch = jobs[pos:pos + 2]
                 futures = [executor.submit(_job, catalog[s], [r], a, calc) for s, r, a in batch]
+                condition = self.cv
+                def completed(_future):
+                    with condition:
+                        condition.notify_all()
                 for future in futures:
+                    future.add_done_callback(completed)
+                for future in futures:
+                    with self.cv:
+                        self.cv.wait_for(lambda: future.done() or self.halt.is_set() or self.request is not None)
+                        if self.halt.is_set() or self.request is not None:
+                            for pending in futures:
+                                pending.cancel()  # running jobs finish normally; no compute deadline
+                            return
                     sha, fs, failure = future.result()
                     if failure:
                         bad[sha] = failure
