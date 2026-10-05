@@ -382,6 +382,12 @@ if __name__ == "__main__":
 
 
 
+def test_shipped_dan_table_is_stamped_for_this_calculator():
+    # A calculator change without `python3 calib/dan_table.py` hides every dan reading.
+    import dans
+    assert dans._table(), "rerun python3 calib/dan_table.py"
+
+
 def test_dan_labels_follow_course_order_and_chart_type(monkeypatch):
     import dans, math
     tiers = dans.monotone([(i, t, math.log(r)) for i, (t, r) in enumerate(
