@@ -115,6 +115,8 @@ W_IJACK = 0.4       # a hand-local jack with the other hand in between, below 7 
 JACK_SHARE = 0.7    # a hand jacking n fingers at once counts n**(1-JACK_SHARE) jacks (one bounce)
 MIRROR = 0.25       # base jack weight of the lesser hand when both hands repeat in the same row
 W_SPLIT = 1.5       # coordination of a chord split over both hands, × the lesser hand's effort
+W_ALT = 0.75        # interleaved bracket (13↔2 in one hand). Full DEV 7K map bias −.0032; a ramp over 6 rows
+                    # (user: "constantly alternate") was not significant on full DEV (2026-10-06)
 W_CROSS = 0.15
 W_CROSS_WIDE = 0.05   # 5K+ row-rate cost (public scores: 7K fast rice read too easy at 0.15; 4K keeps 0.15)
 W_TECH = 0.3         # public scores: rhythm-irregular maps read too hard at 0.55 / 0.4
@@ -300,57 +302,6 @@ W_WOB = 2.0         # reading cost of speed changes during the approach (stutter
 SV_VIS = 450.0      # ms of chart time a note is visible at multiplier 1 (nominal reading setup)
 
 
-def _legacy_sv_reading(chart, kinds=None):
-    """Per-note reading strain from scroll changes (0 on constant scroll): how far the time a note
-    is visible departs from nominal (compressed: less time to read; stretched: notes pile up), and
-    how much its speed at the judgement line differs from its average approach speed (a note that
-    brakes or lunges just before it is hit is timed wrong). Rate-free: ratios of chart time."""
-    if not chart.sv:
-        if kinds is not None:
-            kinds.extend([(0.0,) * len(SV_KINDS)] * len(chart.notes))
-        return [0.0] * len(chart.notes)
-    ts = [t for t, _ in chart.sv]
-    ms = [m for _, m in chart.sv]
-    xs = [0.0]                            # scroll position at each control point
-    for i in range(1, len(ts)):
-        xs.append(xs[-1] + (ts[i] - ts[i - 1]) * ms[i - 1])
-
-    def seg(t):
-        return max(0, bisect.bisect_right(ts, t) - 1)
-
-    def pos(t):
-        i = seg(t)
-        return xs[i] + (t - ts[i]) * ms[i]
-
-    def time_at(x):                       # inverse of pos (positions are monotonic)
-        i = max(0, bisect.bisect_right(xs, x) - 1)
-        return ts[i] + (x - xs[i]) / ms[i]
-    out = []
-    for t, _e, _c in chart.notes:
-        seen = t - time_at(pos(t) - SV_VIS)          # ms the note is on screen
-        ratio = SV_VIS / max(seen, 1.0)             # average approach speed / nominal
-        # the approach in pieces (the eye averages scroll jitter within a piece): arrival speed is
-        # the last piece's, wobble how far the pieces' speeds stray from the average
-        d = seen / SV_PIECES
-        sp = [max((pos(t - k * d) - pos(t - (k + 1) * d)) / d, 0.01) / ratio for k in range(SV_PIECES)]
-        brake = abs(math.log(sp[0]))
-        wob = W_WOB * sum(abs(math.log(v)) for v in sp) / SV_PIECES
-        lr = math.log(ratio)
-        out.append(min(3.0, abs(lr) + brake + wob))
-        if kinds is not None:
-            tot = abs(lr) + brake + wob or 1.0
-            # Wobble magnitude alone also fires on a smooth brake. Stutter
-            # needs a meaningful direction reversal during the approach.
-            logs = [math.log(v) for v in reversed(sp)]
-            d1, d2 = logs[1]-logs[0], logs[2]-logs[1]
-            stutter = wob if d1*d2 < 0 and min(abs(d1), abs(d2)) > .1 else 0.
-            directed = brake + wob - stutter
-            accel = directed if sp[0] >= 1 else 0.
-            decel = directed if sp[0] < 1 else 0.
-            kinds.append((max(lr, 0.0)/tot, max(-lr, 0.0)/tot, accel/tot, stutter/tot, decel/tot))
-    return out
-
-
 def sv_reading(chart, kinds=None, rate=1.0, detail=None, *, cancelled=None):
     """Reading at the actual rate; Constant Speed bypasses this entirely."""
     from skill_calc import _check_cancelled
@@ -363,6 +314,21 @@ def _v(d, knee=FLAM, taper=2.0):
     if d >= knee:
         return 1.0 / d
     return (max(d, 0.0) / knee) ** taper / knee
+
+
+def _inner(mask, keys):
+    """Columns strictly between the outermost fingers of `mask` (13 → 2)."""
+    lo = -1
+    hi = -1
+    for c in range(keys):
+        if mask >> c & 1:
+            if lo < 0:
+                lo = c
+            hi = c
+    inner = 0
+    for c in range(lo + 1, hi):
+        inner |= 1 << c
+    return inner
 
 
 def _smooth(x, lo, hi):
@@ -548,6 +514,7 @@ def _demand(chart, rate, centre_left, strain, kinds=None, *, cancelled=None, pla
     _constant_W_REL: cython.double = W_REL
     _constant_W_REPRESS: cython.double = W_REPRESS
     _constant_W_SPLIT: cython.double = W_SPLIT
+    _constant_W_ALT: cython.double = W_ALT
     _constant_W_STAG: cython.double = W_STAG
     _constant_W_SV: cython.double = W_SV
     _constant_W_TECH: cython.double = W_TECH
@@ -711,6 +678,7 @@ def _demand(chart, rate, centre_left, strain, kinds=None, *, cancelled=None, pla
     cs_sum: cython.double
     ds_sum: cython.double
     other: cython.double
+    alt: cython.double
     fast: cython.double
     r: cython.Py_ssize_t
     amount: cython.double
@@ -915,6 +883,18 @@ def _demand(chart, rate, centre_left, strain, kinds=None, *, cancelled=None, pla
             plain_x[b] += split
             plain_fine_x[fb] += split
         if wide:
+            if _constant_W_ALT:
+                for h in (0, 1):
+                    if row_hand[h] and previous_mask[h] and not n_jack[h] and previous_hand[h] == prev_row_t \
+                            and (_inner(previous_mask[h], keys) & row_hand[h] or _inner(row_hand[h], keys) & previous_mask[h]):
+                        alt = 0.0
+                        for amount, hh in pending:
+                            if hh == h:
+                                alt += amount
+                        alt *= _constant_W_ALT
+                        hands[h * nbins + b] += alt
+                        fine[h * nfine + fb] += alt
+                        pending.append((alt, h))
             jf = jack_w / size
             cs_sum = 0.0
             ds_sum = 0.0
@@ -1661,11 +1641,6 @@ def describe(res):
     if extra:
         tags.append("also " + " · ".join(extra))
     return dom, tags
-
-
-def compute_all(osu_path, rate=1.0):
-    """Flat {skill: rating} for a file (CLI / scripting)."""
-    return {k: round(v, 2) for k, v in compute(parse_osu(osu_path), rate)["scores"].items()}
 
 
 def main():

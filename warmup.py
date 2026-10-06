@@ -120,8 +120,9 @@ def completions(rows):
     return out
 
 
-def history_design(rows, tau):
-    observations=[];state={};last_end=None;session=-1
+def timeline(rows):
+    """Session, readiness minutes and exposure length per completion; tau-free, shared by every tau."""
+    out=[];state={};last_end=None;session=-1
     for r in completions(rows):
         end=r['ts'];start=end-r['seconds']
         if last_end is None or start-last_end>GAP:
@@ -133,14 +134,21 @@ def history_design(rows, tau):
         k=r['keys']; fam=r['family'];minutes=state.get((k,fam),0.)
         seconds=r['seconds'] if last_end is None else min(r['seconds'],max(0.,end-last_end))
         d=min(10.,seconds/60)
-        # The completed score averages cold and warming portions of that map.
-        exposure=math.exp(-minutes/tau)*(-math.expm1(-d/tau))*tau/d if d>.001 else math.exp(-minutes/tau)
-        observations.append(dict(r,session=session,activation=minutes,exposure=exposure))
+        out.append((r,session,minutes,d))
         decay=math.exp(-seconds/COOLING)
         state={key:value*decay for key,value in state.items()}
         for target in FAMILIES:
             state[k,target]=state.get((k,target),0.)+d*transfer(target,fam)
         last_end=end
+    return out
+
+
+def history_design(rows, tau, steps=None):
+    observations=[]
+    for r,session,minutes,d in (timeline(rows) if steps is None else steps):
+        # The completed score averages cold and warming portions of that map.
+        exposure=math.exp(-minutes/tau)*(-math.expm1(-d/tau))*tau/d if d>.001 else math.exp(-minutes/tau)
+        observations.append(dict(r,session=session,activation=minutes,exposure=exposure))
     return observations
 
 
@@ -292,7 +300,8 @@ def fit(rows, population=None, features=None):
     if not rows:return Model(population=population,elasticities=elasticities),{}
     if population is not None:
         rows=[dict(r,speed_slope=score_rate_slope(r['f'],population,elasticities)) for r in rows]
-    layouts={tau:history_design(rows,tau) for tau in TAUS}
+    steps=timeline(rows)
+    layouts={tau:history_design(rows,tau,steps) for tau in TAUS}
     modes={};report={};adjust={}
     for keys in sorted({r['keys'] for r in layouts[8.]}):
         ds=[r for r in layouts[8.] if r['keys']==keys]
@@ -335,7 +344,7 @@ def fit(rows, population=None, features=None):
     history=[{'end':r['ts'],'t':r['ts']-r['seconds'],'keys':r['keys'],'skill':r['family'],
               'played_seconds':r['seconds'],'key':r['key'],'beatmap':'md5:'+r['chart'],
               'kind':'finish','ability_evidence':True,'meaningful':True}
-             for r in completions(rows)[-64:]]
+             for r,*_ in steps[-64:]]
     model=Model(modes,history,report,population,elasticities)
     if baseline is not None:
         model.fallback=baseline.fallback

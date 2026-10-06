@@ -133,3 +133,12 @@ def test_a_new_selection_shows_its_title_and_calculating_until_its_analysis_land
         win._on_result((gen,path,rate,chart_,res,None,sv))
         assert win.dominant_lbl.get_text()!='Calculating…' and not win._pending
         win.destroy()
+
+
+def test_selected_map_card_is_not_queued_behind_post_play_rebuilds():
+    import recommend
+    q=recommend._Tasks()
+    for task in [('score',1),('publish',),('selected','a'),('abort',2),('feature_ready','a'),('publish',)]:
+        q.put(task)
+    assert [q.get_nowait() for _ in range(6)]==[('selected','a'),('feature_ready','a'),('score',1),
+                                                ('publish',),('abort',2),('publish',)]

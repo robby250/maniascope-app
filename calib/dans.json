@@ -1,5 +1,5 @@
 {
- "calc": "6b317643b774",
+ "calc": "55e4c04688af",
  "vibro_weights": [
   26.862496159204596,
   5.613330663951926
@@ -8,55 +8,55 @@
   "10K Regular": [
    {
     "tier": "Lv.0",
-    "value": 0.54071
+    "value": 0.54311
    },
    {
     "tier": "Lv.1",
-    "value": 0.7154
+    "value": 0.71855
    },
    {
     "tier": "Lv.2",
-    "value": 0.97179
+    "value": 0.973
    },
    {
     "tier": "Lv.3",
-    "value": 1.10255
+    "value": 1.11471
    },
    {
     "tier": "Lv.4",
-    "value": 1.18739
+    "value": 1.20419
    },
    {
     "tier": "Lv.5",
-    "value": 1.35069
+    "value": 1.42772
    },
    {
     "tier": "Lv.6",
-    "value": 1.48936
+    "value": 1.54079
    },
    {
     "tier": "Lv.7",
-    "value": 1.67454
+    "value": 1.73919
    },
    {
     "tier": "Lv.8",
-    "value": 1.76608
+    "value": 1.82767
    },
    {
     "tier": "Lv.9",
-    "value": 1.85904
+    "value": 1.91819
    },
    {
     "tier": "Lv.10",
-    "value": 1.952
+    "value": 2.00872
    },
    {
     "tier": "Lv.XI",
-    "value": 1.99263
+    "value": 2.04118
    },
    {
     "tier": "Virtuoso",
-    "value": 2.12482
+    "value": 2.18445
    }
   ],
   "4K LN": [
@@ -260,211 +260,211 @@
   "6K Regular": [
    {
     "tier": "0th",
-    "value": 0.70949
+    "value": 0.70988
    },
    {
     "tier": "1st",
-    "value": 0.91453
+    "value": 0.93119
    },
    {
     "tier": "2nd",
-    "value": 1.14849
+    "value": 1.15263
    },
    {
     "tier": "3rd",
-    "value": 1.2264
+    "value": 1.23797
    },
    {
     "tier": "4th",
-    "value": 1.38423
+    "value": 1.39415
    },
    {
     "tier": "5th",
-    "value": 1.46598
+    "value": 1.48218
    },
    {
     "tier": "6th",
-    "value": 1.54774
+    "value": 1.57021
    },
    {
     "tier": "7th",
-    "value": 1.58928
+    "value": 1.61559
    },
    {
     "tier": "8th",
-    "value": 1.65964
+    "value": 1.68892
    },
    {
     "tier": "9th",
-    "value": 1.69492
+    "value": 1.7096
    },
    {
     "tier": "10th",
-    "value": 1.77913
+    "value": 1.80161
    },
    {
     "tier": "Extra 1st",
-    "value": 1.83799
+    "value": 1.85692
    },
    {
     "tier": "Extra 2nd",
-    "value": 1.89685
+    "value": 1.91223
    },
    {
     "tier": "Extra 3rd",
-    "value": 1.91067
+    "value": 1.94138
    },
    {
     "tier": "Extra 4th",
-    "value": 1.93507
+    "value": 1.94372
    },
    {
     "tier": "Extra 5th",
-    "value": 2.01026
+    "value": 2.02322
    },
    {
     "tier": "Extra 6th",
-    "value": 2.11586
+    "value": 2.13109
    },
    {
     "tier": "Extra 7th",
-    "value": 2.14527
+    "value": 2.18637
    },
    {
     "tier": "Extra 8th",
-    "value": 2.17645
+    "value": 2.21389
    },
    {
     "tier": "Extra 9th",
-    "value": 2.20762
+    "value": 2.24141
    },
    {
     "tier": "Extra Final",
-    "value": 2.25401
+    "value": 2.28438
    }
   ],
   "7K LN": [
    {
     "tier": "0th",
-    "value": 0.89047
+    "value": 0.92222
    },
    {
     "tier": "1st",
-    "value": 1.005
+    "value": 1.00869
    },
    {
     "tier": "2nd",
-    "value": 1.36456
+    "value": 1.39931
    },
    {
     "tier": "3rd",
-    "value": 1.55958
+    "value": 1.58694
    },
    {
     "tier": "4th",
-    "value": 1.62351
+    "value": 1.65524
    },
    {
     "tier": "5th",
-    "value": 1.73897
+    "value": 1.73966
    },
    {
     "tier": "6th",
-    "value": 1.80354
+    "value": 1.81952
    },
    {
     "tier": "7th",
-    "value": 1.89311
+    "value": 1.90336
    },
    {
     "tier": "8th",
-    "value": 1.91604
+    "value": 1.94293
    },
    {
     "tier": "9th",
-    "value": 1.94731
+    "value": 1.96311
    },
    {
     "tier": "10th",
-    "value": 2.03205
+    "value": 2.05663
    },
    {
     "tier": "Gamma",
-    "value": 2.13716
+    "value": 2.16297
    },
    {
     "tier": "Azimuth",
-    "value": 2.24618
+    "value": 2.28288
    },
    {
     "tier": "Zenith",
-    "value": 2.34339
+    "value": 2.37875
    },
    {
     "tier": "Stellium",
-    "value": 2.51125
+    "value": 2.51869
    }
   ],
   "7K Regular": [
    {
     "tier": "0th",
-    "value": 1.16695
+    "value": 1.19599
    },
    {
     "tier": "1st",
-    "value": 1.33456
+    "value": 1.35674
    },
    {
     "tier": "2nd",
-    "value": 1.50899
+    "value": 1.52586
    },
    {
     "tier": "3rd",
-    "value": 1.57949
+    "value": 1.60547
    },
    {
     "tier": "4th",
-    "value": 1.63888
+    "value": 1.65759
    },
    {
     "tier": "5th",
-    "value": 1.69827
+    "value": 1.7097
    },
    {
     "tier": "6th",
-    "value": 1.74938
+    "value": 1.77096
    },
    {
     "tier": "7th",
-    "value": 1.83217
+    "value": 1.86263
    },
    {
     "tier": "8th",
-    "value": 1.87454
+    "value": 1.89814
    },
    {
     "tier": "9th",
-    "value": 1.915
+    "value": 1.95538
    },
    {
     "tier": "10th",
-    "value": 2.05383
+    "value": 2.11203
    },
    {
     "tier": "Gamma",
-    "value": 2.1346
+    "value": 2.16471
    },
    {
     "tier": "Azimuth",
-    "value": 2.21234
+    "value": 2.25597
    },
    {
     "tier": "Zenith",
-    "value": 2.31198
+    "value": 2.32927
    },
    {
     "tier": "Stellium",
-    "value": 2.41531
+    "value": 2.43873
    }
   ]
  }

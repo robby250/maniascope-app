@@ -1407,7 +1407,9 @@ class Recommender:
         self._score_cache = {}
         self._typ = {}
         self._fit_shown()
-        self._candidates()
+        # Built on the first PP-tab request: ~77k ranked variants × two models were
+        # 40 % of every refit even for players who only use NPS/Skills.
+        self.cands = None
         self.predictor = Predictor(self)
 
     def observe(self, key):
@@ -1517,7 +1519,7 @@ class Recommender:
             return cached, session
         if not cache_key[0]:
             return [], session
-        if cache_key[0] != self._candidate_keys:
+        if cache_key[0] != self._candidate_keys or getattr(self, "cands", None) is None:
             self._candidate_keys = cache_key[0]
             self._candidates()
         if not self.cands:
@@ -1967,13 +1969,30 @@ class Predictor:
                 "acc_hi": shown(mid - BAND_Z * spread)}
 
 
+class _Tasks(queue.PriorityQueue):
+    """FIFO, except the selected map's card: it no longer waits behind post-play
+    rebuilds (G835LX 2026-10-05: score/publish/abort queued 10–30 s ahead of it)."""
+    URGENT = frozenset(("selected", "feature_ready"))
+
+    def _init(self, maxsize):
+        super()._init(maxsize)
+        self._seq = 0
+
+    def _put(self, task):
+        self._seq += 1
+        super()._put((task[0] not in self.URGENT, self._seq, task))
+
+    def _get(self):
+        return super()._get()[2]
+
+
 class Worker(threading.Thread):
     """Owns the recommendation state and every write to its event log; the UI only queues tasks and
     renders what emit() hands back ({"type": "status" | "pool" | "target", ...})."""
 
     def __init__(self, emit, busy=lambda: False):
         super().__init__(daemon=True, name="recommend")
-        self.q, self.emit, self.busy = queue.Queue(), emit, busy
+        self.q, self.emit, self.busy = _Tasks(), emit, busy
         self.rec = self.target = None
         self.mode, self.action, self.revision = "pp", "auto", 0
         self._queued_config_revision = 0
@@ -2016,6 +2035,8 @@ class Worker(threading.Thread):
     def put(self, *task):
         if task[0] == 'configure' and len(task) > 4:
             self._queued_config_revision = max(self._queued_config_revision, task[4])
+        if task[0] == 'selected':
+            self._selected_at = time.monotonic()
         self.q.put(task)
 
     def _stage(self, text, done=0, total=0, blocking=False):
@@ -2747,6 +2768,12 @@ class Worker(threading.Thread):
                     failed = self._feature_errors.get((sha, round(rate,3), self.rec.feats.calc))
                     note = f"Prediction unavailable at {rate:.2f}×: {failed[1]}" if failed else f"Calculating prediction at {rate:.2f}×…"
                 self.emit({"type": "card", "c": c, "note": None if c else note, "path":path, "rate":rate})
+                asked = getattr(self, '_selected_at', None)
+                if c and asked is not None:
+                    self._selected_at = None
+                if c and asked is not None and time.monotonic() - asked > 1.:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] selected card latency {time.monotonic() - asked:.1f} s"
+                          f" · {self.q.qsize()} queued", flush=True)
             except OSError:
                 self.emit({"type": "card", "c": None, "note": "Selected chart file is unavailable", "path":path, "rate":rate})
         else:

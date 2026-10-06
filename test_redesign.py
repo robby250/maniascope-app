@@ -82,6 +82,7 @@ def test_central_prediction_is_not_risk_shifted():
     pred = R.Predictor.__new__(R.Predictor)
     pred.model = SimpleNamespace(predict=lambda *a: (-3., .4, .3), retry=0)
     pred.shown = (math.log(.75), 1.)
+    pred.calc, pred.predictor_id = "fixture", "fixture"
     session = R.Session([], 1000)
     session.warm_flag = True  # isolate central estimate from the explicit cold-session prior
     e = pred.predict({"keys": 7, "sk": {"chordjack": 1}}, "m", None, 1., session)

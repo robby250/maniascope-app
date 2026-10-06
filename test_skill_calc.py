@@ -417,3 +417,11 @@ def test_dan_labels_follow_course_order_and_chart_type(monkeypatch):
     assert dans.vibro_runs(run, rate=.8)["share"] == 0.          # slowed to 9.2 hits/s: jacks, not vibro
     stream = [(t * 87, t * 87, t % 4) for t in range(160)]
     assert dans.label(4, 3., 0., dans.vibro_runs(stream)) == "1st"
+
+
+def test_interleaved_bracket_is_harder_than_a_plain_bracket():
+    # user 2026-10-06: "they get rated the same as regular brackets but they constantly alternate
+    # fingers". 13↔2 per hand vs 12↔3 per hand, same rows, notes and timing.
+    inter = [(1000 + 110 * i, c) for i in range(800) for c in ((0, 2, 4, 6) if i % 2 else (1, 5))]
+    plain = [(1000 + 110 * i, c) for i in range(800) for c in ((0, 1, 5, 6) if i % 2 else (2, 4))]
+    assert rate(inter)["overall"] > 1.1 * rate(plain)["overall"]
