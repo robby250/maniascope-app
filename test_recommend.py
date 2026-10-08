@@ -234,6 +234,24 @@ def test_offered_chart_returns_after_a_share_of_the_pool_not_a_clock():
     assert s.freshness(9, 120, mode="pp", pool=40) < 1e-3           # offers in another tab do not count
 
 
+def test_played_and_offered_maps_stay_back_for_days_until_the_pool_cycles():
+    db, now = _db(), time.time()
+    big = {"mode": "pp", "md5": "a" * 32, "forecast": "x" * 5000}
+    recdata.log_event(db, "offer", "md5:" + "a" * 32, t=now - 5 * 86400, **big)
+    recdata.log_event(db, "start", "md5:" + "a" * 32, t=now - 5 * 86400 + 10, md5="a" * 32, length=120, mode="pp")
+    recdata.log_event(db, "finish", "md5:" + "a" * 32, t=now - 5 * 86400 + 130, md5="a" * 32)
+    s = R.Session(R.load_events(db), now)
+    assert s.history_attempts == [] and s.all == []           # form/predictions still see 3 days only
+    assert s.freshness("md5:" + "a" * 32, 120, mode="pp", pool=40) < 1e-3   # 5 days later, nothing else offered
+    assert R.Session(R.load_events(db), now + 10 * 86400).freshness("md5:" + "a" * 32, 120, mode="pp", pool=40) == 1.
+    for i in range(40):                                       # a whole pool of other maps played since
+        b = f"md5:{i:032d}"
+        recdata.log_event(db, "start", b, t=now - 86400 + 300 * i, md5=f"{i:032d}", length=120)
+        recdata.log_event(db, "finish", b, t=now - 86400 + 300 * i + 130, md5=f"{i:032d}")
+        recdata.log_event(db, "offer", b, t=now - 86400 + 300 * i, md5=f"{i:032d}", mode="pp")
+    assert .4 < R.Session(R.load_events(db), now).freshness("md5:" + "a" * 32, 120, mode="pp", pool=40) < .5
+
+
 def test_skip_is_not_permanent_and_render_is_not_exposure():
     t = time.time()
     ev = [{"t": t - 30, "kind": "start", "beatmap": "1", "info": {}}, {"t": t - 20, "kind": "skip", "beatmap": "9", "info": {}}]

@@ -43,6 +43,8 @@ LOCAL_MODES = ("nps", "skills")
 MODE_NAMES = {"pp": "PP", "nps": "NPS", "skills": "Skills"}
 
 SESSION_GAP = 50 * 60          # seconds without gameplay that start a new session
+HISTORY_S = 3 * 86400          # events that shape form/predictions
+EXPOSURE_S = 14 * 86400        # offers/plays that keep a map back (3 days let PP repeats return daily, G835LX 2026-10)
 ATT_SD = 1.0                   # attempt spread inflation over the within-chart residual sd (retro: 1.0 covers 83 %)
 QUANTS = (np.arange(21) + 0.5) / 21
 HT_MIN_P_UP = .5
@@ -798,7 +800,8 @@ class Session:
     def __init__(self, events, now=None, warmup_model=None):
         now = time.time() if now is None else now
         self.now = now
-        ev = sorted((e for e in events if e["t"] <= now), key=lambda e: e["t"])
+        seen = sorted((e for e in events if now - EXPOSURE_S <= e["t"] <= now), key=lambda e: e["t"])
+        ev = [e for e in seen if e["t"] >= now - HISTORY_S]
         start = 0
         last_play, active_until, active_key, active_id = None, None, None, None
         for i, e in enumerate(ev):
@@ -824,7 +827,8 @@ class Session:
         self.events = ev[start:]
         self.all = ev
         self.attempts = []                            # current-session form only
-        self.history_attempts = []                    # freshness also survives gaps/restarts
+        self.history_attempts = []                    # survives gaps/restarts, HISTORY_S only
+        self._seen_attempts = []                      # freshness: EXPOSURE_S
         self._corrections = {}
         self._warmup_model = warmup_model
         notes = {e["info"].get("start_id"): e["info"] for e in ev
@@ -832,7 +836,7 @@ class Session:
         results = {e["info"].get("start_id"): e["info"] for e in ev if e["kind"] == "pp_result"}
         pending = {}
         session_begin = self.events[0]["t"] if self.events else float("inf")
-        for e in ev:
+        for e in seen:
             info = e["info"]
             if e["kind"] == "start":
                 pending = dict(info, t=e["t"], beatmap=e["beatmap"], start_id=e.get("id"))
@@ -856,7 +860,9 @@ class Session:
                     central = pending.get("shown_mu", pending["mu"] + PESSIMISM * (pending.get("sdm") or 0.))
                     a["z"] = (central - info["y"]) / pending["sd"]
                 # An interruption is effort, not a measured accuracy or dislike.
-                self.history_attempts.append(a)
+                self._seen_attempts.append(a)
+                if a["t"] >= now - HISTORY_S:
+                    self.history_attempts.append(a)
                 if a["t"] >= session_begin:
                     self.attempts.append(a)
                 pending = {}
@@ -865,11 +871,11 @@ class Session:
         self._events_by_map = collections.defaultdict(list)
         self._attempts_by_map = collections.defaultdict(list)
         self._offer_times = collections.defaultdict(list)
-        for e in self.all:
+        for e in seen:
             self._events_by_map[str(e["beatmap"])].append(e)
             if e["kind"] == "offer":
                 self._offer_times[e["info"].get("mode")].append(e["t"])
-        for a in self.history_attempts:
+        for a in self._seen_attempts:
             self._attempts_by_map[str(a["beatmap"])].append(a)
         self._downrates = collections.defaultdict(list)
         for a in self.attempts:
@@ -1151,11 +1157,12 @@ class Session:
     def freshness(self, bid, length_s, mode=None, pool=None):
         """1 = fresh. A restart/reset affects form, never recent-play avoidance.
 
-        pool: the playlist's effective size. An offered chart then recovers by how many other offers
-        came since, (n/(n + pool/2))²: a soft shuffle bag — a quarter back after half the pool, 44% after
-        all of it, so a favourite can return before the pool is exhausted but never right away. Not a
-        hard bag ("not guaranteed … but it shouldn't come back very soon", user 2026-10-01), and not a
-        clock — a 40-minute recovery brought charts back within one session."""
+        pool: the playlist's effective size. An offered or played chart then recovers by how many other
+        maps came since, (n/(n + pool/2))²: a soft shuffle bag — a quarter back after half the pool, 44%
+        after all of it, so a favourite can return before the pool is exhausted but never right away. Not
+        a hard bag ("not guaranteed … but it shouldn't come back very soon", user 2026-10-01), and not a
+        clock — a 40-minute recovery brought charts back within one session, an 18-hour one brought PP
+        maps back every day (G835LX 2026-10-08: Psychoboost offered 7×, repeats 1/2/3/4/5 days apart)."""
         f, now = 1.0, self.now
         att = [a for a in self._attempts_by_map.get(str(bid), []) if a.get("meaningful")]
         last_offer = None
@@ -1169,27 +1176,66 @@ class Session:
                 if mode and e["info"].get("mode", mode) != mode:
                     continue
                 f *= (0.1 if e in self.events else 1 - 0.9 * math.exp(-dt / 43200))
-        if last_offer is not None and pool:
-            n = len(self._offer_times.get(mode, ())) - bisect.bisect_right(self._offer_times.get(mode, []), last_offer)
+        since = None
+        if att:
+            last = att[-1]
+            since = {a.get("beatmap") for a in self._seen_attempts
+                     if a["t"] > last["t"] and a.get("meaningful") and a.get("beatmap") != str(bid)}
+        if pool and (last_offer is not None or att):
+            # One bag over the latest exposure: the fewer of offers since its offer, maps played since its play.
+            counts = []
+            if last_offer is not None:
+                counts.append(len(self._offer_times.get(mode, ())) - bisect.bisect_right(self._offer_times.get(mode, []), last_offer))
+            if att:
+                counts.append(len(since))
+            n = min(counts)
             f *= (n / (n + .5 * pool)) ** 2
         elif last_offer is not None:
             f *= 1 - .98 * math.exp(-max(0., now-last_offer) / 2400.)
         if att:
-            last = att[-1]
-            since = {a.get("beatmap") for a in self.history_attempts
-                     if a["t"] > last["t"] and a.get("meaningful") and a.get("beatmap") != str(bid)}
-            need = min(10, 5 + math.ceil(length_s / 180))
-            recovery = 1 - .97 * math.exp(-max(0., now-last["end"]) / (18 * 3600.))
-            f *= max(recovery, min(1., len(since)/need) * .6)
+            if not pool:
+                need = min(10, 5 + math.ceil(length_s / 180))
+                recovery = 1 - .97 * math.exp(-max(0., now-last["end"]) / (18 * 3600.))
+                f *= max(recovery, min(1., len(since)/need) * .6)
             if len(att) >= 3:
                 f *= 0.5 ** (len(att) - 2)                # boredom, even for short maps
         return max(1e-6, f)
 
 
+EXPOSURE_KINDS = ("offer", "next", "open", "skip", "start", "finish", "abort", "reset", "void")
+EXPOSURE_FIELDS = ("md5", "sha", "bid", "mode", "length", "played_seconds", "progress", "start_id")
+
+
+def _exposures(db, start, until):
+    """Only what Session.freshness reads, without the large start payloads, and outside
+    event_info's cache so they never evict the recent ones."""
+    return [{"id": r["id"], "t": r["t"], "kind": r["kind"], "beatmap": r["beatmap"],
+             "info": {k: v for k, v in json.loads(r["info"]).items() if v is not None}}
+            for r in recdata.tracked_events(db, start, EXPOSURE_KINDS, until=until, fields=EXPOSURE_FIELDS)]
+
+
+_OLD_EXPOSURES = {}
+
+
+def _old_exposures(db, hour):
+    """The 3–14-day-old exposures change once an hour; re-reading them each Session cost 30 ms."""
+    path = db.execute("PRAGMA database_list").fetchone()[2]
+    key = (path, hour, tuple(db.execute("SELECT count(*), max(start), max(end) FROM tracking_pauses").fetchone()))
+    if key not in _OLD_EXPOSURES:
+        _OLD_EXPOSURES.clear()
+        _OLD_EXPOSURES[key] = _exposures(db, hour - (EXPOSURE_S - HISTORY_S), hour)
+    return _OLD_EXPOSURES[key]
+
+
 def load_events(db, since=None):
-    since = since if since is not None else time.time() - 3 * 86400
-    events = [{"id": r["id"], "t": r["t"], "kind": r["kind"], "beatmap": r["beatmap"], "info": dict(recdata.event_info(r["info"]))}
-            for r in recdata.tracked_events(db, since)]
+    events = []
+    if since is None:
+        since = time.time() - HISTORY_S
+        hour = since // 3600 * 3600
+        events = [dict(e, info=dict(e["info"])) for e in _old_exposures(db, hour)]
+        events += _exposures(db, hour, since)
+    events += [{"id": r["id"], "t": r["t"], "kind": r["kind"], "beatmap": r["beatmap"], "info": dict(recdata.event_info(r["info"]))}
+               for r in recdata.tracked_events(db, since)]
     offers = {e["id"]: e["info"] for e in events if e["kind"] == "offer"}
     for e in events:
         if e['kind']=='finish' and e['info'].get('y_lazer') is None and e['info'].get('key'):

@@ -221,13 +221,19 @@ def tracking_allowed(db, end, start=None):
                       (end, start)).fetchone() is None
 
 
-def tracked_events(db, since, kinds=()):
-    """Read current pause exclusions in one query, not once per event."""
-    query = ("SELECT e.* FROM events e WHERE e.t>=? AND NOT EXISTS ("
+def tracked_events(db, since, kinds=(), until=None, fields=None):
+    """Read current pause exclusions in one query, not once per event.
+
+    fields: keep only these info keys (SQLite JSON), sparing the decode of large start payloads."""
+    info = ("json_object(" + ",".join(f"'{k}',json_extract(e.info,'$.{k}')" for k in fields) + ") AS info"
+            if fields else "e.info")
+    query = (f"SELECT e.id,e.t,e.kind,e.beatmap,{info} FROM events e WHERE e.t>=? AND NOT EXISTS ("
              "SELECT 1 FROM tracking_pauses p WHERE p.start<=e.t AND (p.end IS NULL OR p.end>e.t))")
     if kinds:
         query += " AND e.kind IN (" + ",".join("?" for _ in kinds) + ")"
-    return db.execute(query + " ORDER BY e.t,e.id", (since, *kinds))
+    if until is not None:
+        query += " AND e.t<?"
+    return db.execute(query + " ORDER BY e.t,e.id", (since, *kinds, *(() if until is None else (until,))))
 
 
 def score_allowed(db, score, play=None, exclude=False):
