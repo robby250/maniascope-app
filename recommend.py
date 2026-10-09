@@ -49,7 +49,7 @@ ATT_SD = 1.0                   # attempt spread inflation over the within-chart 
 QUANTS = (np.arange(21) + 0.5) / 21
 HT_MIN_P_UP = .5
 HT_MIN_GAIN = 5.      # pp: HT only for a real gain, at least an even chance (user 2026-10-03)
-MIN_GAIN = .1         # pp: below this expected gain a PP map is not worth offering (user 2026-10-03; was .001)
+MIN_GAIN = .01        # pp: below this expected gain a PP map is not worth offering (user 2026-10-09: .1 left 0–75 maps; was .001)
 # Push is a weighted up-down staircase (Kaernbach 1991), no threshold (user 2026-10-01):
 # a beaten PP-offered best is one step up; a PP attempt that neither beats its best nor
 # meets the prediction, or any clearly bad play, is PUSH_DOWN steps down. The walk

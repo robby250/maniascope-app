@@ -17,7 +17,7 @@ def session(z, keys=7):
 def test_pp_pool_has_no_top25_or_gain_relative_floor():
     cands=[dict(_cand(i,.13+(i%10)*.01),acc_mid=.985,pp_mid=105.) for i in range(1,151)]
     cands.append(dict(_cand(1000,40.),acc_mid=.985,pp_mid=180.))
-    cands.append(dict(_cand(2000,.05),acc_mid=.985,pp_mid=105.))     # under the .1pp floor
+    cands.append(dict(_cand(2000,.005),acc_mid=.985,pp_mid=105.))    # under the .01pp floor
     r=_FakeRec(cands);s=R.Session([],1000)
     _,shown,_,note=r.pool(s,rng=random.Random(4))
     assert len(shown)==20 and len(r.pp_choices)==151
