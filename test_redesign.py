@@ -179,3 +179,19 @@ def test_replay_catchup_runs_with_queued_work_but_not_during_gameplay(tmp_path):
         w._replay_thread.join(timeout=2)
         assert read.call_count == 1 and w._replay_due is None and not w.q.empty()
     w.db.close()
+
+
+def test_post_play_rebuild_waits_for_selection_and_yields_to_it():
+    w = R.Worker(lambda message: None)
+    ran = []
+    w.t_selected = lambda *a: ran.append('selected')
+    w.t_refresh = lambda: ran.append('refresh')
+    w._refresh_later(); w._refresh_later()          # coalesced
+    w.put('configure_noop')
+    w.put('selected', '/x.osu', 1.25)
+    order = [w.q.get_nowait()[0] for _ in range(w.q.qsize())]
+    assert order == ['selected', 'configure_noop', 'refresh']
+    w.put('selected', '/x.osu', 1.3)
+    w.put('configure_noop')
+    w._yield_urgent()                                # inside a rebuild: only the selection runs
+    assert ran == ['selected'] and w.q.get_nowait()[0] == 'configure_noop'

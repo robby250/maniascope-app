@@ -1,6 +1,7 @@
 """Source/bundle sync can leave an old viewer running without mixing models."""
 import json
 import pickle
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import recdata
@@ -121,3 +122,13 @@ def test_updated_map_keeps_offer_link_without_reusing_old_revision(tmp_path):
     assert not navigation.same_map(old,sha='different',bid=-1)
     assert not navigation.same_map(old,sha='different',bid=123)
     w.db.close()
+
+
+def test_selected_chart_prediction_is_calculated_during_play():
+    import recommend as R
+    w = R.Worker(lambda message: None, busy=lambda: True)
+    w.rec = SimpleNamespace(feats=SimpleNamespace(calc='fixture'))
+    with patch.object(selected_analysis, 'calculate', return_value={1.25: {}}) as calculate:
+        w._feature_pending = ('a'*64, '/fixture.osu', 1.25, False, 'fixture')
+        w._feature_loop()
+    assert calculate.called and w.q.get()[0] == 'feature_ready'

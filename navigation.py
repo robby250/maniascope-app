@@ -124,4 +124,7 @@ def perform(c, action="auto"):
         open_url(url)
     except OSError as exc:
         return {"copy": url, "msg": f"Could not open beatmap panel ({exc}) — copied link", "sent": False}
-    return {"copy": None, "msg": "Sent beatmap link to osu! — choose Go to beatmap; mods unchanged", "sent": True}
+    # Auto still copies the search, so after downloading it can be pasted in song select (user 2026-10-09).
+    query = song_search(c) if action == "auto" else None
+    return {"copy": query or None, "msg": "Sent beatmap link to osu! — choose Go to beatmap; mods unchanged"
+            + (" · copied search" if query else ""), "sent": True}

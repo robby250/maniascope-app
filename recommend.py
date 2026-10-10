@@ -938,7 +938,7 @@ class Session:
         """Positive means good form; actual predictions use log-error correction directly."""
         return -self.correction(keys, skill) / .3
 
-    def correction(self, keys, skill, f=None):
+    def correction(self, keys, skill, f=None, loading=None):
         """Fast downward adaptation, cautious upward adaptation, partial skill transfer.
 
         Residuals are against the frozen pre-session base, not a prediction that
@@ -951,7 +951,7 @@ class Session:
             if ident not in self._corrections:
                 self._corrections[ident]=session_form.posterior(self.attempts,self.now,keys,prior)
             mean,_variance=self._corrections[ident]
-            return float(session_form.loading(skill,f)@mean)
+            return float((session_form.loading(skill,f) if loading is None else loading)@mean)
         cache_key = (keys, skill)
         if cache_key in self._corrections:
             return self._corrections[cache_key]
@@ -1539,6 +1539,11 @@ class Recommender:
             "scale": [pp_scale(c[3]["stars"], c[3]["hits"]) for c in C],
             "ranked": [c[4]["approved"] in recdata.RANKED_STATUS for c in C]}.items()}
         self.A["skill"] = [top_skill(c[3]) for c in C]
+        # Per-chart family mix, once per candidate set: score() needs it 4× per chart and
+        # 153k charts thrash the 32k LRU caches (18–25 s PP rebuild on 2026-10-10).
+        import session_form, warmup
+        self.A["profile"] = [warmup.family_weights(c[3]) for c in C]
+        self.A["loading"] = [session_form._loading(p) for p in self.A["profile"]]
         self.A["identity"] = np.array([event_key({"md5": c[4]["md5"], "bid": c[0]}) for c in C])
         display=getattr(self,'accuracy_model',None)
         if display is not None:
@@ -1571,10 +1576,12 @@ class Recommender:
         if not self.cands:
             return [], session
         A, cands, L = self.A, self.cands, self.ledger
-        F = np.array([session.correction(k,sk,c[3])+session.warmup_penalty(k,sk,c[3]['length']/1000/c[1],c[3],
+        pause = getattr(self, 'pause', None)     # the Worker answers a waiting map selection meanwhile
+        F = np.array([(pause() if pause and i % 4096 == 4095 else 0.)
+                      + session.correction(k,sk,c[3],ld)+session.warmup_penalty(k,sk,c[3]['length']/1000/c[1],c[3],
                           self.model.rate_response(c[3],c[4]['md5'],c[0],c[1]),
-                          lambda loss, c=c: self.model.rate_loss(c[3],c[4]['md5'],c[0],c[1],loss))
-                      for k,sk,c in zip(A['keys'].tolist(),A['skill'],cands)])
+                          lambda loss, c=c: self.model.rate_loss(c[3],c[4]['md5'],c[0],c[1],loss),pr)
+                      for i,(k,sk,c,pr,ld) in enumerate(zip(A['keys'].tolist(),A['skill'],cands,A['profile'],A['loading']))])
         tried = np.isin(A["identity"], list(session.retry_played))
         penalties = np.array([session.rate_penalty(c[4]["md5"], c[1]) for c in cands])
         learned=np.array([session.chart_correction(c[4]['md5'],c[1],c[3],self.model,A['sdm'][i]**2)
@@ -1604,10 +1611,10 @@ class Recommender:
         display=getattr(self,'accuracy_model',None)
         if display is not None:
             view=session.for_accuracy(display.warmup)
-            shift=np.array([view.correction(k,sk,c[3])+view.warmup_penalty(k,sk,c[3]['length']/1000/c[1],c[3],
+            shift=np.array([view.correction(k,sk,c[3],ld)+view.warmup_penalty(k,sk,c[3]['length']/1000/c[1],c[3],
                             display.rate_response(c[3],c[4]['md5'],c[0],c[1]),
-                            lambda loss,c=c:display.rate_loss(c[3],c[4]['md5'],c[0],c[1],loss))
-                            for k,sk,c in zip(A['keys'].tolist(),A['skill'],cands)])
+                            lambda loss,c=c:display.rate_loss(c[3],c[4]['md5'],c[0],c[1],loss),pr)
+                            for k,sk,c,pr,ld in zip(A['keys'].tolist(),A['skill'],cands,A['profile'],A['loading'])])
             local=np.array([view.chart_correction(c[4]['md5'],c[1],c[3],display,A['display_sdm'][i]**2)
                             for i,c in enumerate(cands)])
             display_mu=A['display_mu']+shift+penalties+local-display.retry*tried
@@ -2019,6 +2026,7 @@ class _Tasks(queue.PriorityQueue):
     """FIFO, except the selected map's card: it no longer waits behind post-play
     rebuilds (G835LX 2026-10-05: score/publish/abort queued 10–30 s ahead of it)."""
     URGENT = frozenset(("selected", "feature_ready"))
+    DEFERRED = frozenset(("refresh",))     # post-play rebuilds: after every user action
 
     def _init(self, maxsize):
         super()._init(maxsize)
@@ -2026,7 +2034,7 @@ class _Tasks(queue.PriorityQueue):
 
     def _put(self, task):
         self._seq += 1
-        super()._put((task[0] not in self.URGENT, self._seq, task))
+        super()._put((0 if task[0] in self.URGENT else 2 if task[0] in self.DEFERRED else 1, self._seq, task))
 
     def _get(self):
         return super()._get()[2]
@@ -2039,6 +2047,7 @@ class Worker(threading.Thread):
     def __init__(self, emit, busy=lambda: False):
         super().__init__(daemon=True, name="recommend")
         self.q, self.emit, self.busy = _Tasks(), emit, busy
+        self._refresh_queued = self._yielding = False
         self.rec = self.target = None
         self.mode, self.action, self.revision = "pp", "auto", 0
         self._queued_config_revision = 0
@@ -2118,6 +2127,7 @@ class Worker(threading.Thread):
                 gc.collect()
                 gc.freeze()
             self.rec = Recommender(self.db, public, keys=self.keys['pp'], progress=self._stage)
+            self.rec.pause = lambda: self._yield_urgent() or 0.
             self.generation += 1
             import nps
             self.builder = nps.Builder(lambda kind, data: self.put("nps_update", kind, data), self.busy)
@@ -2146,16 +2156,19 @@ class Worker(threading.Thread):
                     self._last_idle_check = time.monotonic()
                     self._daily_check()
                 continue
-            started = time.monotonic()
-            try:
-                getattr(self, "t_" + task[0])(*task[1:])
-                took = time.monotonic() - started
-                if took > 1.5:      # every later tab switch / Next waits behind it (run.log evidence)
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] slow recommender task {task[0]} {took:.1f} s"
-                          f" · {self.q.qsize()} queued", flush=True)
-            except Exception:
-                traceback.print_exc()
-                self.emit({"type": "status", "text": f"recommendation task {task[0]} failed (see run.log)"})
+            self._run(task)
+
+    def _run(self, task):
+        started = time.monotonic()
+        try:
+            getattr(self, "t_" + task[0])(*task[1:])
+            took = time.monotonic() - started
+            if took > 1.5:      # every later tab switch / Next waits behind it (run.log evidence)
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] slow recommender task {task[0]} {took:.1f} s"
+                      f" · {self.q.qsize()} queued", flush=True)
+        except Exception:
+            traceback.print_exc()
+            self.emit({"type": "status", "text": f"recommendation task {task[0]} failed (see run.log)"})
 
     def _catch_up_replays(self):
         """Archive independently: neither a busy queue nor slow Realm I/O blocks Next."""
@@ -2187,8 +2200,7 @@ class Worker(threading.Thread):
         if self.rec and fresh:
             for key in fresh:
                 self.rec.observe(key)
-            self._request_nps()
-            self._publish()
+            self._refresh_later()
         if pending:
             self._replay_retries += 1
             if self._replay_retries <= 3:
@@ -2342,6 +2354,31 @@ class Worker(threading.Thread):
     def t_publish(self):
         self._publish()
 
+    def _refresh_later(self):
+        """Post-play playlist rebuild: one coalesced background task, after the result and card."""
+        if not self._refresh_queued:
+            self._refresh_queued = True
+            self.put("refresh")
+
+    def t_refresh(self):
+        self._refresh_queued = False
+        self._request_nps()
+        self._publish()
+
+    def _yield_urgent(self):
+        """Run a waiting map/rate selection inside a long rebuild, so its card never waits for it."""
+        if self._yielding:
+            return
+        self._yielding = True
+        try:
+            while True:
+                with self.q.mutex:
+                    if not self.q.queue or self.q.queue[0][0] != 0:
+                        break
+                self._run(self.q.get_nowait())
+        finally:
+            self._yielding = False
+
     def t_web_updated(self):
         """A crawl published more website charts: rebuild NPS/Skills so they can be suggested now."""
         self._request_nps()
@@ -2428,7 +2465,9 @@ class Worker(threading.Thread):
         previous=self._local_prepared.get(mode)
         memo=previous[1] if previous and previous[0]==key else {}
         self._local_prepared[mode]=(key,memo)
-        for old in st["candidates"]:
+        for i, old in enumerate(st["candidates"]):
+            if i % 256 == 255:
+                self._yield_urgent()
             f, sha = old["f"], old["sha"]
             item_key=(sha,old['rate'])
             prepared=memo.get(item_key)
@@ -2700,8 +2739,7 @@ class Worker(threading.Thread):
         recdata.log_event(self.db, "abort", start["beatmap"] if start else getattr(self, "_current", None), t=play.get("end"),
                           start_id=start["id"] if start else None, progress=round(play.get("progress", 0), 3),
                           played_seconds=play.get("played_seconds", 0.), partial_stats=play.get("partial_stats"))
-        self._request_nps()
-        self._publish()
+        self._refresh_later()
 
     def t_void(self, play):
         recdata.log_event(self.db, "void", getattr(self, "_current", None))
@@ -2761,9 +2799,8 @@ class Worker(threading.Thread):
                 # A newly viewed old score is historical evidence, unlike a
                 # live current-session result already handled by form.
                 self.t_refit()
-            self._request_nps()
-            self._publish()
             self._card()
+            self._refresh_later()
             if self._stats_visible:
                 self.t_stats(True)
             if fresh:
@@ -2937,10 +2974,8 @@ class Worker(threading.Thread):
                     self._feature_thread = None
                     return
             sha, path, rate, refit, calc = task
-            while self.busy() and not self._halt.is_set():
-                self._halt.wait(1)
-            if self._halt.is_set():
-                return
+            # Not deferred during play: one niced child for the chart being played. Waiting left
+            # the card on "Calculating…" for the whole song after an in-game rate change (2026-10-10).
             try:
                 import selected_analysis
                 fs = selected_analysis.calculate(path, round(rate, 3), calc)
@@ -2963,10 +2998,9 @@ class Worker(threading.Thread):
         if self.rec and calc == self.rec.feats.calc:
             if fs:
                 self.rec.feats._store(sha, fs)
-            if fs and refit:
-                self._request_nps()
-                self._publish()
             self._card()
+            if fs and refit:
+                self._refresh_later()
 
     def t_reset(self):
         recdata.log_event(self.db, "reset")

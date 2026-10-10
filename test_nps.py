@@ -104,6 +104,8 @@ def test_local_search_and_actions():
         assert not pop.called
         assert navigation.perform(submitted, "link")["sent"]
         assert pop.call_count == 1
+        assert navigation.perform(dict(submitted, installed=False), "auto")["copy"] == q
+        assert pop.call_count == 2
         assert navigation.perform(dict(submitted, online_match=False), "link")["copy"] == q
 
 
