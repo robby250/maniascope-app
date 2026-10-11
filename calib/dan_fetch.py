@@ -22,6 +22,7 @@ SETS = {
     "Dan REFORM Pack": (593983, 598858, 608287, 611978),
     "DDMythical REFORM": (616461, 625751),
     "REFORM FINAL": (1156299,),
+    "REFORM FINAL Ext": (2234779,),     # CloverWisp's Theta/Iota/Kappa (graveyard)
     "REFORM Alter": (1260676,),
     # 4K vibro: both course sets and the per-song map packs, and the evaluation courses
     "Vibro Dan Courses": (563163, 564238, 973783, 973787, 2494639, 2495024, 2495355, 2495648),

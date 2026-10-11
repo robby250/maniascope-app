@@ -140,6 +140,13 @@ H_WEIGHTS = (0.0, 0.2, 0.25, 0.35)   # pull of each horizon's level on the ratin
 RATE_G = 0.12                        # every rating × rate**RATE_G: DT/HT plays are harder/easier than the
                                      # same note speeds at 1.0× (public scores: DT +5-6 % underrated without it)
 G_NOTES = -0.03                      # rating × (notes / 2000)**G_NOTES: accuracy averages over every note
+# Charts longer than 120 s × (r / UNIFORM_R0) ** (UNIFORM_W · log2(seconds / 120)), r = level of the hardest
+# UNIFORM_WIN window / 120 s level: a long chart that stays near its peak plays harder than one whose peak
+# is a single section (public scores, both splits and links: uniform long maps under-, peaky ones over-rated;
+# REFORM dans: Kappa's four even songs vs Iota's one peak song, user 2026-10-11). Strength chosen on DEV
+# (TRAIN fits ~0.15, the dans' mapper estimates want ~0.5: docs/REPORT_2026-10-11_CALC_TOP_END.md).
+# Penalty-only (r0 = 1), whole-chart windows and a separate low-side exponent were worse on DEV.
+UNIFORM_WIN, UNIFORM_R0, UNIFORM_W = 240.0, 0.95, 0.3
 # Attribution only (never changes overall): a section's demand counts toward every skill it shows,
 # relative to its dominant pattern; Technical saturates when this share of rows is awkward, Bracket
 # when bracket transitions carry this share of the demand.
@@ -1140,6 +1147,20 @@ def _horizon_levels(series):
     return out
 
 
+def _window_level(series, win):
+    """Stars of the hardest window of win seconds (tolerance 1), the chart whole if shorter."""
+    n: cython.Py_ssize_t = min(max(1, int(win / BIN)), len(series))
+    i: cython.Py_ssize_t
+    d: cython.double
+    acc: cython.double = 0.0
+    peak: cython.double = 0.0
+    for i, d in enumerate(series):
+        acc += d - (series[i - n] if i >= n else 0.0)
+        if acc > peak:
+            peak = acc
+    return _star(SCALE * math.sqrt(peak / n))
+
+
 def _combine(levels, notes):
     """Rating from the horizon levels: the binding (max) level, pulled toward the other horizons
     (a map hard at every horizon plays harder than one peaking at a single one) and discounted
@@ -1439,13 +1460,20 @@ def _compute(chart, rate, sv, shared, cancelled):
 
     # hardest window over PHASES bin-grid offsets: a burst must not rate lower because the grid split it
     levels = _horizon_levels(total)
+    span = (max(e for _t, e, _c in chart.notes) - chart.notes[0][0]) / 1000.0 / rate
+    long_chart = span > 120.0      # shorter charts get no uniformity factor: skip its windows
+    uniform = _window_level(total, UNIFORM_WIN) if long_chart else 0.0
     phase_totals=[total] if 'trace' in shared else None
     fine_runs = [tuple(array('d', side) for side in run[2]) for run in runs]
     for p in range(1, PHASES):
         tp = _phase_total(fine_runs[0], p) if m == 1 else \
             [sum(x) / m for x in zip(*(_phase_total(fine, p) for fine in fine_runs))]
         levels = [max(a, b) for a, b in zip(levels, _horizon_levels(tp))]
+        if long_chart:
+            uniform = max(uniform, _window_level(tp, UNIFORM_WIN))
         if phase_totals is not None: phase_totals.append(tp)
+    uniformity = (uniform / levels[-1] / UNIFORM_R0) ** (UNIFORM_W * math.log2(span / 120.0)) \
+        if long_chart and levels[-1] > 0 else 1.0
     sc = res["scores"]
     sc["overall"] = _combine(levels, len(chart.notes))
     res["horizon"] = HORIZONS[levels.index(max(levels))][0]
@@ -1531,6 +1559,14 @@ def _compute(chart, rate, sv, shared, cancelled):
     res['structure'] = shared['structure']
     res['length'] = max(e for _t,e,_c in chart.notes) - chart.notes[0][0]
     res=difficulty_model.apply(res, getattr(chart, "od", 8.), rate)
+    # After the fitted stack: its sustain-ratio input (120 s level / rating) would undo a factor on raw.
+    # The timeline stays local; the whole-chart uniformity is not a moment's difficulty.
+    for key in res["scores"]:
+        res["scores"][key] *= uniformity
+    for a in res["archetypes"]:
+        a["rating"] *= uniformity
+    res["baseline_overall"] *= uniformity
+    res["uniformity"] = uniformity
     # Keep the fitted critic's original coordinates above, then put horizon
     # ratings in the same rate-adjusted units as Overall and the timeline.
     res['levels'] = {h: v*k for h,v in res['levels'].items()}

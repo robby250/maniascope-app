@@ -8,7 +8,8 @@ Series: LN-heavy charts are placed among LN dans, the rest among rice dans; 4K c
 same-column runs are also placed among vibro dans (REFORM Zeta/Eta courses hold real vibro sections, so
 vibro is shown beside the rice dan). A chart mostly made of vibro runs shows the vibro dan alone: its
 mashing reads as fast rice/LN to the calculator, so "Zeta" or "LN Yami+" there named the wrong skill
-(user 2026-10-01). Vibro dans are placed by vibro speed together
+(user 2026-10-01) — unless the notes outside the runs are dense on their own: REFORM Iota/Kappa are 26/43 %
+vibro yet hard rice besides, and showed only "Vibro W+" (user 2026-10-11). Vibro dans are placed by vibro speed together
 with stars (weights fitted on the vibro dans): stars alone put Vibro 2–8 within 8.5–9.2★ out of order,
 and population accuracy on ranked vibro charts gives no reason to move the stars themselves.
 """
@@ -30,13 +31,15 @@ VIBRO_GAP = 100        # ms: a column re-hit this fast keeps a vibro run going (
 VIBRO_RUN = 6          # hits in one column before it counts as vibro, not a jack
 VIBRO_SHARE = .10      # share of notes in such runs: 117/120 vibro dan charts, 0.5% of ranked 4K (2026-10-01)
 VIBRO_ONLY = .25      # 44/48 vibro dan charts reach it; 4/113 REFORM charts (Zeta/Eta vibro songs), no LN dan chart
+VIBRO_REST = 13.      # notes/s outside vibro runs: vibro dan charts <= 12.3, REFORM charts >= 13.5 at 10%+ vibro
 LN_SHARE = .22         # LN dans' charts hold >= 25% LN notes, rice dans' <= 19% (2026-10-01)
 LN_MAJORITY = .5       # from here holds are most notes: the LN dan alone
 
 
 def vibro_runs(notes, rate=1.0):
-    """{share, speed}: share of notes in same-column runs (>= VIBRO_RUN hits, <= VIBRO_GAP apart at
-    this rate) and their median hits per second. Rolls count too: their columns repeat just as fast."""
+    """{share, speed, rest}: share of notes in same-column runs (>= VIBRO_RUN hits, <= VIBRO_GAP apart at
+    this rate), their median hits per second, and the other notes per second of chart.
+    Rolls count too: their columns repeat just as fast."""
     cols = collections.defaultdict(list)
     for start, _end, col in notes:
         cols[col].append(start / rate)
@@ -53,7 +56,14 @@ def vibro_runs(notes, rate=1.0):
                 gaps += [b - a for a, b in zip(run, run[1:])]
             run = [t]
     gaps.sort()
-    return {"share": inrun / max(1, len(notes)), "speed": 1000 / gaps[len(gaps) // 2] if gaps else 0.}
+    span = (max(n[0] for n in notes) - min(n[0] for n in notes)) / rate / 1000 if notes else 0.
+    return {"share": inrun / max(1, len(notes)), "speed": 1000 / gaps[len(gaps) // 2] if gaps else 0.,
+            "rest": (len(notes) - inrun) / span if span else 0.}
+
+
+def vibro_only(vibro):
+    """Mostly vibro runs with little else: the rice/LN dan would name the wrong skill."""
+    return vibro["share"] >= VIBRO_ONLY and vibro.get("rest", 0.) < VIBRO_REST
 
 
 @functools.lru_cache(maxsize=1)
@@ -129,12 +139,12 @@ def place(series, rating, vibro=None):
 
 def label(keys, rating, ln_share, vibro=None):
     # Vibro last: the rice/LN dan is the main reading (user 2026-10-01).
-    share = vibro["share"] if keys == 4 and vibro else 0.
+    vibro = vibro if keys == 4 else None
     # Mixed charts (LN dan share but mostly taps) read on both, the tap dans first (user 2026-10-01:
     # Rebellious exorcist [Eternal Torment], 29 % LN rice stamina, showed only "LN Gamma").
     series = [kind(ln_share)] if ln_share < LN_SHARE or ln_share >= LN_MAJORITY else ["rice", "ln"]
-    parts = [None if share >= VIBRO_ONLY else place(SERIES.get((keys, s)), rating) for s in series] + \
-            [place("4K Vibro", rating, vibro) if share >= VIBRO_SHARE else None]
+    parts = [None if vibro and vibro_only(vibro) else place(SERIES.get((keys, s)), rating) for s in series] + \
+            [place("4K Vibro", rating, vibro) if vibro and vibro["share"] >= VIBRO_SHARE else None]
     return " · ".join(p for p in parts if p) or None
 
 

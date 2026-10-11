@@ -4,8 +4,10 @@
 
 calib/dan_courses.tsv names each chart by SHA-256 with its series, tier, pack (its beatmap set: the
 hold-out unit) and kind (course, or a single song). Course files are also split at their song
-boundaries, so each course adds its songs at its tier. A tier's anchor is the median over all its
-charts; the report places every pack's charts with anchors built without that pack.
+boundaries, so each course adds its songs at its tier. A tier's anchor is the median over its packs of
+each pack's value: its course, else the median of its songs, else of its split pieces. Pooling a course with
+its own pieces put the course above its tier (pieces rate ~5 % lower; REFORM Theta showed "Theta+",
+user 2026-10-11). The report places every pack's charts with anchors built without that pack.
 Mappers' files stay out of the repository. Rerun after any calculator change: dans.py ignores a table
 from another calculator.
 
@@ -95,13 +97,20 @@ def vibro_weights(charts):
 
 
 def anchors(charts, weights):
-    by = collections.defaultdict(lambda: collections.defaultdict(list))
+    by = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(
+        lambda: collections.defaultdict(list))))
     names = {}
     for c in charts:
-        by[c["series"]][float(c["order"])].append(dans.value(c["series"], c["rating"], c["vibro"], weights))
+        by[c["series"]][float(c["order"])][c["pack"]][c["kind"]].append(
+            dans.value(c["series"], c["rating"], c["vibro"], weights))
         names[c["series"], float(c["order"])] = c["tier"]
-    return {s: [dict(order=o, tier=names[s, o], value=round(statistics.median(v), 5), n=len(v))
-                for o, v in sorted(t.items())] for s, t in by.items()}
+    out = {}
+    for s, t in by.items():
+        out[s] = []
+        for o, packs in sorted(t.items()):
+            v = [statistics.median(k["course"] or k["song"] or k["split"]) for k in packs.values()]
+            out[s].append(dict(order=o, tier=names[s, o], value=round(statistics.median(v), 5), n=len(v)))
+    return out
 
 
 def ladder(series_anchors):
@@ -111,7 +120,7 @@ def ladder(series_anchors):
 def detected(c):
     if c["series"] == "4K Vibro":
         return c["vibro"]["share"] >= dans.VIBRO_SHARE
-    if int(c["keys"]) == 4 and c["vibro"]["share"] >= dans.VIBRO_ONLY:
+    if int(c["keys"]) == 4 and dans.vibro_only(c["vibro"]):
         return False                    # shown as vibro alone at runtime
     return dans.SERIES.get((int(c["keys"]), dans.kind(c["ln"]))) == c["series"]
 

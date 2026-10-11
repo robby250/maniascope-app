@@ -412,6 +412,9 @@ def test_dan_labels_follow_course_order_and_chart_type(monkeypatch):
     assert dans.label(4, 3., 0., vib) == "Vibro 2−"     # all vibro: the rice dan would name the wrong skill
     mixed = run + [(4000 + t * 87, 4000 + t * 87, t % 4) for t in range(600)]      # 21 % vibro runs
     assert dans.label(4, 3., 0., dans.vibro_runs(mixed)) == "1st · Vibro 2−"
+    # mostly vibro but dense rice besides (REFORM Kappa): both dans
+    dense = dans.vibro_runs(run + [(t * 50, t * 50, 4 + t % 4) for t in range(140)])     # 53 % vibro
+    assert dense["share"] > dans.VIBRO_ONLY and 20 < dense["rest"] < 21 and dans.label(4, 3., 0., dense) == "1st · Vibro 2−"
     assert dans.ability(4, 3.) == "1st" and dans.ability(7, 3.5, "ln/release").startswith("LN ")
     assert dans.ability(4, 3., "jackspeed/vibro") is None and dans.ability(4, None) is None
     assert dans.vibro_runs(run, rate=.8)["share"] == 0.          # slowed to 9.2 hits/s: jacks, not vibro

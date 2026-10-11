@@ -1,62 +1,62 @@
 {
- "calc": "55e4c04688af",
+ "calc": "06a9fa35293e",
  "vibro_weights": [
-  26.862496159204596,
-  5.613330663951926
+  26.835914818866403,
+  5.613337841428365
  ],
  "series": {
   "10K Regular": [
    {
     "tier": "Lv.0",
-    "value": 0.54311
+    "value": 0.55126
    },
    {
     "tier": "Lv.1",
-    "value": 0.71855
+    "value": 0.75535
    },
    {
     "tier": "Lv.2",
-    "value": 0.973
+    "value": 1.02072
    },
    {
     "tier": "Lv.3",
-    "value": 1.11471
+    "value": 1.24253
    },
    {
     "tier": "Lv.4",
-    "value": 1.20419
+    "value": 1.33024
    },
    {
     "tier": "Lv.5",
-    "value": 1.42772
+    "value": 1.41794
    },
    {
     "tier": "Lv.6",
-    "value": 1.54079
+    "value": 1.53844
    },
    {
     "tier": "Lv.7",
-    "value": 1.73919
+    "value": 1.71031
    },
    {
     "tier": "Lv.8",
-    "value": 1.82767
+    "value": 1.81096
    },
    {
     "tier": "Lv.9",
-    "value": 1.91819
+    "value": 1.91667
    },
    {
     "tier": "Lv.10",
-    "value": 2.00872
+    "value": 2.02239
    },
    {
     "tier": "Lv.XI",
-    "value": 2.04118
+    "value": 2.08263
    },
    {
     "tier": "Virtuoso",
-    "value": 2.18445
+    "value": 2.18698
    }
   ],
   "4K LN": [
@@ -66,7 +66,7 @@
    },
    {
     "tier": "2nd",
-    "value": 1.30733
+    "value": 1.28582
    },
    {
     "tier": "3rd",
@@ -74,11 +74,11 @@
    },
    {
     "tier": "4th",
-    "value": 1.46505
+    "value": 1.4311
    },
    {
     "tier": "5th",
-    "value": 1.51511
+    "value": 1.45402
    },
    {
     "tier": "6th",
@@ -86,261 +86,273 @@
    },
    {
     "tier": "7th",
-    "value": 1.63165
+    "value": 1.61509
    },
    {
     "tier": "8th",
-    "value": 1.6951
+    "value": 1.6771
    },
    {
     "tier": "9th",
-    "value": 1.74452
+    "value": 1.73298
    },
    {
     "tier": "10th",
-    "value": 1.85208
+    "value": 1.85147
    },
    {
     "tier": "Yoake",
-    "value": 1.93944
+    "value": 1.93349
    },
    {
     "tier": "Yuugure",
-    "value": 1.99814
+    "value": 1.94009
    },
    {
     "tier": "Yoru",
-    "value": 2.05684
+    "value": 2.05545
    },
    {
     "tier": "Yokaze",
-    "value": 2.24254
+    "value": 2.23896
    },
    {
     "tier": "Yami",
-    "value": 2.24626
+    "value": 2.24742
    },
    {
     "tier": "Yume",
-    "value": 2.24998
+    "value": 2.25588
    }
   ],
   "4K REFORM": [
    {
     "tier": "Intro 1",
-    "value": 0.26648
+    "value": 0.24367
    },
    {
     "tier": "Intro 2",
-    "value": 0.57172
+    "value": 0.60257
    },
    {
     "tier": "Intro 3",
-    "value": 0.95469
+    "value": 0.97264
    },
    {
     "tier": "Reform 1",
-    "value": 1.00937
+    "value": 1.03558
    },
    {
     "tier": "Reform 2",
-    "value": 1.11323
+    "value": 1.08069
    },
    {
     "tier": "Reform 3",
-    "value": 1.1563
+    "value": 1.16589
    },
    {
     "tier": "Reform 4",
-    "value": 1.3133
+    "value": 1.30549
    },
    {
     "tier": "Reform 5",
-    "value": 1.39374
+    "value": 1.39908
    },
    {
     "tier": "Reform 6",
-    "value": 1.54981
+    "value": 1.5569
    },
    {
     "tier": "Reform 7",
-    "value": 1.59107
+    "value": 1.5957
    },
    {
     "tier": "Reform 8",
-    "value": 1.63295
+    "value": 1.64302
    },
    {
     "tier": "Reform 9",
-    "value": 1.7054
+    "value": 1.70866
    },
    {
     "tier": "Reform 10",
-    "value": 1.76259
+    "value": 1.78141
    },
    {
     "tier": "Alpha",
-    "value": 1.89899
+    "value": 1.90013
    },
    {
     "tier": "Beta",
-    "value": 1.94889
+    "value": 1.93791
    },
    {
     "tier": "Gamma",
-    "value": 1.9988
+    "value": 1.9757
    },
    {
     "tier": "Delta",
-    "value": 2.16441
+    "value": 2.177
    },
    {
     "tier": "Epsilon",
-    "value": 2.34219
+    "value": 2.31613
    },
    {
     "tier": "Zeta",
-    "value": 2.40191
+    "value": 2.37752
    },
    {
     "tier": "Eta",
-    "value": 2.59531
+    "value": 2.57497
+   },
+   {
+    "tier": "Theta",
+    "value": 2.72104
+   },
+   {
+    "tier": "Iota",
+    "value": 2.83744
+   },
+   {
+    "tier": "Kappa",
+    "value": 2.84421
    }
   ],
   "4K Vibro": [
    {
     "tier": "Vibro 1",
-    "value": 76.20119
+    "value": 75.52424
    },
    {
     "tier": "Vibro 2",
-    "value": 76.61215
+    "value": 76.04467
    },
    {
     "tier": "Vibro 3",
-    "value": 77.02311
+    "value": 76.94198
    },
    {
     "tier": "Vibro 4",
-    "value": 77.52974
+    "value": 77.45475
    },
    {
     "tier": "Vibro 5",
-    "value": 78.03636
+    "value": 77.96752
    },
    {
     "tier": "Vibro 6",
-    "value": 78.30037
+    "value": 78.24651
    },
    {
     "tier": "Vibro 7",
-    "value": 78.67179
+    "value": 78.57823
    },
    {
     "tier": "Vibro 8",
-    "value": 78.98288
+    "value": 78.85848
    },
    {
     "tier": "Vibro 9",
-    "value": 80.08692
+    "value": 79.97993
    },
    {
     "tier": "Vibro 10",
-    "value": 81.57193
+    "value": 81.43586
    },
    {
     "tier": "Vibro O",
-    "value": 82.94238
+    "value": 82.86241
    },
    {
     "tier": "Vibro W",
-    "value": 83.7451
+    "value": 83.6801
    }
   ],
   "6K Regular": [
    {
     "tier": "0th",
-    "value": 0.70988
+    "value": 0.76818
    },
    {
     "tier": "1st",
-    "value": 0.93119
+    "value": 0.94738
    },
    {
     "tier": "2nd",
-    "value": 1.15263
+    "value": 1.16985
    },
    {
     "tier": "3rd",
-    "value": 1.23797
+    "value": 1.32378
    },
    {
     "tier": "4th",
-    "value": 1.39415
+    "value": 1.40302
    },
    {
     "tier": "5th",
-    "value": 1.48218
+    "value": 1.48301
    },
    {
     "tier": "6th",
-    "value": 1.57021
+    "value": 1.56299
    },
    {
     "tier": "7th",
-    "value": 1.61559
+    "value": 1.66156
    },
    {
     "tier": "8th",
-    "value": 1.68892
+    "value": 1.71055
    },
    {
     "tier": "9th",
-    "value": 1.7096
+    "value": 1.72093
    },
    {
     "tier": "10th",
-    "value": 1.80161
+    "value": 1.8314
    },
    {
     "tier": "Extra 1st",
-    "value": 1.85692
+    "value": 1.88316
    },
    {
     "tier": "Extra 2nd",
-    "value": 1.91223
+    "value": 1.93491
    },
    {
     "tier": "Extra 3rd",
-    "value": 1.94138
+    "value": 1.95385
    },
    {
     "tier": "Extra 4th",
-    "value": 1.94372
+    "value": 2.03361
    },
    {
     "tier": "Extra 5th",
-    "value": 2.02322
+    "value": 2.05957
    },
    {
     "tier": "Extra 6th",
-    "value": 2.13109
+    "value": 2.09331
    },
    {
     "tier": "Extra 7th",
-    "value": 2.18637
+    "value": 2.17297
    },
    {
     "tier": "Extra 8th",
-    "value": 2.21389
+    "value": 2.20142
    },
    {
     "tier": "Extra 9th",
-    "value": 2.24141
+    "value": 2.30952
    },
    {
     "tier": "Extra Final",
-    "value": 2.28438
+    "value": 2.33923
    }
   ],
   "7K LN": [
@@ -350,11 +362,11 @@
    },
    {
     "tier": "1st",
-    "value": 1.00869
+    "value": 1.00972
    },
    {
     "tier": "2nd",
-    "value": 1.39931
+    "value": 1.39934
    },
    {
     "tier": "3rd",
@@ -362,85 +374,85 @@
    },
    {
     "tier": "4th",
-    "value": 1.65524
+    "value": 1.67446
    },
    {
     "tier": "5th",
-    "value": 1.73966
+    "value": 1.76595
    },
    {
     "tier": "6th",
-    "value": 1.81952
+    "value": 1.83988
    },
    {
     "tier": "7th",
-    "value": 1.90336
+    "value": 1.89346
    },
    {
     "tier": "8th",
-    "value": 1.94293
+    "value": 1.95541
    },
    {
     "tier": "9th",
-    "value": 1.96311
+    "value": 1.98141
    },
    {
     "tier": "10th",
-    "value": 2.05663
+    "value": 2.07168
    },
    {
     "tier": "Gamma",
-    "value": 2.16297
+    "value": 2.16871
    },
    {
     "tier": "Azimuth",
-    "value": 2.28288
+    "value": 2.27553
    },
    {
     "tier": "Zenith",
-    "value": 2.37875
+    "value": 2.37874
    },
    {
     "tier": "Stellium",
-    "value": 2.51869
+    "value": 2.5202
    }
   ],
   "7K Regular": [
    {
     "tier": "0th",
-    "value": 1.19599
+    "value": 1.17772
    },
    {
     "tier": "1st",
-    "value": 1.35674
+    "value": 1.35289
    },
    {
     "tier": "2nd",
-    "value": 1.52586
+    "value": 1.53857
    },
    {
     "tier": "3rd",
-    "value": 1.60547
+    "value": 1.58928
    },
    {
     "tier": "4th",
-    "value": 1.65759
+    "value": 1.60212
    },
    {
     "tier": "5th",
-    "value": 1.7097
+    "value": 1.70784
    },
    {
     "tier": "6th",
-    "value": 1.77096
+    "value": 1.7765
    },
    {
     "tier": "7th",
-    "value": 1.86263
+    "value": 1.86349
    },
    {
     "tier": "8th",
-    "value": 1.89814
+    "value": 1.89461
    },
    {
     "tier": "9th",
@@ -448,23 +460,23 @@
    },
    {
     "tier": "10th",
-    "value": 2.11203
+    "value": 2.11048
    },
    {
     "tier": "Gamma",
-    "value": 2.16471
+    "value": 2.16777
    },
    {
     "tier": "Azimuth",
-    "value": 2.25597
+    "value": 2.26089
    },
    {
     "tier": "Zenith",
-    "value": 2.32927
+    "value": 2.33565
    },
    {
     "tier": "Stellium",
-    "value": 2.43873
+    "value": 2.44016
    }
   ]
  }
