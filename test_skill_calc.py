@@ -143,6 +143,9 @@ def test_hand_patterns():
     # bracket: each hand trills between disjoint finger groups, one a chord (13 / 2)
     br = [(1000 + 120 * i, c) for i in range(800) for c in ((0, 2, 4, 6) if i % 2 else (1, 5))]
     assert "bracket" in top(br, 3) and rate(br)["bracket"] > 2 * rate(stream(800, 120))["bracket"]
+    # disjoint chord moves that never interleave are chordstream (user 2026-10-11: cigarettes)
+    cs = [(1000 + 120 * i, c) for i in range(800) for c in ((2, 6) if i % 2 else (0, 1, 4, 5))]
+    assert top(cs)[0] == "chordstream" and "bracket" not in top(cs, 3)
     # a smooth roll is not technical; broken rhythm is
     assert rate(stream(600, 100))["technical"] < 0.25
     swing = [(1000 + 100 * i + (37 if i % 3 == 1 else 0), i % 7) for i in range(600)]

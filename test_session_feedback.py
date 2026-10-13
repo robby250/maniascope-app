@@ -205,3 +205,21 @@ def test_whole_map_technical_presence_distinguishes_regular_from_irregular_hands
     assert pb['rhythmtech'] > .5 and pb['technical'] > .5
     assert P.technical_description('Dump / Minijack',{'technical':.72},pb) == 'Tech Dump / Minijack'
     assert P.technical_description('Dump / Minijack',{'technical':.72},pa) == 'Dump / Minijack'
+
+
+
+def test_a_rate_whose_last_result_missed_is_not_offered_again():
+    # user 2026-10-13: "not get picked exactly the same rate even though it's not accurate"
+    import math
+    from test_skill_practice import Predictor, feature, inst
+    fs = {1.11: feature({'chordstream': 1.}, acc=.94, rate=1.11), 1.08: feature({'chordstream': 1.}, acc=.945, rate=1.08)}
+    def session(acc):
+        s = R.Session([], 1000)
+        s._attempts_by_map['md5:a'].append({'kind': 'finish', 'rate': 1.11, 'end': 900., 'y_lazer': math.log(1 - acc)})
+        return s
+    assert nps.candidates_from({'a': inst('a')}, {'a': fs}, Predictor(), session(.941))[0][0]['rate'] == 1.11
+    assert nps.candidates_from({'a': inst('a')}, {'a': fs}, Predictor(), session(.93))[0][0]['rate'] == 1.08
+    # only the missed rate analysed: the next rate follows your result (93 % -> slower, 96 % -> faster)
+    for acc, slower in ((.93, True), (.96, False)):
+        choices, proposals = nps.candidates_from({'a': inst('a')}, {'a': {1.11: fs[1.11]}}, Predictor(), session(acc))
+        assert not choices and (proposals[0][2] < 1.11) == slower

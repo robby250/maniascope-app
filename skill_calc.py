@@ -162,6 +162,9 @@ R_EVENT = 0.025      # s: rows closer than this are one rhythmic event (flam, ro
 DELAY_GAP = 0.07     # s between rows: faster one-finger-per-hand rice is Delay (4K: Dump), slower is Stream
 TRILL_GAP = 0.2      # s between rows: a chord trill (Jumptrill, Split Trill) is faster than this
 BRACKET_FULL = 0.4
+# Label only (after the fitted stack, which reads the ungated score): a bracket interleaves (13 -> 2);
+# 7K chordstream's disjoint chord moves are 19-21 % interleaved, Bracket packs 48-100 % (user 2026-10-11).
+BRACKET_IL_FULL = 0.45
 DUMP_FULL = 0.5      # 4K Dump saturates when Delay-rule rice carries this share of the demand
 MJ_BURST = 2         # rows: a chain of at most this many column-repeating rows, then a break, is a minijack
 MJ_FULL = 0.2        # Minijack saturates when this share of rows are minijack-burst rows
@@ -1542,6 +1545,17 @@ def _compute(chart, rate, sv, shared, cancelled):
             pressure += ((a & b).bit_count() / chart.keys) ** 2 * min(2., .125 / gap)
             pairs += 1
     res["jack_width"] = pressure / max(1, pairs)
+    if "bracket" in sc:
+        half = chart.keys // 2      # an odd middle column belongs to neither hand here
+        hm = ((1 << half) - 1, ((1 << half) - 1) << (chart.keys - half))
+        moves = interleaved = 0
+        for (_ta, a), (_tb, b) in zip(rs, rs[1:]):
+            for h in hm:
+                pa, pb = a & h, b & h
+                if pa and pb and not pa & pb and max(pa.bit_count(), pb.bit_count()) >= 2:
+                    moves += 1
+                    interleaved += bool(_inner(pa, chart.keys) & pb or _inner(pb, chart.keys) & pa)
+        bracket_gate = min(1.0, interleaved / (BRACKET_IL_FULL * moves)) if moves else 1.0
     if sv and chart.sv and any(strain):
         # The hand/LN calibration must not change merely because an identical
         # physical chart acquired SV. Calibrate its physical coordinates once,
@@ -1567,6 +1581,13 @@ def _compute(chart, rate, sv, shared, cancelled):
         a["rating"] *= uniformity
     res["baseline_overall"] *= uniformity
     res["uniformity"] = uniformity
+    if "bracket" in sc and bracket_gate < 1.0:
+        sc["bracket"] *= bracket_gate
+        for a in res["archetypes"]:
+            if "bracket" in a["parts"]:
+                a["rating"] *= bracket_gate
+        res["archetypes"] = [a for a in res["archetypes"] if a["name"] != NAMES["bracket"]
+                             or sc["bracket"] >= REFINE_Q * sc["chordstream"]]
     # Keep the fitted critic's original coordinates above, then put horizon
     # ratings in the same rate-adjusted units as Overall and the timeline.
     res['levels'] = {h: v*k for h,v in res['levels'].items()}

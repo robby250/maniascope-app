@@ -21,6 +21,10 @@ import skill_practice
 
 from chart_structure import STRUCTURE_VERSION, structure
 MIN_RATE, MAX_RATE = 0.70, 1.50
+# An exact rate whose last finished result (14 days) missed the target by more than this is not
+# offered again; the next rate comes from that result (user 2026-10-13: "not get picked exactly the
+# same rate even though it's not accurate").
+MISS_TOL = 0.005
 PROFILE = ("stream", "delay", "jumpstream", "handstream", "chordstream", "chordjack",
            "jack", "jackspeed", "minijack", "longjack", "jumptrill", "splittrill", "bracket",
            "ln", "release", "inverse", "hybrid", "shield", "patterntech", "rhythmtech", "sv")
@@ -492,6 +496,18 @@ class Builder(threading.Thread):
                 self.halt.wait(.02)
 
 
+def missed_rates(session, inst, target):
+    """{rate: displayed accuracy} of this chart's rates whose last finish (14 days) missed the target."""
+    by = getattr(session, "_attempts_by_map", {})
+    att = (*by.get("md5:" + str(inst.get("md5")), ()), *by.get("sha:" + str(inst.get("sha256")), ()))
+    last = {}
+    for a in sorted(att, key=lambda a: a.get("end") or 0.):
+        y = a.get("y_lazer", a.get("y"))
+        if a.get("kind") == "finish" and a.get("rate") and y is not None:
+            last[round(a["rate"], 2)] = 1 - math.exp(y)
+    return {r: acc for r, acc in last.items() if abs(acc - target) > MISS_TOL}
+
+
 def _predicted(pred, inst, f, rate, session):
     return pred.predict(f, inst["md5"] or inst["sha256"], pred.md5_bid.get(inst["md5"]), rate, session, accuracy_only=True)
 
@@ -557,6 +573,7 @@ def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=l
         if not rated:
             continue
         target = central_target(session, sha)
+        missed = missed_rates(session, inst, target)
         anchor = min(rated, key=lambda r: abs(rate_shift(r[2], session, r[1], target)))
         r, f, e = anchor
         # y=log(1-accuracy) is near-linear in log-rate locally. This is ONLY a
@@ -581,13 +598,20 @@ def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=l
                 step += direction
             if MIN_RATE <= step/100 <= MAX_RATE:
                 proposal = step/100
+        if round(r, 2) in missed:
+            # the anchor is a rate you just missed: move from your result, not the forecast
+            shift = (math.log(1. - target) - math.log(max(1e-6, 1. - missed[round(r, 2)]))) / slope
+            proposal = round(min(MAX_RATE, max(MIN_RATE, r * math.exp(shift))), 2)
+            if proposal == round(r, 2):
+                proposal = round(min(MAX_RATE, max(MIN_RATE, r + (.01 if shift > 0 else -.01))), 2)
         st = f["nps"]
         proposed=dict(f,nps=dict(st,nps=st['nps']*proposal/r))
         quality = practice_value(proposed,dict(e,acc_mid=target),proposal,target,session)
         if mode == "skills":
             quality = skill_practice.value(f, dict(e, acc_mid=target), proposal, target, selected_skills)
         # More than a few exact refinements per chart per request is not useful.
-        if proposal not in fs and (not eligible(e,session,f) or abs(e['acc_mid']-target) > .003):
+        if proposal not in fs and (not eligible(e,session,f) or abs(e['acc_mid']-target) > .003
+                                   or round(r, 2) in missed):
             item = (quality, sha, proposal, (inst["keys"], group(f)))
             memo[sha][1] = item
             if not skip_proposal(sha, proposal):
@@ -596,7 +620,7 @@ def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=l
         for rate, f, e in rated:
             st = f["nps"]
             low, high = band(session)
-            if not eligible(e, session, f) or (st.get("vibro_focused")
+            if round(rate, 2) in missed or not eligible(e, session, f) or (st.get("vibro_focused")
                     and not (mode == "skills" and skill_practice.wants_vibro(selected_skills))):
                 continue
             value = practice_value(f,e,rate,target,session)
