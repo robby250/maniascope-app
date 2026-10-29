@@ -513,6 +513,25 @@ def test_watcher_keeps_polling_during_index_scan():
     assert attempts[0][0] == "void"               # an outage is not evidence of a failed play
 
 
+def test_autoplay_is_not_an_attempt():
+    import skillsets
+    attempts = []
+    w = skillsets.LazerWatcher(*[lambda *_: None] * 4, lambda *a: attempts.append(a))
+    d = {"files": {"beatmap": "a"}, "beatmap": {"time": {"live": 1000, "firstObject": 0, "lastObject": 9000}},
+         "play": {"mods": {"array": []}}, "folders": {}}
+    w._track("play", d)                            # tosu's first gameplay poll, before Autoplay's mods
+    d["play"]["mods"]["array"] = [{"acronym": "AT"}]
+    w._track("play", d)
+    w._track("songselect", d)
+    w._track("play", d)
+    w._track("songselect", d)
+    assert [a[0] for a in attempts] == ["start", "void"]
+    d["play"]["mods"]["array"] = [{"acronym": "DT"}]
+    w._track("play", d)
+    w._track("songselect", d)
+    assert [a[0] for a in attempts] == ["start", "void", "start", "abort"]
+
+
 if __name__ == "__main__":
     names = sys.argv[1:] or [n for n in dir() if n.startswith("test_")]
     for n in names:

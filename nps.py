@@ -40,10 +40,11 @@ def normalize_focus(value):
 
 
 def web_factor(value):
-    """'Maps you don't have' slider → their sampling weight: 0 off, .5 same footing as your own, 1 ×4.
-    Same footing already gives a new player mostly downloads and a big library mostly its own maps."""
+    """'Maps you don't have' slider → their odds against your own maps (see mix). Their list share rises
+    linearly: 0 at the left end, half in the middle, 80 % at the right (an exponent jumped 0 → 22 %, user 2026-10-26)."""
     value = normalize_focus(value)
-    return 0. if value <= 0. else 4. ** (2 * value - 1)
+    share = value if value <= .5 else .5 + .6 * (value - .5)
+    return share / (1. - share)
 
 
 DEFAULT_TARGET = .94
@@ -58,9 +59,20 @@ def normalize_target(value):
         return DEFAULT_TARGET
 
 
-def band(session):
-    target = central_target(session)
-    return target - .015, target + .015
+# Offsets scale with the error left to 100 % (user 2026-10-29: "at 97% the diff is 3% so it should increase
+# by 1%"): the 94 %-default values are shares of its 6 % error. Too close to 100 % nothing qualifies.
+MAX_TARGET, MAX_HIGH = .985, .99
+
+
+def _err(session):
+    """Band width follows the slider's error, so jack maps keep the same tolerance."""
+    return 1 - central_target(session)
+
+
+def band(session, f=None):
+    """±1.5 % at 94 %; ±0.75 % at 97 %."""
+    target, err = central_target(session, f), _err(session)
+    return target - .25 * err, min(MAX_HIGH, target + .25 * err)
 
 
 def reach(pred, keys, target):
@@ -83,15 +95,20 @@ def reach(pred, keys, target):
     return out
 
 
-def central_target(session, sha=""):
-    """The active tab's accuracy target; difficulty is fitted to current form around it."""
-    return getattr(session, "acc_target", DEFAULT_TARGET)
+def central_target(session, f=None):
+    """The active tab's accuracy target; difficulty is fitted to current form around it.
+    Jack-led maps aim a third closer to 100 % (user 2026-10-26: "for jack maps ... like 96% instead of 94%")."""
+    target = getattr(session, "acc_target", DEFAULT_TARGET)
+    if f and f.get("sk") and group(f) in ("chordjack", "jack"):
+        target = 1 - (1 - target) * 2 / 3          # 94 → 96, 97 → 98
+    return min(MAX_TARGET, target)
 
 
 def opening_floor(session, f, expected=None):
-    low, _high = band(session)
+    low, _high = band(session, f)
+    err = _err(session)
     if session.warm_flag:
-        return low-.006
+        return low-.1*err
     model = getattr(session, '_warmup_model', None)
     tau = (expected or {}).get('warmup_tau') or (model.parameters(f['keys'])['tau'] if model is not None else 6.)
     minutes = (expected or {}).get('activation_minutes')
@@ -100,12 +117,13 @@ def opening_floor(session, f, expected=None):
     cold = math.exp(-minutes/tau)
     # The first pick should meet the practice goal at its opening readiness,
     # not merely average the cold opening with an imagined warmed-up ending.
-    return (low-.006) + cold*(central_target(session)-.003-(low-.006))
+    return (low-.1*err) + cold*(central_target(session, f)-.05*err-(low-.1*err))
 
 
 def eligible(expected, session, f):
-    low, high = band(session)
-    if not low-.006 <= expected['acc_mid'] <= high+.006:
+    low, high = band(session, f)
+    slack = .1 * _err(session)
+    if not low-slack <= expected['acc_mid'] <= min(MAX_HIGH, high+slack):
         return False
     return (session.warm_flag or 'opening_acc' not in expected
             or expected['opening_acc'] >= opening_floor(session, f, expected))
@@ -368,7 +386,7 @@ class Builder(threading.Thread):
             f, inst = analyses[sha][rate], catalog[sha]
             e = _predicted(pred, inst, f, rate, session)
             slope = e.get('rate_slope') or rate_slope(pred, f)
-            need = rate * math.exp(rate_shift(e, session, f, central_target(session, sha)) / slope)
+            need = rate * math.exp(rate_shift(e, session, f, central_target(session, f)) / slope)
             density = f.get("notes", 0) / max(1000., f.get("length", 1)) * min(MAX_RATE, need)
             return density * (.05 if need < MIN_RATE * .85 else 1.)
         enrich.sort(key=lambda s: -initial_value(s))
@@ -434,7 +452,7 @@ class Builder(threading.Thread):
                 for mode in priority:
                     if i < len(fronts[mode]):
                         proposals.append(fronts[mode][i])
-            for _score, sha, rate in proposals:
+            for _score, sha, rate in proposals if count < 160 else ():
                 if (sha, rate) not in refined and sha not in bad and refined_counts[sha] < 6:
                     jobs.append((sha, rate, {}))
                     refined.add((sha, rate))
@@ -450,10 +468,10 @@ class Builder(threading.Thread):
                     fs = analyses[sha]
                     rate = min(fs, key=lambda r: abs(r - 1)) if fs else 1.
                     jobs.append((sha, rate, {rate: fs[rate]} if fs else {}))
-            # A useful exact shortlist does not need an endless all-library
-            # refinement job. Continue exploration on the next actual update;
-            # persisted features and the broad pool are retained meanwhile.
-            if not jobs or count >= 160:
+            # A useful exact shortlist does not need an endless all-library refinement job (160 per update),
+            # but unanalysed maps keep going until the library is done: a calculator change left ~10k waiting
+            # for two weeks at 160 per update (user 2026-10-25). busy() still pauses it during gameplay.
+            if not jobs:
                 publish(candidates)
                 return
             # At most two concurrent chart computations; no unbounded future queue.
@@ -572,7 +590,7 @@ def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=l
             rated.append((rate, f, e))
         if not rated:
             continue
-        target = central_target(session, sha)
+        target = central_target(session, rated[0][1])
         missed = missed_rates(session, inst, target)
         anchor = min(rated, key=lambda r: abs(rate_shift(r[2], session, r[1], target)))
         r, f, e = anchor
@@ -619,7 +637,6 @@ def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=l
         best = None
         for rate, f, e in rated:
             st = f["nps"]
-            low, high = band(session)
             if round(rate, 2) in missed or not eligible(e, session, f) or (st.get("vibro_focused")
                     and not (mode == "skills" and skill_practice.wants_vibro(selected_skills))):
                 continue
@@ -733,6 +750,10 @@ def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps
             ns = [c["nps"] for c in rows if c["keys"] == k and c.get("nps", 0) > 0]
             if ns:
                 density_floor[k] = min(20. * k / 7., .85 * float(np.quantile(ns, .70)))
+        # Far below the floor is not NPS practice at all (user 2026-10-22: a 6 NPS map "should never appear").
+        rows = [c for c in rows if not 0 < c.get("nps", 0) < .75 * density_floor.get(c["keys"], 0.)]
+        if not rows:
+            return []
     counts = collections.Counter((c["keys"], c["group"]) for c in rows)
     w = np.exp(np.array([c["base_value"] for c in rows]) - max(c["base_value"] for c in rows))
     pool = float(w.sum() ** 2 / (w ** 2).sum())        # effective number of charts the playlist draws from
@@ -751,7 +772,7 @@ def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps
             value -= 1.2
         if not c.get("installed", True):
             # Mild popularity prior for website charts only: ×0.7 near 10 plays → ×1 from 10k.
-            value += math.log(.6 + .1 * min(4., math.log10(1 + (c.get("playcount") or 0)))) + math.log(web)
+            value += math.log(.6 + .1 * min(4., math.log10(1 + (c.get("playcount") or 0))))
         cached_penalty = c.get("_profile_penalty")
         if cached_penalty and cached_penalty[0] == profile_key:
             value -= cached_penalty[1]
@@ -775,6 +796,19 @@ def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps
             c["weight"] = math.exp(max(-20., c["value"]-maximum)) * preference
             c["category_share"] = counts[group_] / len(rows)
     return sorted(rows, key=lambda c: -c["weight"])
+
+
+def mix(ranked, web):
+    """Interleaves installed and not-installed maps, each in its own ranked order, at share web/(1+web).
+    Sampling both from one weighted pool let whichever side had more mass fill the whole list (user 2026-10-25)."""
+    pools = [[c for c in ranked if c.get("installed", True)], [c for c in ranked if not c.get("installed", True)]]
+    share, out, taken = web / (1. + web), [], 0
+    for i in range(len(ranked)):
+        # A website chart only once its share is due, so a list never opens with one.
+        side = 1 if pools[1] and (not pools[0] or taken + 1 <= share * (i + 1) + 1e-9) else 0
+        taken += side
+        out.append(pools[side].pop(0))
+    return out
 
 
 def select(candidates, session, keys, taste_profile=None, n_show=20, rng=None):

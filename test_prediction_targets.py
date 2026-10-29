@@ -462,3 +462,13 @@ def test_tree_stage_reaches_displayed_stars():
     original=5.*math.exp(.1)
     assert score_units.display_factor(7,5.,ex,original,with_trees)==pytest.approx(1.)
     assert score_units.display_factor(7,5.,ex,5.,base)==pytest.approx(1.)
+
+
+def test_recent_family_offset_adds_chordjack_led_hinge_only_above_point_seven():
+    m=R.Personal.__new__(R.Personal)
+    n=len(R.RECENT_FAMILIES)+1
+    beta=np.zeros(n);beta[-1]=.3
+    m.recent={7:(np.zeros(n),np.ones(n),beta)}
+    led=dict(keys=7,sk=dict(chordjack=.9));mixed=dict(keys=7,sk=dict(chordjack=.6))
+    assert m.recent_offset(led)==pytest.approx(.3*.2) and m.recent_offset(mixed)==0.
+    assert m.recent_offset(dict(keys=4,sk=dict(chordjack=.9)))==0.

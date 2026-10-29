@@ -66,6 +66,8 @@ PUSH_STEP = .5
 BAND_Z = 1.2816 * .75
 PESSIMISM = 0.25               # model uncertainty shifts the mean (in its sd), never widens the upside
 HALF_LIFE_MONTHS = 12.0
+RECENT_MONTHS = 2.0             # own plays the recent family offsets learn from
+RECENT_FAMILIES = ('stream', 'chordstream', 'delay', 'bracket', 'ln', 'minijack', 'technical', 'chordjack')
 LEVEL_BW = 4.0                 # months: level drift kernel
 HISTORY_ZONE = .15             # Stats history counts plays at most this far (log stars) below the competence level
 WARMUP_MAX = 3
@@ -289,6 +291,13 @@ from structural_residual import NAMES as _STRUCTURE_NAMES
 _GEOMETRY_INDICES=tuple(_STRUCTURE_NAMES.index(name) for name in PERSONAL_GEOMETRY)
 
 
+def recent_vec(f):
+    """Family shares for the recent offsets, last a chordjack-led hinge: on 36 chordjack ≥ .8 plays
+    (2026-09-26..10-27) the year-long shape left +0.20 log misses, chordjack .6–.8 −0.07 (user 2026-10-27)."""
+    shares = [f['sk'].get(n, 0.) for n in RECENT_FAMILIES]
+    return np.array(shares + [max(0., shares[-1] - .7)])
+
+
 def zvec(f, names, mu=-3.):
     load = f.get("endurance", {}).get("load", 0.)
     structure = f.get("nps", {})
@@ -307,6 +316,7 @@ def zvec(f, names, mu=-3.):
 class Personal:
     """Fitted from the user's own rows. Everything is per keymode with a pooled fallback."""
     levels = {}     # competence level per keymode (log stars); the rows' base already used it
+    recent = {}     # keymode → (centre, scale, beta) of the recent family offsets
 
     def __init__(self, pub, rows, now=None, levels=None):
         # Both forecasts target lazer plays. Stable merges a hold's head/tail
@@ -350,6 +360,7 @@ class Personal:
         w = np.where(src, 0.5, 1.0) * lev * np.where(randomized, .35, 1.)
         self.keys = sorted(k for k, n in collections.Counter(K.tolist()).items() if n >= 30)
         self.level, self.level_var, self.curve, self.sd, self.beta, self.zmean, self.zscale = {}, {}, {}, {}, {}, {}, {}
+        self.recent = {}
         self.monthly = {}                  # keymode → (first month, Σw·e, Σw) of every-play rows (Stats history)
         self.shape_validation = {}
         glob = float(np.average(e, weights=w * w_rec)) if len(e) else 0.0
@@ -400,6 +411,22 @@ class Personal:
             self.zmean[k] = zm
             self.zscale[k] = scale
             u[s] = u[s] - Zc @ self.beta[k]
+        # The shape is a year of history; what it leaves on the last RECENT_MONTHS of own plays is current
+        # per-family form (walk-forward 2026-09-26..10-27: every 9-day window better, log RMSE .2492 → .2455).
+        for k in self.keys:
+            s = (K == k) & ~src & (self.now - t <= RECENT_MONTHS)
+            if s.sum() < 100:
+                continue
+            idx = np.where(K == k)[0]
+            R = np.array([recent_vec(rows[i]['f']) for i in idx])
+            sel = s[idx]
+            rm = np.average(R[sel], axis=0, weights=w[s])
+            rs = np.maximum(.05, np.sqrt(np.average((R[sel]-rm)**2, axis=0, weights=w[s])))
+            import personal_support
+            families = [rows[i]['f'].get('nps',{}).get('family') or rows[i]['chart'] for i in np.where(s)[0]]
+            beta, _ = personal_support.fit_shape((R[sel]-rm)/rs, u[s], w[s], families)
+            self.recent[k] = (rm, rs, beta)
+            u[idx] = u[idx] - ((R-rm)/rs) @ beta
         # Historical session condition is not a permanent property of a chart.
         # Exclude the target chart when estimating that context, and count
         # retries in one session as one block of affinity evidence.
@@ -535,10 +562,17 @@ class Personal:
         mu = L + base
         if k in self.beta:
             mu += float(((zvec(f, self.names, mu) - self.zmean[k])/self.zscale[k]) @ self.beta[k])
+        mu += self.recent_offset(f)
         a, n_c = self.chart_affinity(chart, rate, k)
         mu += a
         var = lv + self.pop["tau2"] * self.pop["kappa"] / (n_mb + self.pop["kappa"]) + self.tau2_c * self.kap_c / (n_c + self.kap_c)
         return mu, math.sqrt(var), sd
+
+    def recent_offset(self, f):
+        if f['keys'] not in self.recent:
+            return 0.
+        rm, rs, beta = self.recent[f['keys']]
+        return float(((recent_vec(f) - rm) / rs) @ beta)
 
     def chart_affinity(self, chart, rate, k):
         a, n_c = self.aff.get(chart, (0.0, 0))
@@ -2079,6 +2113,7 @@ class Worker(threading.Thread):
         self._nps_prediction_context, self._nps_predictions = None, {}
         self._local_pool_cache = {}
         self._local_weights = {}
+        self._credible = {}
         self._local_prepared = {}
         self._restored_modes = set()
         self._session_cache = (None, None)
@@ -2308,7 +2343,10 @@ class Worker(threading.Thread):
             cached = self._local_pool_cache.get(mode)
             ready = {event_key(c): c for c in (cached[2] if cached else fresh)}
         shown = []
+        credible = self._credible.get(mode) if mode in LOCAL_MODES and fresh else None
         for c in self.playlists[mode]:
+            if credible is not None and event_key(c) not in credible:
+                continue
             if c['keys'] not in self.keys[mode] or (mode == 'skills' and
                     tuple(c.get('practice_skills', ())) != self.practice_skills):
                 continue
@@ -2322,7 +2360,7 @@ class Worker(threading.Thread):
             expected = self.rec.predictor.predict(f, c.get('md5') or sha, c.get('bid'), c['rate'], session,
                                                   accuracy_only=mode != 'pp')
             if alternative and alternative['rate'] != c['rate']:
-                target = nps.central_target(session, sha)
+                target = nps.central_target(session, f)
                 if abs(alternative['acc_mid']-target) < abs(expected['acc_mid']-target):
                     c, f = alternative, alternative['f']
                     expected = self.rec.predictor.predict(f, c.get('md5') or sha, c.get('bid'), c['rate'], session,
@@ -2339,11 +2377,13 @@ class Worker(threading.Thread):
             shown.append(updated)
         seen = {event_key(c) for c in shown} | set(self._playlist_consumed)
         for c in fresh:
-            if len(shown) >= 20:
-                break
             key = event_key(c)
             if key not in seen:
                 shown.append(c); seen.add(key)
+        if mode in LOCAL_MODES:
+            # Kept maps you don't have outlive the played ones and piled up at the top (user 2026-10-26).
+            shown = nps.mix(shown, nps.web_factor(self.web_bias[mode]))
+        shown = shown[:20]
         if not shown and fresh:
             # A small credible library can cycle after its prepared queue ends.
             last = self._playlist_consumed[-1] if self._playlist_consumed else None
@@ -2424,9 +2464,12 @@ class Worker(threading.Thread):
             import pp_playlist
             seed = max((e.get('id', e['t']) for e in session.all
                         if e['kind'] in ('offer', 'finish', 'abort', 'reset')), default=0)
-            shown = pp_playlist.preview(available, 20, seed, focus=self.nps_focus)
-        else:
-            shown = available[:20]
+            available = pp_playlist.preview(available, len(available), seed, focus=self.nps_focus)
+        ranked = nps.mix(available, web)[:60]
+        shown = ranked[:20]
+        # A queued map outside the current top 60 was queued under another state (cold start, restart
+        # list): G835LX 2026-10-22 offered dEKA, 6 NPS, ranked 2242 of 2245, after seven such maps.
+        self._credible[mode] = {event_key(c) for c in ranked}
         note = f"target ~{100 * self.acc_targets.get(mode, .94):.0f}% · 0.70–1.50×"
         if st.get("build_failed"):
             note += " · local map analysis stopped"
@@ -2434,7 +2477,7 @@ class Worker(threading.Thread):
             note += " · no maps of these keymodes found yet"
         elif st["analyzed"] + st["failed"] < st["total"]:
             note += (f" · {st['analyzed']:,} of {st['total']:,} maps analysed so far; "
-                     "the rest are analysed a few at a time while you use this playlist")
+                     "the rest are analysed in the background, paused while you play")
         else:
             note += f" · all {st['total']:,} maps analysed"
         missing = sum(not c.get("installed", True) for c in shown)
@@ -2484,8 +2527,7 @@ class Worker(threading.Thread):
             if e is None:
                 e = self.rec.predictor.predict(f, old["md5"] or sha, self.rec.feats.md5_bid.get(old["md5"]), old["rate"], session, accuracy_only=True)
                 self._nps_predictions[cache_key] = e
-            target = nps.central_target(session, sha)
-            low, high = nps.band(session)
+            target = nps.central_target(session, f)
             if not nps.eligible(e, session, f):
                 continue
             value = nps.practice_value(f,e,old['rate'],target,session)

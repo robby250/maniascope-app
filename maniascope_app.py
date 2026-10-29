@@ -27,6 +27,34 @@ def self_test():
     print("self-test OK", recdata.calc_id(), round(res["scores"]["overall"], 2), flush=True)
     return 0
 
+def log_to_file():
+    """The windowed exe has no console: prints, tracebacks, faulthandler and GTK warnings go to
+    maniascope.log (previous run: maniascope.prev.log) in the cache folder."""
+    import platform
+    import time
+    import paths
+    log = os.path.join(paths.CACHE, "maniascope.log")
+    try:
+        os.makedirs(paths.CACHE, exist_ok=True)
+        try:
+            os.replace(log, os.path.join(paths.CACHE, "maniascope.prev.log"))
+        except OSError:
+            pass  # first run, or another instance still has it open: append
+        fh = open(log, "a", encoding="utf-8", errors="replace", buffering=1)
+    except OSError:
+        return
+    for fd in (1, 2):
+        os.dup2(fh.fileno(), fd)  # C-level GLib/GTK output too
+    sys.stdout = sys.stderr = fh
+    here = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    try:
+        calc = open(os.path.join(here, "calc_id.txt")).read().strip()
+    except OSError:
+        calc = "?"
+    print(f"[{time.strftime('%F %T')}] ManiaScope calc {calc}, {platform.platform()}, Python {platform.python_version()}, "
+          f"{sys.executable}", flush=True)
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     if len(sys.argv) > 1 and sys.argv[1] == "--selected-analysis":
@@ -37,5 +65,6 @@ if __name__ == "__main__":
         raise SystemExit(webmaps.main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
         raise SystemExit(self_test())
+    log_to_file()
     import skillsets
     skillsets.main()

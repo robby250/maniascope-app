@@ -70,7 +70,8 @@ def test_nps_lower_tail_is_rare_not_banned_and_twenty_stays_variety():
     assert len(result) == len(rows)
     sparse = [dict(r, nps=r['nps']/3, base_value=math.log(r['nps']/3)) for r in rows]
     lower = nps.weighted_candidates(sparse, R.Session([],1000), [7])
-    assert len(lower) == len(rows) and all(r['weight'] > 0 for r in lower)
+    # Under 75 % of the density floor is never offered (09c854c): 5.3–6.7 NPS go, the rest stay.
+    assert len(lower) == 7 and all(r['weight'] > 0 for r in lower)
     # An easier eligible pool lowers the reference; it does not reject every
     # chart or funnel all mass into its single densest map.
     assert max(r['weight'] for r in lower) / sum(r['weight'] for r in lower) < .25
@@ -87,6 +88,16 @@ def test_capacity_prior_changes_rate_demand_not_accuracy_goal():
     assert m.penalty(7, 'chordstream', 0., 120., 5.) > m.penalty(7, 'chordstream', 0., 120., 2.)
     assert m.penalty(7, 'chordstream', 0., 240., 3.) < m.penalty(7, 'chordstream', 0., 0., 3.)
     assert nps.central_target(R.Session([], 1000)) == .94
+
+
+def test_target_offsets_shrink_with_the_error_left_to_100():
+    s, jack = R.Session([], 1000), {'keys': 4, 'sk': {'chordjack': 1.}}
+    assert abs(nps.central_target(s, jack) - .96) < 1e-9
+    s.acc_target = .97
+    assert abs(nps.central_target(s, jack) - .98) < 1e-9
+    assert max(nps.band(s)) - min(nps.band(s)) < .02
+    s.acc_target = .98
+    assert nps.central_target(s, jack) == nps.MAX_TARGET and nps.band(s, jack)[1] <= nps.MAX_HIGH
 
 
 def test_cold_opening_cannot_borrow_warmth_from_the_same_maps_ending():

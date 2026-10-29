@@ -275,6 +275,19 @@ def test_prepared_playlist_preserves_order_and_logs_immediate_selection(tmp_path
     worker.db.close()
 
 
+def test_prepared_queue_drops_maps_that_fell_out_of_the_current_ranking():
+    # G835LX 2026-10-22: maps queued at a cold start kept their place until dEKA (6 NPS) came up.
+    worker = R.Worker(lambda msg: None)
+    worker.rec = SimpleNamespace(local_shas={'stale', 'kept', 'new'},
+        predictor=SimpleNamespace(predict=lambda f, *a, **k: {'acc_mid': .94}))
+    stale, kept, new = (dict(sha=s, md5=s, keys=7, rate=1., var='NM', purpose='nps', f={}, installed=True)
+                        for s in ('stale', 'kept', 'new'))
+    worker.playlists['nps'] = [stale, kept]
+    worker._credible['nps'] = {R.event_key(kept), R.event_key(new)}
+    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+        assert [c['sha'] for c in worker._prepared_playlist('nps', [new])] == ['kept', 'new']
+
+
 def test_prepared_local_queue_rechecks_readiness_after_prediction_refresh():
     worker = R.Worker(lambda msg: None)
     worker.rec = SimpleNamespace(local_shas={'hard','ready','easy','cold','new'},
@@ -446,6 +459,14 @@ def test_ready_refreshes_omitted_prepared_features_and_rechecks_technical_member
         db.close()
 
 
+def test_nps_never_offers_a_chart_far_below_the_density_floor():
+    rows = [dict(keys=7, sha=str(i), md5=str(i), family=str(i), rate=1., nps=ns, base_value=0.,
+                 length=180., profile=[1.], description='Mixed', group='sv' if ns < 10 else 'chords', acc_mid=.94)
+            for i, ns in enumerate([6.2] + [25.]*20)]
+    weighted = nps.weighted_candidates(rows, R.Session([], 1000), [7])
+    assert len(weighted) == 20 and all(c['nps'] == 25. for c in weighted)
+
+
 def test_nps_focus_changes_selection_without_refitting_or_changing_rate_targets(tmp_path):
     import pp_playlist
     rows = [dict(keys=7, sha=str(i), md5=str(i), family=str(i), rate=1.1,
@@ -526,10 +547,14 @@ def test_website_charts_join_nps_as_downloads_with_a_mild_popularity_prior(tmp_p
             for s, inst, pc in (('local', True, None), ('rare', False, 10), ('popular', False, 20000))]
     w = {c['sha']: c['weight'] for c in nps.weighted_candidates(rows, R.Session([], 1000), [7])}
     assert w['popular'] == pytest.approx(w['local']) and .65 < w['rare']/w['local'] < .75
-    # Settings slider: left end drops maps you don't have, the right end makes them ×4 as likely.
+    # Settings slider: left end drops maps you don't have; otherwise both kinds share the list at web/(1+web).
     assert {c['sha'] for c in nps.weighted_candidates(rows, R.Session([], 1000), [7], web=nps.web_factor(0.))} == {'local'}
-    more = {c['sha']: c['weight'] for c in nps.weighted_candidates(rows, R.Session([], 1000), [7], web=nps.web_factor(1.))}
-    assert more['popular'] / more['local'] == pytest.approx(4.) and nps.web_factor(.5) == 1.
+    ranked = [dict(sha=f'w{i}', installed=False) for i in range(30)] + [dict(sha=f'l{i}') for i in range(10)]
+    half = nps.mix(ranked, nps.web_factor(.5))
+    assert [c.get('installed', True) for c in half[:20]] == [True, False] * 10 and len(half) == 40
+    assert sum(not c.get('installed', True) for c in nps.mix(ranked, nps.web_factor(1.))[:20]) == 16
+    assert [c['sha'] for c in nps.mix(ranked, 1.)[20:23]] == ['w10', 'w11', 'w12']   # locals ran out
+    assert all(c.get('installed', True) for c in nps.mix(ranked, nps.web_factor(.05))[:10])   # 5 %: one in 20
 
 
 def test_builder_prefers_exact_current_public_web_packets_below_current_sqlite(tmp_path, monkeypatch):

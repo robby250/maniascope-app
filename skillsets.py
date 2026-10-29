@@ -323,7 +323,10 @@ class LazerWatcher(threading.Thread):
         """Attempt lifecycle: start on entering gameplay (a jump back in time is a restart), abort on
         leaving it anywhere but the results screen; the result shown next belongs to this attempt."""
         rel, tm = d["files"]["beatmap"], d["beatmap"]["time"]
-        if state == "play" and rel:
+        mods = (d.get("play") or {}).get("mods")
+        # Autoplay/Cinema is the game playing, not the player: no attempt
+        auto = isinstance(mods, dict) and any(m.get("acronym") in ("AT", "CN") for m in mods.get("array") or [])
+        if state == "play" and rel and not auto:
             live, first, last = tm.get("live") or 0, tm.get("firstObject") or 0, tm.get("lastObject") or 0
             p = self._play
             if p is None or p["sha"] != os.path.basename(rel) or live + 1500 < p["pos"]:
@@ -331,7 +334,6 @@ class LazerWatcher(threading.Thread):
                 # position, not a restart: the attempt starts again without an abort
                 if p and (time.time() - p["t"] > 5 or p["sha"] != os.path.basename(rel)):
                     self.on_attempt("void" if self._disconnected else "abort", dict(p, end=time.time()))
-                mods = d["play"].get("mods")
                 root = d["folders"].get("songs") or LAZER_FILES
                 p = self._play = {"sha": os.path.basename(rel), "path": os.path.join(root, rel),
                                   "rate": rate_from_mods(mods)[0], "t": time.time(), "pos": live, "progress": 0.0,
@@ -348,7 +350,8 @@ class LazerWatcher(threading.Thread):
             if state == "resultscreen":
                 self._done = p
             else:
-                self.on_attempt("void" if self._disconnected else "abort", dict(p, end=time.time()))
+                # auto: the first gameplay poll comes before Autoplay's mods do
+                self.on_attempt("void" if self._disconnected or auto else "abort", dict(p, end=time.time()))
         self._disconnected = False
 
     def _note_score(self, d):
@@ -1055,13 +1058,12 @@ class ManiaScopeWindow(Gtk.Window):
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0., 1., .05)
         scale.set_draw_value(False)
         scale.set_value(self._web_bias[mode])
-        scale.set_tooltip_text("Website charts (Settings → Website charts…). Middle: judged like your own maps, so "
-                               "a small library gets mostly downloads and a big one mostly its own. Left end: never.")
+        scale.set_tooltip_text("Website charts (Settings → Website charts…): their share of the list. "
+                               "Middle: half. Right end: 80 %. Left end: never.")
         def changed(s, initial=False):
             v = round(s.get_value() * 20) / 20
             f = nps_playlist.web_factor(v)
-            value.set_text("never" if not f else "same as yours" if abs(f - 1) < .01
-                           else f"×{f:.1f} as often" if f > 1 else f"×{f:.2f} as often")
+            value.set_text(f"{f / (1 + f):.0%} of the list" if f else "never")
             if not initial and v != self._web_bias[mode]:
                 self._web_bias[mode] = v
                 self._sync_rec()
@@ -1521,7 +1523,7 @@ class ManiaScopeWindow(Gtk.Window):
         view["note"].set_text(f"{phase}{' · ' + msg['note'] if msg['note'] else ''}")
         done, total = msg.get("progress") or (0, 0)
         view["analysing"] = ((f"Maps analysed for this playlist · {done:,} / {total:,} (more are analysed "
-                              "a few at a time while you use it)", done, total) if total else None)
+                              "in the background, paused while you play)", done, total) if total else None)
         self._show_wait(view)
         view["note"].set_tooltip_text(msg["summary"])
         for c in msg["shown"]:
@@ -2198,7 +2200,7 @@ class ManiaScopeWindow(Gtk.Window):
 def main():
     import sys
     import faulthandler
-    faulthandler.enable(all_threads=True)
+    faulthandler.enable(all_threads=True)  # the packaged exe points stderr at maniascope.log first
     sys.excepthook = lambda *a: log_exc("uncaught", a)
     threading.excepthook = lambda args: log_exc(f"thread:{args.thread.name}",
                                                (args.exc_type, args.exc_value, args.exc_traceback))
@@ -2233,11 +2235,24 @@ def main():
             lifecycle("SIGTERM")
             win.destroy()
             return False
-        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15, terminate)
+        if not paths.WINDOWS:  # no unix signals in Windows GLib; the call crashed every launch there
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15, terminate)
         win.show_all()
         lifecycle("opened")
 
-    app.connect("activate", activate)
+    def start(app):
+        try:
+            activate(app)
+        except Exception:
+            # Otherwise the process lingers with no window (Windows friends, v0.3.8)
+            log_exc("startup")
+            dlg = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
+                                    text="ManiaScope could not start",
+                                    secondary_text=f"Please send the log files in\n{CACHE_DIR}")
+            dlg.run()
+            app.quit()
+
+    app.connect("activate", start)
     app.run(None)
     lifecycle("application loop exited")
 
