@@ -32,7 +32,7 @@ def test_manifest_file_checks_release_read_lock_and_preserve_playable_filter(tmp
                            [('c','c_audio',1),('d','d_audio',1)])
     for sha in ('a','c','d','e','c_audio'):
         (tmp_path/sha).write_text('local fixture')
-    monkeypatch.setattr(recdata,'local_file',lambda sha:str(tmp_path/sha) if sha else None)
+    monkeypatch.setattr(recdata,'local_file',lambda sha, root=None:str(tmp_path/sha) if sha else None)
     isfile = os.path.isfile
     checked = []
 
@@ -430,7 +430,6 @@ def test_ready_refreshes_omitted_prepared_features_and_rechecks_technical_member
     if authority == 'queued':
         source._store('a', {1.: removed})
         data['states']['skills']['candidates'] = [dict(offered[0], base_value=1.)]
-        worker._nps_predictions['a', 1.] = {'acc_mid': .95}
     queries = []
     db.set_trace_callback(queries.append)
     try:
@@ -440,7 +439,6 @@ def test_ready_refreshes_omitted_prepared_features_and_rechecks_technical_member
             if authority == 'queued':
                 worker._local_pool_cache['skills'] = (None, None, worker.skills_state['candidates'])
                 assert worker.skills_state['candidates'][0]['f'] == removed
-                assert ('a', 1.) not in worker._nps_predictions
             consumed = dict(offered[0], sha='consumed', md5='m-consumed')
             shown = worker._prepared_playlist('skills', [consumed])
         assert [c['sha'] for c in shown] == (['b', 'legacy'] if authority in ('public', 'queued') else ['a', 'b', 'legacy'])

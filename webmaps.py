@@ -319,11 +319,21 @@ def compact(f):
             "tech_profile": f.get("tech_profile", {})}
 
 
+class Decoded(dict):
+    """Features decoded from web.pkl. `source` (the stored bytes) is the same on every read, so
+    prediction caches recognise the chart without keeping the ~8 KB decoded copy (recdata.identity)."""
+    __slots__ = ("source",)
+
+
 class Rates(dict):
     """rate → features, stored pickled and decoded on each read (~1.5 KB instead of ~10 KB resident)."""
     def __getitem__(self, rate):
         v = dict.__getitem__(self, rate)
-        return pickle.loads(v) if isinstance(v, bytes) else v
+        if not isinstance(v, bytes):
+            return v
+        f = Decoded(pickle.loads(v))
+        f.source = v
+        return f
 
     def get(self, rate, default=None):
         return self[rate] if rate in self else default

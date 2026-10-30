@@ -105,10 +105,11 @@ def local_origin():
     return {"host": socket.gethostname(), "root": root}
 
 
-def local_file(sha):
+def local_file(sha, root=None):
+    """root: local_origin()["root"], for callers resolving thousands of files (one realpath, not one each)."""
     if not isinstance(sha, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", sha):
         return None
-    return os.path.join(local_origin()["root"], "files", sha[0], sha[:2], sha)
+    return os.path.join(root or local_origin()["root"], "files", sha[0], sha[:2], sha)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +140,9 @@ def connect(path=None):
     path = path or DB_FILE
     os.makedirs(os.path.dirname(path), exist_ok=True)
     db = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    # The worker, NPS builder, feature fill and import each hold a connection. With a rollback journal
+    # every feature-batch commit made the selected card's reads wait (WAL: readers never wait for a writer).
+    db.execute("PRAGMA journal_mode=WAL")
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
     return db
@@ -517,6 +521,26 @@ SKILLS = ("stream", "jumpstream", "handstream", "jackspeed", "chordjack", "minij
           "bracket", "jack", "ln", "release", "inverse", "hybrid", "shield", "sv", "technical", "vibro", "stamina",
           "dump", "jumptrill", "splittrill", "longjack", "patterntech", "rhythmtech", "trill1h", "anchor", "mash",
           "quadstream", "sv_fast", "sv_slow", "sv_accel", "sv_stutter", "sv_brake")
+
+
+def identity(f):
+    """What a per-chart cache compares instead of the features object: a website chart's features are
+    decoded afresh on each read (webmaps.Decoded), their stored bytes are not."""
+    return getattr(f, "source", f)
+
+
+def per_chart(cache, f, compute):
+    """compute(f), once per chart features object (by identity()). Ranking the NPS library asks the
+    same chart's skill group ~10 times per request (~1.5M calls, G835LX library)."""
+    token = identity(f)
+    hit = cache.get(id(token))
+    if hit is not None and hit[0] is token:
+        return hit[1]
+    value = compute(f)
+    if len(cache) > 200000:
+        cache.clear()
+    cache[id(token)] = (token, value)
+    return value
 
 
 def feats_from(keys, sc, levels, ln, notes, od, length_ms):

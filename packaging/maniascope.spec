@@ -22,6 +22,11 @@ a = Analysis([R("maniascope_app.py")], pathex=[root], datas=datas,
              excludes=["pytest", "tkinter"],
              # The UI uses a few symbolic icons; the gi hook would otherwise copy every system theme.
              hooksconfig={"gi": {"icons": ["Adwaita", "hicolor"], "themes": ["Adwaita"], "languages": ["en_US"]}})
+# Compiled calculator from build_windows_wine.sh: its modules leave the PYZ, so imports find the .pyd.
+native = glob.glob(R("native", "*.pyd"))
+compiled = {os.path.basename(p).split(".")[0] for p in native}
+a.pure = [entry for entry in a.pure if entry[0] not in compiled]
+a.binaries += [(os.path.basename(p), p, "EXTENSION") for p in native]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="ManiaScope", console=False,
           icon=R("packaging/icon.ico") if os.path.exists(R("packaging/icon.ico")) else None)

@@ -76,7 +76,7 @@ def test_selected_card_distinguishes_rate_analysis_and_failure(tmp_path):
     import recommend as R
     chart = tmp_path/'chart.osu';chart.write_text('fixture')
     sha = hashlib.sha256(chart.read_bytes()).hexdigest()
-    messages=[];w=R.Worker(messages.append)
+    messages=[];w=R.Worker(messages.append);w.db=recdata.connect(str(tmp_path/'rec.db'))
     w.rec=SimpleNamespace(feats=SimpleNamespace(calc='fixture'),card=lambda *a,**k:None)
     w._sel=(str(chart),1.25,[{'acronym':'DT','settings':{'speed_change':1.25}}])
     w._card()

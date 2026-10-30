@@ -62,6 +62,7 @@ def normalize_target(value):
 # Offsets scale with the error left to 100 % (user 2026-10-29: "at 97% the diff is 3% so it should increase
 # by 1%"): the 94 %-default values are shares of its 6 % error. Too close to 100 % nothing qualifies.
 MAX_TARGET, MAX_HIGH = .985, .99
+LEAD = 300          # charts re-predicted first after a play or refit (the shown 20 come from the top ~60)
 
 
 def _err(session):
@@ -168,7 +169,17 @@ def profile(f):
     return v / max(.001, np.linalg.norm(v))
 
 
+_GROUPS = {}
+
+
 def group(f):
+    # The library ranking asks each chart's group ~10 times per request. A replaced "sk" is a new
+    # chart; a website chart's features are decoded from fixed bytes, so its token alone suffices.
+    sk, value = recdata.per_chart(_GROUPS, f, lambda f: (f["sk"], _group(f)))
+    return value if sk is f["sk"] or recdata.identity(f) is not f else _group(f)
+
+
+def _group(f):
     sk = f["sk"]
     family = {"rice": max(sk.get(k, 0) for k in ("stream", "delay", "dump", "jumpstream", "handstream")),
               "chords": sk.get("chordstream", 0),
@@ -219,8 +230,8 @@ def _job(inst, rates, anchors, calc=None):
 
 def installed(db):
     """A manifest is machine-local, even when portable feature caches are copied."""
-    origin = recdata.kv_get(db, "manifest_origin")
-    if origin and origin != recdata.local_origin():
+    origin, here = recdata.kv_get(db, "manifest_origin"), recdata.local_origin()
+    if origin and origin != here:
         return {}, "Library belongs to another location — import local lazer maps"
     out = {}
     # Exhaust the metadata cursor before file checks, which can wait on disk
@@ -228,10 +239,10 @@ def installed(db):
     for row in db.execute("SELECT i.*,l.online_md5,l.audio_sha,l.audio_required,l.creator "
                           "FROM installed i LEFT JOIN installed_local l USING(sha256)").fetchall():
         d = dict(row)
-        path = recdata.local_file(d["sha256"])
+        path = recdata.local_file(d["sha256"], here["root"])
         if d["keys"] not in recdata.SUPPORTED_KEYS or not path or not os.path.isfile(path):
             continue
-        audio = recdata.local_file(d["audio_sha"])
+        audio = recdata.local_file(d["audio_sha"], here["root"])
         if d["audio_required"] and (not audio or not os.path.isfile(audio)):
             continue
         out[d["sha256"]] = d
@@ -253,6 +264,8 @@ class Builder(threading.Thread):
         self._catalog_key = None
         self._catalog = {}
         self._analyses = collections.defaultdict(dict)
+        self._current = set()
+        self._lead = {}
         self._loaded_rowid = 0
 
     def configure(self, predictor, session, keys, revision, generation, skills_keys=(), selected_skills=(), active_mode="nps"):
@@ -260,6 +273,14 @@ class Builder(threading.Thread):
             self.request = (predictor, session, tuple(keys), revision, generation,
                             tuple(skills_keys), skill_practice.normalize(selected_skills), active_mode)
             self.cv.notify()
+
+    def _note(self, sha):
+        """Keep `current` (charts analysed with this STRUCTURE_VERSION) in step with an analyses change.
+        Answering it from the features on every publish decoded every website chart each time."""
+        if any(f.get("nps", {}).get("version") == STRUCTURE_VERSION for f in self._analyses[sha].values()):
+            self._current.add(sha)
+        else:
+            self._current.discard(sha)
 
     def stop(self):
         self.halt.set()
@@ -319,6 +340,7 @@ class Builder(threading.Thread):
             self._catalog = {s: i for s, i in full.items() if i["keys"] in allowed}
             self._catalog_key = catalog_key
             self._analyses = collections.defaultdict(dict)
+            self._current = set()
             self._loaded_rowid = 0
             # Website charts join NPS and Skills alike, marked not installed (Next offers the download).
             web, web_feats = webmaps.catalog(set(allowed), {i["md5"] for i in full.values()}, window)
@@ -335,7 +357,8 @@ class Builder(threading.Thread):
                             for rate in self._analyses[sha]:
                                 if rate in pub and pub[rate].get("keys") == inst["keys"]:
                                     self._analyses[sha][rate] = pub[rate]
-        catalog, error, analyses = self._catalog, self._catalog_error, self._analyses
+                    self._note(sha)
+        catalog, error, analyses, current = self._catalog, self._catalog_error, self._analyses, self._current
         catalogs = {active_mode: catalog}
         # Reuse decoded features across scores/filter changes. SQLite rowids are
         # monotone for the append/replace-only derived feature table. A fresh
@@ -366,6 +389,7 @@ class Builder(threading.Thread):
                     sha, rate = row["key"].split("@", 1)
                     if sha in catalog:
                         analyses[sha][float(rate.split("|")[0])] = json.loads(row["data"])
+                        self._note(sha)
                 except (ValueError, TypeError):
                     continue                   # recompute a damaged derived entry
         for sha, inst in catalog.items():
@@ -374,12 +398,24 @@ class Builder(threading.Thread):
             if (pub.get("calc") == calc and inst["md5"] and pub.get("md5") == inst["md5"]
                     and pred.pub["maps"].get(b, {}).get("md5") == inst["md5"]):
                 for rate, f in pub.items():
-                    if isinstance(rate, float) and f.get("keys") == inst["keys"]:
-                        analyses[sha].setdefault(rate, f)
+                    if isinstance(rate, float) and f.get("keys") == inst["keys"] and rate not in analyses[sha]:
+                        analyses[sha][rate] = f
+                        self._note(sha)
+        predictions = {}
+        # A play or refit re-predicts the whole library (~10 s for 20k charts). The previous request's
+        # leading charts go first, so the shown list follows the new session within a second.
+        lead = [s for s in self._lead.get(active_mode, ()) if s in catalog]
+        if lead:
+            quick, _ = candidates_from({s: catalog[s] for s in lead}, analyses, pred, session, mode=active_mode,
+                                       selected_skills=selected_skills, predictions=predictions)
+            self.emit("ready", {"states": {active_mode: {
+                              "candidates": quick, "total": len(catalog), "analyzed": sum(s in current for s in catalog),
+                              "failed": 0, "error": error, "partial": True}},
+                          "keys_by_mode": keys_by_mode, "selected_skills": selected_skills, "revision": revision,
+                          "generation": generation})
         # Deterministic per-chart order spreads unplayed coverage across collections.
         unknown = sorted((s for s in catalog if not analyses[s]), key=lambda s: hashlib.sha256(s.encode()).digest())
-        enrich = [s for s in catalog if analyses[s] and not any(f.get("nps", {}).get("version") == STRUCTURE_VERSION
-                                                             for f in analyses[s].values())]
+        enrich = [s for s in catalog if analyses[s] and s not in current]
         # Broad known-chart reuse first; don't serially exhaust only personal favorites.
         def initial_value(sha):
             rate = min(analyses[sha], key=lambda r: abs(r - 1))
@@ -409,13 +445,12 @@ class Builder(threading.Thread):
         refined_counts = collections.Counter()
         refinement_groups = collections.Counter()
         evaluated = {active_mode: {}}
-        predictions = {}
         def publish(candidates):
             states = {}
             for mode, subset in catalogs.items():
+                self._lead[mode] = [c["sha"] for c in sorted(candidates[mode], key=lambda c: -c["base_value"])[:LEAD]]
                 states[mode] = {"candidates": candidates[mode], "total": len(subset),
-                    "analyzed": sum(any(f.get("nps", {}).get("version") == STRUCTURE_VERSION for f in analyses[s].values())
-                                    for s in subset),
+                    "analyzed": sum(s in current for s in subset),
                     "failed": sum(s in bad for s in subset), "error": error}
             self.emit("ready", {"states": states, "keys_by_mode": keys_by_mode,
                                 "selected_skills": selected_skills, "revision": revision, "generation": generation})
@@ -504,6 +539,7 @@ class Builder(threading.Thread):
                     with db:
                         for rate, f in fs.items():
                             analyses[sha][rate] = f
+                            self._note(sha)
                             db.execute("INSERT OR REPLACE INTO feats VALUES (?,?)",
                                        (f"{sha}@{rate:.3f}|{calc}", json.dumps(f)))
                     for memo in evaluated.values():
@@ -761,6 +797,7 @@ def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps
     relax = sum(fresh) < 3
     recent = [a for a in session.attempts[-6:] if a.get("profile") and a.get("meaningful", True)]
     recent_families = {a.get("family") for a in recent[-4:]}
+    recent_profiles = [np.array(a["profile"]) for a in recent]      # once, not once per chart
     profile_key = session.model_key()
     grouped = collections.defaultdict(list)
     for c, fr in zip(rows, fresh):
@@ -778,9 +815,9 @@ def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps
             value -= cached_penalty[1]
         elif recent:
             v = np.array(c["profile"])
-            compatible = [a for a in recent if len(a["profile"]) == len(v)]
+            compatible = [a for a in recent_profiles if len(a) == len(v)]
             if compatible:
-                value -= .18 * max(float(v @ np.array(a["profile"])) for a in compatible)
+                value -= .18 * max(float(v @ a) for a in compatible)
         if len(allowed) > 1 and session.current_keys() in allowed and c["keys"] != session.current_keys():
             value -= .12
         c["value"] = value

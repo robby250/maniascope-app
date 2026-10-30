@@ -1,6 +1,6 @@
 """Skill membership, objective separation and shared-builder routing checks."""
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import pytest
 
 import nps
@@ -139,19 +139,15 @@ def test_worker_rejects_stale_filters_and_routes_skills_next(tmp_path):
     w.db.close()
 
 
-def test_skip_warmup_invalidates_both_local_prediction_caches(tmp_path):
+def test_local_lists_reuse_builder_predictions_and_skip_warmup_asks_for_new_ones(tmp_path):
     db=recdata.connect(str(tmp_path/'rec.db'));w=R.Worker(lambda msg:None);w.db=db
     recdata.log_event(db, 'selected', '1')
-    calls=[]
-    def predict(f,chart,bid,rate,session,*,accuracy_only=False):
-        assert accuracy_only
-        calls.append(session.warm_flag)
-        return {'acc_mid':.95-session.warmup_penalty(7,'ln')/10, 'sd_model':.1}
+    predict=Mock()
     w.rec=SimpleNamespace(local_shas={'a'},predictor=SimpleNamespace(predict=predict),
                           feats=SimpleNamespace(md5_bid={}))
     f=feature({'ln':1.})
     c=dict(inst('a'),sha='a',f=f,rate=1.,nps=20.,length=160.,family='a',group='ln',
-           profile=[1.],description='LN',base_value=0.,practice_skills=('ln',))
+           profile=[1.],description='LN',base_value=0.,practice_skills=('ln',),acc_mid=.94,sd_model=.1)
     w.practice_skills=('ln',)
     w.skills_state=dict(w.skills_state,candidates=[c]);w.nps_state=dict(w.nps_state,candidates=[c])
     with patch.object(nps, 'weighted_candidates', wraps=nps.weighted_candidates) as weighted, \
@@ -160,11 +156,10 @@ def test_skip_warmup_invalidates_both_local_prediction_caches(tmp_path):
         assert not taste.called
         w._pool('nps');w._pool('skills');w._pool('nps')
         assert weighted.call_count == 2 and taste.call_count == 1
-    assert calls==[False]
-    with patch.object(w,'_request_nps'),patch.object(w,'_publish'):
+    predict.assert_not_called()             # the Builder's predictions, not a second pass here
+    with patch.object(w,'_request_nps') as request,patch.object(w,'_publish'):
         w.t_skip_warmup()
-    w._pool('skills');w._pool('nps')
-    assert calls==[False,True]
+    request.assert_called_once()            # its next publication re-predicts both lists warm
     db.close()
 
 

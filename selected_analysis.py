@@ -12,6 +12,7 @@ import sys
 import math
 from pathlib import Path
 import re
+import threading
 
 
 FROZEN = bool(getattr(sys, "frozen", False))    # packaged app: code cannot change under it
@@ -71,7 +72,61 @@ def previous_helper(calculator, directory=None):
     return helper if helper.is_file() and helper.resolve()!=Path(__file__).resolve() else None
 
 
+_helper = None              # (process, calculator): one long-lived child serves every selection
+_helper_lock = threading.Lock()
+
+
 def calculate(path, rate, calculator):
+    """Features of one chart at one rate, from the long-lived helper. A new interpreter per selection
+    cost ~0.15 s on Linux and a whole packaged-app start on Windows. If the helper dies (a native
+    crash on this chart) or refuses the calculator, a one-shot child repeats the request and reports."""
+    with _helper_lock:
+        try:
+            return _served(path, rate, calculator)
+        except _HelperGone:
+            pass
+    return _once(path, rate, calculator)
+
+
+class _HelperGone(Exception):
+    pass
+
+
+def _served(path, rate, calculator):
+    global _helper
+    if _helper is None or _helper[1] != calculator or _helper[0].poll() is not None:
+        _stop()
+        process = subprocess.Popen(_child("--serve", calculator), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, text=True, bufsize=1)
+        _helper = (process, calculator)
+    process = _helper[0]
+    reply = []
+    try:
+        process.stdin.write(json.dumps([path, rate]) + "\n")
+        process.stdin.flush()
+        reader = threading.Thread(target=lambda: reply.append(process.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(60)
+    except (OSError, ValueError):
+        pass
+    if not reply or not reply[0]:
+        _stop()
+        raise _HelperGone
+    answer = json.loads(reply[0])
+    if "error" in answer:
+        raise RuntimeError("Selected chart analysis failed: " + answer["error"])
+    return {float(key): value for key, value in answer["feats"].items()}
+
+
+def _stop():
+    global _helper
+    if _helper is not None:
+        _helper[0].kill()
+        _helper[0].wait()
+        _helper = None
+
+
+def _once(path, rate, calculator):
     result = subprocess.run(_child(path, repr(rate), calculator), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, timeout=60)
@@ -130,16 +185,29 @@ def child_main(argv):
                 value=None
             print(json.dumps([item['key'],value],allow_nan=False),flush=True)
         return 0
+    serve = argv[0] == "--serve"
+    calculator = argv[1] if serve else argv[2]
     import native_backend
     native_backend.activate()
     import recdata
-    if recdata.calc_id() != argv[2]:
-        archived=previous_helper(argv[2])
-        if archived is not None:
+    if recdata.calc_id() != calculator:
+        archived=previous_helper(calculator)
+        if archived is not None and not serve:      # an archived helper may predate --serve
             os.execv(sys.executable,[sys.executable,'-X','faulthandler',str(archived),*argv])
         raise SystemExit("Calculator changed during selection; reopen after deployment completes")
     paths.lower_priority()
     from analysis_cache import selected
+    if serve:
+        import traceback
+        for line in sys.stdin:
+            path, rate = json.loads(line)
+            try:
+                chart, analysis = selected.analyze(path, rate, calculator=calculator)
+                answer = {"feats": recdata.chart_feats(path, [rate], analyses={rate: analysis})}
+            except Exception as exc:
+                answer = {"error": "".join(traceback.format_exception_only(exc)).strip()[-1600:]}
+            print(json.dumps(answer, allow_nan=False), flush=True)
+        return 0
     rate = float(argv[1])
     chart, analysis = selected.analyze(argv[0], rate, calculator=argv[2])
     print(json.dumps(recdata.chart_feats(argv[0], [rate], analyses={rate:analysis}), allow_nan=False))
