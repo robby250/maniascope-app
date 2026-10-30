@@ -532,7 +532,7 @@ def card_markup(c, mode="pp", note=None):
         return ["<small>" + GLib.markup_escape_text(note or "Select a map to see its prediction") + "</small>"], None
     m, sec = divmod(int(c["length"]), 60)
     skill = skill_calc.NAMES.get(c.get("skill"), c.get("skill") or "")
-    line = (f"<small>SELECTED</small>  <b>~{100 * recdata.shown_acc(c['acc_mid']):.1f}%</b>"
+    line = (f"<small>SELECTED</small>  expected <b>~{100 * recdata.shown_acc(c['acc_mid']):.1f}%</b>"
             f" <small>({100 * recdata.shown_acc(c['acc_lo']):.1f}–{100 * recdata.shown_acc(c['acc_hi']):.1f}%)</small>  <b>{c.get('rate', 1.):.2f}×</b>")
     details = GLib.markup_escape_text(" · ".join(x for x in (f"{m}:{sec:02d}", skill, f"{c['nps']:.1f} NPS" if c.get("nps") else "") if x))
     if mode == "pp" and c["ranked"]:

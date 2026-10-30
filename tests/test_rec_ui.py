@@ -227,7 +227,7 @@ def test_tabs_keys_clipboard_and_persistence():
                 card = dict(c, rate=1.2, acc_mid=.941, acc_lo=.905, acc_hi=.963, ranked=True, pp_lo=380., pp_hi=430.,
                             best=400., gain=3.1, p_up=.45, skill='chordstream', plays_like=(7.4, 1000))
                 w._on_rec(dict(type='card', c=card))
-                assert '~94.1%' in w.card_lbl.get_text().split('\n')[0] and 'Cyber Shaman' in w.card_lbl.get_text().split('\n')[1]
+                assert 'expected ~94.1%' in w.card_lbl.get_text().split('\n')[0] and 'Cyber Shaman' in w.card_lbl.get_text().split('\n')[1]
                 assert '+3.1pp' not in w.card_lbl.get_text() and 'Top-1000' in w.card_lbl.get_tooltip_text()
                 w._set_rec_mode('pp')
                 assert w.card_lbl.get_text().split('\n')[2].startswith('+3.1pp · 45% to beat')
