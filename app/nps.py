@@ -18,6 +18,16 @@ import skill_practice
 
 from chart_structure import STRUCTURE_VERSION, structure
 MIN_RATE, MAX_RATE = 0.70, 1.50
+STABLE_RATES = (0.75, 1.0, 1.5)     # stable has HT/NM/DT only (user 2026-10-31)
+
+
+def offerable(rate):
+    return recdata.client() != "stable" or rate in STABLE_RATES
+
+
+def snap(rate):
+    """The nearest rate the client can play (stable: HT/NM/DT)."""
+    return rate if recdata.client() != "stable" else min(STABLE_RATES, key=lambda r: abs(math.log(r / rate)))
 # An exact rate whose last finished result (14 days) missed the target by more than this is not
 # offered again; the next rate comes from that result (user 2026-10-13: "not get picked exactly the
 # same rate even though it's not accurate").
@@ -303,7 +313,7 @@ class Builder(threading.Thread):
         web_path = os.path.join(webmaps.WEB_DIR, "web.pkl")
         web_mtime = os.path.getmtime(web_path) if os.path.exists(web_path) else None
         window = reach(pred, allowed, central_target(session)) if web_mtime else None
-        catalog_key = (calc, allowed, imported, web_mtime, window)
+        catalog_key = (calc, allowed, imported, web_mtime, window, recdata.client())
         if catalog_key != self._catalog_key:
             full, self._catalog_error = installed(db)
             self._catalog = {s: i for s, i in full.items() if i["keys"] in allowed}
@@ -318,7 +328,7 @@ class Builder(threading.Thread):
                 if sha not in self._catalog:
                     self._catalog[sha] = inst
                     if sha in web_feats:
-                        self._analyses[sha] = web_feats[sha]
+                        self._analyses[sha] = {r: f for r, f in web_feats[sha].items() if offerable(r)}
                         b = pred.md5_bid.get(inst["md5"])
                         pub = pred.pub["feats"].get(b, {})
                         if (pub.get("calc") == calc and inst["md5"] and pub.get("md5") == inst["md5"]
@@ -358,8 +368,9 @@ class Builder(threading.Thread):
                 self._loaded_rowid = row["rowid"]
                 try:
                     sha, rate = row["key"].split("@", 1)
-                    if sha in catalog:
-                        f = analyses[sha][float(rate.split("|")[0])] = recdata.feats_load(row["data"])
+                    rate = float(rate.split("|")[0])
+                    if sha in catalog and offerable(rate):
+                        f = analyses[sha][rate] = recdata.feats_load(row["data"])
                         self._note(sha)
                         if isinstance(row["data"], str):
                             legacy.append((recdata.feats_dump(f), row["rowid"], row["data"]))
@@ -376,7 +387,8 @@ class Builder(threading.Thread):
             if (pub.get("calc") == calc and inst["md5"] and pub.get("md5") == inst["md5"]
                     and pred.pub["maps"].get(b, {}).get("md5") == inst["md5"]):
                 for rate, f in pub.items():
-                    if isinstance(rate, float) and f.get("keys") == inst["keys"] and rate not in analyses[sha]:
+                    if isinstance(rate, float) and offerable(rate) and f.get("keys") == inst["keys"] \
+                            and rate not in analyses[sha]:
                         analyses[sha][rate] = f
                         self._note(sha)
         predictions = {}
@@ -474,7 +486,12 @@ class Builder(threading.Thread):
                 for mode in priority:
                     if i < len(fronts[mode]):
                         proposals.append(fronts[mode][i])
-            for _score, sha, rate in proposals if count < 160 else ():
+            for _score, sha, wanted in proposals if count < 160 else ():
+                rate = snap(wanted)
+                if rate != wanted:
+                    refined.add((sha, wanted))      # the frontier stops offering a rate this client lacks
+                if rate in analyses[sha]:
+                    continue
                 if (sha, rate) not in refined and sha not in bad and refined_counts[sha] < 6:
                     jobs.append((sha, rate, {}))
                     refined.add((sha, rate))

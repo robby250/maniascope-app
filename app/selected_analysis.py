@@ -180,7 +180,7 @@ def child_main(argv):
         for item in json.load(sys.stdin):
             try:
                 s=item['stats']
-                value=rp.Performance(mods=item['mods'],lazer=True,n_geki=s[0],n300=s[1],n_katu=s[2],
+                value=rp.Performance(mods=item['mods'],lazer=item.get('lazer',True),n_geki=s[0],n300=s[1],n_katu=s[2],
                                      n100=s[3],n50=s[4],misses=s[5]).calculate(rp.Beatmap(path=item['path'])).pp
             except Exception:
                 value=None

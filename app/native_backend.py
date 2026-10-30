@@ -34,10 +34,10 @@ def identity_files(app=None):
     import recdata
     app = Path(app or APP)
     root = tree_root(app)
-    # The predictor, the personal fit, the fitting kernels, the feature codec and the thread pool share the crate, not the identity: none changes a
+    # The predictor, the personal fit, the fitting kernels, the feature codec, the stable db readers and the thread pool share the crate, not the identity: none changes a
     # calculator result, and a change to them must not re-analyse every library. lib.rs only declares and
     # registers modules (every calculator module is hashed itself).
-    return ([p for p in sources(root) if p.name not in ('lib.rs', 'predict.rs', 'choices.rs', 'personal.rs', 'fit.rs', 'background.rs', 'codec.rs')]
+    return ([p for p in sources(root) if p.name not in ('lib.rs', 'predict.rs', 'choices.rs', 'personal.rs', 'fit.rs', 'background.rs', 'codec.rs', 'stable.rs')]
             + [app/(name+'.py') for name in recdata.CALCULATOR_MODULES] + [root/'calib/difficulty.json'])
 
 

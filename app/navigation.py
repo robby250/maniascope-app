@@ -53,6 +53,12 @@ def song_search(c):
         if path and os.path.isfile(path):
             import lazer_index
             md = lazer_index._read_metadata(path) or md
+    if recdata.client() == "stable":
+        # stable has no quoted field values: its words match artist/title/difficulty/creator/tags, keys= filters
+        # (osu! wiki, Beatmap search)
+        words = " ".join(str(md.get(k) or "") for k in ("Artist", "Title", "Version"))
+        query = " ".join(re.sub(r'["=<>!]', " ", words).split())
+        return (query + (f" keys={int(c['keys'])}" if c.get("keys") else "")) if query else ""
     fields = [_field(k, md.get(v)) for k, v in
               (("artist", "Artist"), ("title", "Title"), ("diff", "Version"), ("creator", "Creator"))]
     query = " ".join(f for f in fields if f)
@@ -63,6 +69,7 @@ def song_search(c):
 
 
 def lazer_running():
+    """The active client is running (both are osu!.exe on Windows; stable is osu!.exe under Wine)."""
     import paths
     if paths.WINDOWS:
         try:
@@ -75,7 +82,7 @@ def lazer_running():
     for path in glob.glob("/proc/[0-9]*/comm"):
         try:
             with open(path) as fh:
-                if fh.read().strip() == "osu!":
+                if fh.read().strip() == ("osu!.exe" if recdata.client() == "stable" else "osu!"):
                     return True
         except OSError:
             pass
@@ -88,7 +95,7 @@ def open_url(url):
     if paths.WINDOWS:
         os.startfile(url)
         return
-    flatpak = os.path.isdir(os.path.expanduser("~/.var/app/sh.ppy.osu"))
+    flatpak = recdata.client() == "lazer" and os.path.isdir(os.path.expanduser("~/.var/app/sh.ppy.osu"))
     subprocess.Popen(["flatpak", "run", "sh.ppy.osu", url] if flatpak else ["xdg-open", url],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

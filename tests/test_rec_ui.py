@@ -251,7 +251,8 @@ def test_tabs_keys_clipboard_and_persistence():
                 assert heights() == tall          # capped: a longer title cannot grow it further
                 assert [b.labels[-1].get_layout().get_line_count() for b in (w.card_lbl, w.result_lbl)] == [1, 2]
                 assert w.card_lbl.labels[1].get_layout().get_line_count() == 2     # the title: 2 lines, then …
-                assert w.result_lbl.get_text().split('\n')[1] == '96.95%  vs ~95.57%  +1.12σ'
+                assert w.result_lbl.get_text().split('\n')[1] == '96.95% · expected ~95.57% · better than expected'
+                assert w.result_lbl.get_text().split('\n')[0] == 'LAST PLAY  1.15×'      # no clock time (read as a length)
 
                 w._set_rec_mode('skills')
                 w._save_ui()

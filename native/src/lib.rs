@@ -19,6 +19,7 @@ pub mod predict;
 pub mod py;
 pub mod scroll;
 pub mod skills;
+pub mod stable;
 pub mod structure;
 pub mod val;
 
@@ -36,6 +37,9 @@ fn maniascope_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<predict::PredModel>()?;
     m.add_class::<predict::PredSession>()?;
     m.add_class::<predict::FeatStore>()?;
+    m.add_function(wrap_pyfunction!(stable::stable_library, m)?)?;
+    m.add_function(wrap_pyfunction!(stable::stable_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(stable::sha256_files, m)?)?;
     choices::register(m)?;
     bind::register(m)
 }

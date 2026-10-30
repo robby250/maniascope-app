@@ -305,7 +305,7 @@ def _cached_builder(tmp_path, monkeypatch, count):
                        [(f'a@{1+i*.001:.3f}|fixture', json.dumps(dict(feature({'ln': 1.}), cache_index=i)))
                         for i in range(count)])
     builder = nps.Builder(lambda *args: None)
-    builder._catalog_key = ('fixture', (7,), None, None, None)
+    builder._catalog_key = ('fixture', (7,), None, None, None, 'lazer')
     builder._catalog, builder._catalog_error = {'a': inst('a')}, ''
 
     def done(*args, **kwargs):

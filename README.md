@@ -1,8 +1,8 @@
 # ManiaScope
 
-osu!mania difficulty viewer and practice playlists for **osu!lazer**. It follows the map and rate you
-select in lazer and shows its difficulty, skills, dan equivalent and NPS. Its playlists suggest what
-to play next:
+osu!mania difficulty viewer and practice playlists for **osu!lazer** and **osu!stable**. It follows the map
+and rate you select in the game and shows its difficulty, skills, dan equivalent and NPS. Its playlists suggest
+what to play next:
 
 - **PP**: maps where you are likely to beat a best score. It pushes harder as you beat scores and eases
   off after bad plays.
@@ -21,6 +21,20 @@ to play next:
    runs in the background at low priority and fetches only chart text, never audio.
 
 Your lazer scores are read locally from lazer's database (read-only copy).
+
+## osu!stable
+
+ManiaScope switches to whichever osu! tosu sees running. With stable:
+
+- its library and your scores come from `osu!.db` and `scores.db` (read-only). Stable rewrites `osu!.db` when it
+  closes, so maps added in a session join the playlists after you next close stable (selecting them works at once);
+- playlists offer only HT (0.75×), NM and DT (1.5×), the rates stable has;
+- accuracies are shown as stable shows them (MAX counts 300, so about half a percent higher than lazer's);
+- a chart has the same identity in both games, so your lazer history keeps counting.
+
+Stable is found in `%LOCALAPPDATA%\osu!` (Windows) or osu-winello's folder (Linux); elsewhere, start ManiaScope
+with `STABLE_DATA=<folder with osu!.db>`. On Linux tosu needs `kernel.yama.ptrace_scope=0` (Fedora's default) to
+read a Wine game.
 
 ## Linux
 

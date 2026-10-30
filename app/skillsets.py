@@ -39,6 +39,7 @@ import urllib.request  # noqa: E402
 
 
 import feedback  # noqa: E402
+import hashlib
 import recdata
 import lazer_index  # noqa: E402
 import recommend  # noqa: E402
@@ -247,6 +248,7 @@ class LazerWatcher(threading.Thread):
         self._index_job = None
         self._needs_import = False
         self._disconnected = False
+        self._stable_songs, self._stable_files = None, {}
 
     def stop(self):
         self._halt.set()
@@ -286,24 +288,21 @@ class LazerWatcher(threading.Thread):
                 d = json.load(resp)
         except urllib.error.HTTPError:
             return {"source": "tosu", "path": None, "rate": None,
-                    "note": "Waiting for osu!lazer: start it and select a mania map"}
+                    "note": "Waiting for osu!: start it and select a mania map"}
         except (OSError, ValueError):
             return None   # tosu not reachable → log fallback
         try:
             if d.get("error") or "beatmap" not in d:
                 return {"source": "tosu", "path": None, "rate": None,
-                        "note": "Waiting for osu!lazer: start it and select a mania map"}
-            self._track(d["state"]["name"].lower(), d)
+                        "note": "Waiting for osu!: start it and select a mania map"}
+            # stable opens on an osu!standard map; converts are unsupported, so only mania charts are analysed
+            mania = (d["beatmap"].get("mode") or {}).get("number", 3) == 3
+            path = self._chart(d) if mania else None
+            self._track(d["state"]["name"].lower(), d, path)
             if d["state"]["name"] == "resultScreen":
-                self._note_score(d)
+                self._note_score(d, path)
                 if self._last and self._last.get("source") == "tosu":
                     return self._last   # a past score's mods are not the selection
-            rel = d["files"]["beatmap"]
-            path = None
-            for root in (d["folders"].get("songs"), LAZER_FILES):
-                if rel and root and os.path.isfile(os.path.join(root, rel)):
-                    path = os.path.join(root, rel)
-                    break
             rate, note = rate_from_mods(d["play"].get("mods"))
             cs = feedback.constant_speed(d["play"].get("mods"))
             if d["state"]["name"].lower() == "play":
@@ -311,29 +310,58 @@ class LazerWatcher(threading.Thread):
             raw_mods = d["play"].get("mods")
             mod_list = raw_mods.get("array") if isinstance(raw_mods, dict) else raw_mods
             return {"source": "tosu", "path": path, "rate": rate, "cs": cs, "mods": mod_list,
-                    "bid": d["beatmap"].get("id"),
-                    "note": note if path else "selected map file not found"}
+                    "bid": d["beatmap"].get("id"), "client": d.get("client"),
+                    "note": note if path else "selected map file not found" if mania else "not an osu!mania map"}
         except (KeyError, TypeError, AttributeError):
             return {"source": "tosu", "path": None, "rate": None,
                     "note": "unexpected tosu payload"}
 
-    def _track(self, state, d):
+    def _chart(self, d):
+        """The selected chart's file, named by its SHA-256: lazer's store as is; stable's .osu linked into
+        recdata.stable_store() (tosu under Wine can report a Songs folder that only exists inside Wine)."""
+        rel = d["files"]["beatmap"]
+        if not rel:
+            return None
+        if d.get("client") != "stable":
+            root = next((r for r in (d["folders"].get("songs"), LAZER_FILES)
+                         if r and os.path.isfile(os.path.join(r, rel))), None)
+            return os.path.join(root, rel) if root else None
+        if self._stable_songs is None:
+            self._stable_songs = recdata.stable_songs(paths.stable_data())
+        folder = d["folders"].get("beatmap") or ""
+        real = next((p for p in (recdata.long_path(os.path.join(r, folder, rel))
+                                 for r in (d["folders"].get("songs"), self._stable_songs) if r) if os.path.isfile(p)), None)
+        if real is None:
+            return None
+        try:
+            st = os.stat(real)
+            key = (real, st.st_mtime, st.st_size)
+            if key not in self._stable_files:
+                with open(real, "rb") as fh:
+                    sha = hashlib.sha256(fh.read()).hexdigest()
+                if len(self._stable_files) > 256:
+                    self._stable_files.clear()
+                self._stable_files[key] = recdata.stable_link(real, sha)
+            return self._stable_files[key]
+        except OSError:
+            return None
+
+    def _track(self, state, d, path):
         """Attempt lifecycle: start on entering gameplay (a jump back in time is a restart), abort on
         leaving it anywhere but the results screen; the result shown next belongs to this attempt."""
-        rel, tm = d["files"]["beatmap"], d["beatmap"]["time"]
+        rel, tm = path and os.path.basename(path), d["beatmap"]["time"]
         mods = (d.get("play") or {}).get("mods")
         # Autoplay/Cinema is the game playing, not the player: no attempt
         auto = isinstance(mods, dict) and any(m.get("acronym") in ("AT", "CN") for m in mods.get("array") or [])
         if state == "play" and rel and not auto:
             live, first, last = tm.get("live") or 0, tm.get("firstObject") or 0, tm.get("lastObject") or 0
             p = self._play
-            if p is None or p["sha"] != os.path.basename(rel) or live + 1500 < p["pos"]:
+            if p is None or p["sha"] != rel or live + 1500 < p["pos"]:
                 # a jump back within the first seconds is gameplay taking over from the song-select preview
                 # position, not a restart: the attempt starts again without an abort
-                if p and (time.time() - p["t"] > 5 or p["sha"] != os.path.basename(rel)):
+                if p and (time.time() - p["t"] > 5 or p["sha"] != rel):
                     self.on_attempt("void" if self._disconnected else "abort", dict(p, end=time.time()))
-                root = d["folders"].get("songs") or LAZER_FILES
-                p = self._play = {"sha": os.path.basename(rel), "path": os.path.join(root, rel),
+                p = self._play = {"sha": rel, "path": path,
                                   "rate": rate_from_mods(mods)[0], "t": time.time(), "pos": live, "progress": 0.0,
                                   "played_seconds": 0.,
                                   "mods": mods.get("array") if isinstance(mods, dict) else None}
@@ -352,15 +380,18 @@ class LazerWatcher(threading.Thread):
                 self.on_attempt("void" if self._disconnected or auto else "abort", dict(p, end=time.time()))
         self._disconnected = False
 
-    def _note_score(self, d):
+    def _note_score(self, d, path):
         """Hand the user's own mania result to the UI; fresh only right after its own gameplay (a replay or
         an old result being viewed is history, not today's form)."""
-        rs, rel = d.get("resultsScreen") or {}, d["files"]["beatmap"]
+        rs, rel = d.get("resultsScreen") or {}, path and os.path.basename(path)
         name = rs.get("playerName")
-        if not rel or not name or name != (d.get("profile") or {}).get("name") \
-                or str((rs.get("mode") or {}).get("name", "")).lower() != "mania":
+        # tosu leaves stable's player name empty (2026-10-31, tosu 4.26.2): then only the result right after
+        # this app's own tracked attempt on the chart is the player's
+        own = name == (d.get("profile") or {}).get("name") if name else \
+            d.get("client") == "stable" and bool(self._done and self._done["sha"] == rel)
+        if not rel or not own or str((rs.get("mode") or {}).get("name", "")).lower() != "mania":
             return
-        score = {"sha256": os.path.basename(rel), "rate": rate_from_mods(rs.get("mods"))[0],
+        score = {"sha256": rel, "rate": rate_from_mods(rs.get("mods"))[0], "client": d.get("client"),
                  "mods": (rs.get("mods") or {}).get("name", ""),
                  "accuracy": rs.get("accuracy"), "hits": rs.get("hits"),
                  "rank": rs.get("rank"), "max_combo": rs.get("maxCombo"),
@@ -378,12 +409,14 @@ class LazerWatcher(threading.Thread):
                 if not fresh:
                     self.on_attempt("void", att)
             self._done = None
-            self.on_score(score, os.path.join(d["folders"].get("songs") or LAZER_FILES, rel), fresh, att)
+            self.on_score(score, path, fresh, att)
 
     # -- log fallback -------------------------------------------------------
     _lazer_running = staticmethod(recommend.lazer_running)
 
     def _poll_log(self):
+        if recdata.client() == "stable":
+            return {"source": None, "path": None, "rate": None, "note": "osu!stable needs tosu (starting it…)"}
         if not self._lazer_running():   # an old log is not a live selection
             self._log, self._log_display = (None, 0), None
             return {"source": None, "path": None, "rate": None,
@@ -485,7 +518,7 @@ def target_markup(c, obs):
     correct = known and same_chart and abs(actual-rate) < .0005 and mod_ok
     colour = "#238747" if correct else "#d9384f" if known else "#8a9099"
     mark = "✓" if correct else "→"
-    expected = f"~{100*c['acc_mid']:.1f}%" if c.get("acc_mid") is not None else "pending"
+    expected = f"~{100*recdata.shown_acc(c['acc_mid']):.1f}%" if c.get("acc_mid") is not None else "pending"
     if same_chart and sha and sha != observed_sha:
         expected = "Updated chart selected"
     return [f'<span foreground="{colour}" weight="bold">{mark} SET {rate:.2f}× · {wanted}</span>  <b>{expected}</b>',
@@ -499,13 +532,13 @@ def card_markup(c, mode="pp", note=None):
         return ["<small>" + GLib.markup_escape_text(note or "Select a map to see its prediction") + "</small>"], None
     m, sec = divmod(int(c["length"]), 60)
     skill = skill_calc.NAMES.get(c.get("skill"), c.get("skill") or "")
-    line = (f"<small>SELECTED</small>  <b>~{100 * c['acc_mid']:.1f}%</b>"
-            f" <small>({100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%)</small>  <b>{c.get('rate', 1.):.2f}×</b>")
+    line = (f"<small>SELECTED</small>  <b>~{100 * recdata.shown_acc(c['acc_mid']):.1f}%</b>"
+            f" <small>({100 * recdata.shown_acc(c['acc_lo']):.1f}–{100 * recdata.shown_acc(c['acc_hi']):.1f}%)</small>  <b>{c.get('rate', 1.):.2f}×</b>")
     details = GLib.markup_escape_text(" · ".join(x for x in (f"{m}:{sec:02d}", skill, f"{c['nps']:.1f} NPS" if c.get("nps") else "") if x))
     if mode == "pp" and c["ranked"]:
         details = f"<b>+{c['gain']:.1f}pp</b> · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'} · " + details
     parts = [line, _map_markup(c), f"<small>{details}</small>"]
-    tip = [f"Expected ~{100 * c['acc_mid']:.1f}%, usually {100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%",
+    tip = [f"Expected ~{100 * recdata.shown_acc(c['acc_mid']):.1f}%, usually {100 * recdata.shown_acc(c['acc_lo']):.1f}–{100 * recdata.shown_acc(c['acc_hi']):.1f}%",
            f"{c.get('rate', 1.):.2f}× · {m}:{sec:02d} · {skill}"]
     if not c["ranked"]:
         tip.append("No pp (unranked or unranked rate)")
@@ -523,16 +556,18 @@ def card_markup(c, mode="pp", note=None):
 
 
 def result_markup(msg):
-    """The last play: [when · rate · news, big accuracy vs expected, title]."""
+    """The last play: [rate · news, big accuracy vs expected, title]. No clock time: "00:44" read as the song's
+    length (user 2026-10-31)."""
     esc = GLib.markup_escape_text
-    head = " · ".join([time.strftime("%H:%M", time.localtime(msg["when"])) if msg.get("when") else "",
-                       f"{msg['rate']:.2f}×" if msg.get("rate") else "", *msg.get("news", ())]).strip(" ·")
+    head = " · ".join([f"{msg['rate']:.2f}×" if msg.get("rate") else "unknown rate", *msg.get("news", ())])
     acc = f"<big><b>{100 * msg['acc']:.2f}%</b></big>" if msg.get("acc") is not None else ""
     if msg.get("expected") is not None:
-        acc += f"  <small>vs</small> ~{100 * msg['expected']:.2f}%"
+        acc += f" · expected ~{100 * msg['expected']:.2f}%"
     if msg.get("z") is not None:
-        colour = "#238747" if msg["z"] > .5 else "#d9384f" if msg["z"] < -.5 else "#8a9099"
-        acc += f'  <span foreground="{colour}" weight="bold">{msg["z"]:+.2f}σ</span>'
+        # Words, not σ (user 2026-10-31 preferred "better than expected").
+        z = msg["z"]
+        colour = "#238747" if z > .5 else "#d9384f" if z < -.5 else "#8a9099"
+        acc += f' · <span foreground="{colour}" weight="bold">{recommend.verdict_words(z)}</span>'
     return [f"<small>LAST PLAY</small>  {esc(head)}", acc or esc(msg.get("text", "")), f"<b>{esc(msg['title'])}</b>"]
 
 
@@ -719,7 +754,7 @@ class ManiaScopeWindow(Gtk.Window):
         self.status = label(dim=True)
         self.status.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
         foot.pack_start(self.status, True, True, 0)
-        self.follow_btn = Gtk.Button(label="Follow lazer", no_show_all=True,
+        self.follow_btn = Gtk.Button(label="Follow osu!", no_show_all=True,
                                      relief=Gtk.ReliefStyle.NONE)
         self.follow_btn.connect("clicked", self.on_follow)
         foot.pack_end(self.follow_btn, False, False, 0)
@@ -780,7 +815,7 @@ class ManiaScopeWindow(Gtk.Window):
             menu.append(parent)
             return items
 
-        self.auto_btn = Gtk.CheckMenuItem(label="Follow lazer's rate (Auto)", active=self._auto)
+        self.auto_btn = Gtk.CheckMenuItem(label="Follow osu!'s rate (Auto)", active=self._auto)
         self._auto_handler = self.auto_btn.connect("toggled", self.on_auto_toggled)
         menu.append(self.auto_btn)
         adj = Gtk.Adjustment(value=self._manual_rate, lower=0.25, upper=3.0,
@@ -808,7 +843,7 @@ class ManiaScopeWindow(Gtk.Window):
         auto_next.connect("toggled", lambda m: (setattr(self, "_auto_next", m.get_active()), self._queue_save()))
         menu.append(auto_next)
         item("Reset learned NPS taste", lambda _m: self.rec.put("reset_taste"), "Keep scores, session and map history; forget only learned taste")
-        item("Import lazer scores now", lambda _m: self.rec.put("import"))
+        item("Import osu! scores now", lambda _m: self.rec.put("import"))
         if not os.access(TOSU_BIN, os.X_OK):
             item("Download tosu (rate tracking)", lambda _m: self._install_tosu(),
                  "Follows the exact rate you pick in osu!. Official tosu release from GitHub (~40 MB).")
@@ -1304,7 +1339,7 @@ class ManiaScopeWindow(Gtk.Window):
         # Wrap, never ellipsize: a narrow window must still show every word (user 2026-10-30).
         line = lambda **kw: Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, max_width_chars=50, **kw)
         self.card_lbl = FixedBlock(1, 2, 1)
-        self.card_lbl.set_parts(["<small>select a map in lazer</small>"])
+        self.card_lbl.set_parts(["<small>select a map in osu!</small>"])
         box.pack_start(self.card_lbl, False, False, 0)
         self.result_lbl = FixedBlock(1, 1, 2)          # shown from the first finished play
         box.pack_start(self.result_lbl, False, False, 0)
@@ -1695,9 +1730,9 @@ class ManiaScopeWindow(Gtk.Window):
                 sub = [c["var"], f"{c['stars']:.1f}★" if c.get("stars") else "",
                        f"best {c['best']:.0f}pp" if c.get("best") else "new", length]
             elif mode == "pp":
-                number, sub = f"warm-up ~{100 * c['acc_mid']:.1f}%", [length]
+                number, sub = f"warm-up ~{100 * recdata.shown_acc(c['acc_mid']):.1f}%", [length]
             else:
-                number = f"~{100 * c['acc_mid']:.1f}%"
+                number = f"~{100 * recdata.shown_acc(c['acc_mid']):.1f}%"
                 sub = ([f"{c['nps']:.1f} NPS"] if mode == "nps" else []) + [length, c.get("description") or c.get("skill") or ""]
             if not c.get("installed", True):
                 sub.append("download" if mode != "pp" else "not installed")
@@ -1895,6 +1930,8 @@ class ManiaScopeWindow(Gtk.Window):
     def _on_obs(self, obs):
         if self._closed:
             return False
+        if obs.get("client") in recdata.CLIENTS and obs["client"] != self._obs.get("client"):
+            self.rec.put("client", obs["client"])     # the worker ignores the one it already serves
         if (obs.get("path"), obs.get("rate"), obs.get("mods")) != \
                 (self._obs.get("path"), self._obs.get("rate"), self._obs.get("mods")):
             self.rec.put("selected", obs.get("path"), obs.get("rate"), obs.get("mods"))
@@ -2117,7 +2154,7 @@ class ManiaScopeWindow(Gtk.Window):
             self.number_lbl.set('<span size="300%" weight="bold">–</span>', ("#555555",))
             self.nps_lbl.set()
             self.context_lbl.set_text("")
-            self.dominant_lbl.set_text(err or "Select a mania map in osu!lazer")
+            self.dominant_lbl.set_text(err or "Select a mania map in osu!")
             self.others_lbl.set_text(" ")
             self.tags_lbl.set_text(" ")
             self._show_rows(7)
@@ -2138,7 +2175,7 @@ class ManiaScopeWindow(Gtk.Window):
         _p, _r, known = self._effective()
         mode = (" local file" if self._local and self._auto else
                 "" if self._auto and known else
-                " (lazer rate unknown)" if self._auto else " manual")
+                " (osu! rate unknown)" if self._auto else " manual")
         # card entries (archetypes replace their components); type size and opacity shrink with
         # distance from the top one
         names = skill_calc.skill_names(chart.keys)
@@ -2228,9 +2265,9 @@ class ManiaScopeWindow(Gtk.Window):
     def _update_status(self):
         obs = self._obs
         if self._local:
-            text = "local file — lazer selection ignored"
+            text = "local file — osu! selection ignored"
         elif obs["source"] == "tosu" and obs["path"]:
-            text = "lazer via tosu ✓" + (f" — {obs['note']}" if obs.get("note") else "")
+            text = f"{obs.get('client') or 'osu!'} via tosu ✓" + (f" — {obs['note']}" if obs.get("note") else "")
             if self._auto and obs["rate"] is None:
                 text += " · showing 1.00×"
         elif obs["source"] == "log":

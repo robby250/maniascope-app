@@ -186,7 +186,7 @@ def build_ledger(db, pub, installed=None, compute=True):
     for r in rows:
         if compute and r["pp"] is None and r["src"] != "public" \
                 and ranked_status(r,pub,installed) in recdata.RANKED_STATUS \
-                and (r["src"] != "realm" or r["online_id"] or r["client"] == "lazer-live"):
+                and (r["src"] not in ("realm", "stable") or r["online_id"] or r["client"] in LIVE_CLIENTS):
             item = pp_job(r)
             if item: pending.append(item)
     completed = {}
@@ -199,7 +199,7 @@ def build_ledger(db, pub, installed=None, compute=True):
     for r in rows:
         if ranked_status(r, pub, installed) not in recdata.RANKED_STATUS:
             continue
-        if r["src"] in ("realm",) and not r["online_id"] and r["client"] != "lazer-live":
+        if r["src"] in ("realm", "stable") and not r["online_id"] and r["client"] not in LIVE_CLIENTS:
             continue                                  # never submitted: not on the account
         pp = r["pp"]
         if pp is None and r["src"] != "public" and compute:
@@ -217,11 +217,27 @@ def build_ledger(db, pub, installed=None, compute=True):
     return Ledger(best), missing
 
 
+LIVE_CLIENTS = ("lazer-live", "stable-live")
+
+
+def client_name():
+    return "osu!" + recdata.client()
+
+
+def default_client():
+    """Before tosu has named one: lazer when its database is here, else an installed stable."""
+    if os.path.isfile(os.path.join(paths.lazer_data(), "client.realm")) \
+            or not os.path.isfile(os.path.join(paths.stable_data(), "osu!.db")):
+        return "lazer"
+    return "stable"
+
+
 def pp_job(r):
     p = chart_path(r["sha256"], r["beatmap_id"], r["md5"])
     if not p:
         return None
-    return {"key":r["key"],"path":p,"stats":json.loads(r["stats"]),"mods":json.loads(r["mods"] or "[]")}
+    return {"key":r["key"],"path":p,"stats":json.loads(r["stats"]),"mods":json.loads(r["mods"] or "[]"),
+            "lazer":not str(r["client"]).startswith("stable")}   # stable judges a hold note once
 
 
 def score_pp(r):
@@ -1840,6 +1856,11 @@ def settled(defaults, given, current):
     return dict(defaults, **{k: type(defaults[k])(v) for k, v in given.items() if k in defaults})
 
 
+def verdict_words(z):
+    return ("way above expected" if z > 1.5 else "better than expected" if z > 0.5 else
+            "way below expected" if z < -1.5 else "below expected" if z < -0.5 else "about as expected")
+
+
 def rate_label(rate):
     return {0.75: "HT", 1.0: "NM", 1.5: "DT"}.get(round(rate, 2), f"{rate:.2f}×")
 
@@ -2192,6 +2213,8 @@ class Worker(threading.Thread):
 
     def run(self):
         self.db = recdata.connect()
+        recdata.set_client(recdata.kv_get(self.db, "client") or default_client(),
+                           recdata.kv_get(self.db, "stable_miss_ratio"))
         self._first_import = self.db is not None and recdata.kv_get(self.db, 'realm_import') is None
         self._stage("Opening your saved plays and recommendations…")
         try:
@@ -2267,7 +2290,7 @@ class Worker(threading.Thread):
 
     def _catch_up_replays(self):
         """Archive independently: neither a busy queue nor slow Realm I/O blocks Next."""
-        if not self._replay_due or self.busy() or time.monotonic() < self._replay_due \
+        if recdata.client() != "lazer" or not self._replay_due or self.busy() or time.monotonic() < self._replay_due \
                 or self._replay_thread is not None and self._replay_thread.is_alive() \
                 or self._import_thread is not None and self._import_thread.is_alive():
             return
@@ -2375,7 +2398,7 @@ class Worker(threading.Thread):
         if stamp != self._session_cache[0]:
             self._session_cache = (stamp, Session(load_events(self.db)))
         session = self._session_cache[1]
-        session.acc_target = self.acc_targets.get(self.mode, nps.DEFAULT_TARGET)    # NPS/Skills never build at once
+        session.acc_target = recdata.model_acc(self.acc_targets.get(self.mode, nps.DEFAULT_TARGET))    # NPS/Skills never build at once
         return session.bind_warmup(getattr(getattr(self.rec,'model',None),'warmup',None))
 
     def _publish(self, mode=None):
@@ -2527,7 +2550,7 @@ class Worker(threading.Thread):
             return phase, shown, note
         st = self.skills_state if mode == "skills" else self.nps_state
         prepared_key = ((self.generation, self._local_request_id), self.keys[mode],
-                        self.practice_skills if mode == "skills" else (), self.acc_targets.get(mode))
+                        self.practice_skills if mode == "skills" else (), recdata.model_acc(self.acc_targets.get(mode)))
         cached = self._local_pool_cache.get(mode)
         if cached is None or cached[0] != prepared_key or cached[1] is not st:
             prepared = st["candidates"].prepare(list(self.keys[mode]), self.rec.local_shas)
@@ -2614,7 +2637,7 @@ class Worker(threading.Thread):
             self._local_request_id += 1
             self._nps_requested_at = time.monotonic()
             session = Session(load_events(self.db))
-            session.acc_target = self.acc_targets.get(self.mode, nps.DEFAULT_TARGET)
+            session.acc_target = recdata.model_acc(self.acc_targets.get(self.mode, nps.DEFAULT_TARGET))
             self.builder.configure(self.rec.predictor, session, self.keys["nps"],
                                    self._local_request_id, self.generation, self.keys["skills"], self.practice_skills,
                                    "stats" if self._stats_visible else self.mode)
@@ -2847,8 +2870,6 @@ class Worker(threading.Thread):
         if info.get("predicted_at", 0) > (_ts(score.get("played")) or time.time()):
             info = {}                       # a delayed startup must not masquerade as a pre-play prediction
         title = f"{inst['artist']} - {inst['title']} [{inst['version']}]" if inst else info.get("title") or score["sha256"]
-        rate = f"{score['rate']:.2f}×" if score.get("rate") else "unknown rate"
-        label = f"{title} · {rate} · {time.strftime('%H:%M', time.localtime(_ts(score.get('played')) or time.time()))}"
         if fresh:
             self._replay_due, self._replay_retries = time.monotonic() + 3, 0
             with self.db:
@@ -2864,7 +2885,7 @@ class Worker(threading.Thread):
                               y=math.log(max(1e-3, 1 - min(acc, 0.999))),
                               y_lazer=math.log(max(1e-3,1-min(display_accuracy,.999))))
             # Show the saved play even if subsequent feature calculation/refitting fails.
-            self.emit(dict(self._verdict(key, bid, None, info), type="result", title=label,
+            self.emit(dict(self._verdict(key, bid, None, info), type="result", title=title,
                            targets=[m for m, c in self.targets.items()
                                     if c and navigation.same_map(c, sha=score["sha256"], md5=md5, bid=bid)]))
         if self.rec and (_new or fresh):
@@ -2883,25 +2904,27 @@ class Worker(threading.Thread):
             if self._stats_visible:
                 self.t_stats(True)
             if fresh:
-                self.emit(dict(self._verdict(key, bid, before, info), type="result", title=label))
+                self.emit(dict(self._verdict(key, bid, before, info), type="result", title=title))
 
     def _verdict(self, key, bid, before, info):
         """A finished play against what was shown, and what it did: `text` in one line, plus the fields the
         playlist lays out (acc, expected, z, rate, when, news)."""
-        st = json.loads(self.db.execute("SELECT stats FROM scores WHERE key=?", (key,)).fetchone()[0])
+        row = self.db.execute("SELECT stats, client FROM scores WHERE key=?", (key,)).fetchone()
+        st = json.loads(row[0])
         acc, _n = recdata.acc320(st)
-        out = [f"{100 * recdata.acc_lazer(st):.2f}%"]
-        fields = {"acc": recdata.acc_lazer(st), "expected": info.get("expected"), "z": None, "rate": info.get("rate"),
+        # Shown as the game shows it; the verdict compares lazer units (stable: shown_acc of the forecast).
+        shown = recdata.acc_stable(st) if str(row[1]).startswith("stable") else recdata.acc_lazer(st)
+        out = [f"{100 * shown:.2f}%"]
+        fields = {"acc": shown, "expected": recdata.shown_acc(info.get("expected")), "z": None, "rate": info.get("rate"),
                   "when": time.time(), "news": []}
         if info.get("mu") is not None and info.get("sd"):
             shown_mu = info.get("shown_mu", info["mu"] + PESSIMISM * (info.get("sdm") or 0.0))
             z = (shown_mu - math.log(max(1e-3, 1 - min(acc, 0.999)))) / info["sd"]
             if info.get('display_mu') is not None and info.get('display_sd'):
                 z=(info['display_mu']-math.log(max(1e-3,1-min(recdata.acc_lazer(st),.999))))/info['display_sd']
-            expected, fields["z"] = info.get("expected"), z
+            expected, fields["z"] = fields["expected"], z
             out.append((f"expected ~{100 * expected:.2f}% · " if expected is not None else "")
-                       + ("way above expected" if z > 1.5 else "better than expected" if z > 0.5 else
-                          "way below expected" if z < -1.5 else "below expected" if z < -0.5 else "about as expected"))
+                       + verdict_words(z))
         if before is None:
             return dict(fields, text=" · ".join(out))
         t0, b0, ph0 = before
@@ -3106,14 +3129,26 @@ class Worker(threading.Thread):
     def t_import(self):
         self._begin_import()
 
+    def t_client(self, name):
+        """tosu reports which osu! the player opened: serve that one's library, scores and rates."""
+        if name not in recdata.CLIENTS:
+            return
+        recdata.kv_set(self.db, "client", name)
+        if name == recdata.client():
+            return
+        recdata.set_client(name, recdata.kv_get(self.db, "stable_miss_ratio"))
+        self._first_import = True
+        self._begin_import()
+
     def _begin_import(self):
         """Restored recommendations are usable before Realm copy/index I/O.
         One import is coalesced; the live event/model owner remains this worker."""
         if self._import_thread is not None and self._import_thread.is_alive():
             return
         path=self.db.execute('PRAGMA database_list').fetchone()[2]
-        self.emit({"type":"status","text":"Reading your osu!lazer scores and installed maps (first time: about a minute)…"
-                   if self._first_import else "Using saved history · checking lazer for new plays in the background…"})
+        game = client_name()
+        self.emit({"type":"status","text":f"Reading your {game} scores and installed maps (first time: about a minute)…"
+                   if self._first_import else f"Using saved history · checking {game} for new plays in the background…"})
         def run():
             db=None
             try:
@@ -3128,7 +3163,7 @@ class Worker(threading.Thread):
                         digest.update(repr(tuple(row)).encode())
                     return digest.digest()
                 before=signature()
-                result=recdata.import_realm(db)
+                result=recdata.import_library(db)
                 recovered=recover_results(db)
                 changed=signature()!=before
                 # Website top 100 for a named profile: bests from stable/other PCs (user 2026-10-01).
@@ -3155,20 +3190,21 @@ class Worker(threading.Thread):
     def t_imported(self, result, recovered, changed, error=None):
         first, self._first_import = self._first_import, False
         if error and first:
-            self._stage(f"Could not read your osu!lazer scores: {error}", blocking=True)
+            self._stage(f"Could not read your {client_name()} scores: {error}", blocking=True)
             return
         if error:
-            self.emit({"type":"status","text":"Saved recommendations retained; lazer import pending: "+error})
+            self.emit({"type":"status","text":f"Saved recommendations retained; {client_name()} import pending: "+error})
             return
-        self.emit({"type": "status", "text": (f"Read {result['new']:,} new plays and {result['installed']:,} installed maps from osu!lazer"
-                                               if result['new'] else f"Up to date with osu!lazer ({result['installed']:,} maps)")
+        self.emit({"type": "status", "text": (f"Read {result['new']:,} new plays and {result['installed']:,} installed maps from {client_name()}"
+                                               if result['new'] else f"Up to date with {client_name()} ({result['installed']:,} maps)")
                    + (f" · {recovered} predictions recovered" if recovered else "")})
         if result["new"] or recovered:
             rows = play_history(self.db, limit=1)
             if rows:
                 r = rows[0]
-                self.emit({"type": "result", "title": r["title"], "text": history_text(rows), "acc": r["actual"],
-                           "expected": r["expected"], "z": r["z"], "rate": r["rate"], "when": _ts(r["played"]),
+                self.emit({"type": "result", "title": r["title"], "text": history_text(rows),
+                           "acc": recdata.acc_stable(r["stats"]) if recdata.client() == "stable" else r["actual"],
+                           "expected": recdata.shown_acc(r["expected"]), "z": r["z"], "rate": r["rate"], "when": _ts(r["played"]),
                            "news": []})
         if result['new'] and self.rec:
             self._start_fill()          # before the refit: its publish must already know the level is pending

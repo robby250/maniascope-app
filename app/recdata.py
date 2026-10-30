@@ -98,9 +98,41 @@ def raw_nps(chart, rate):
     return len(chart.notes) * rate * 1000 / span if span > 0 else None
 
 
+CLIENTS = ("lazer", "stable")
+_client, _miss_ratio = "lazer", .88
+
+
+def set_client(name, miss_ratio=None):
+    """The osu! client whose library and rates the app serves (tosu reports it; kv 'client' keeps it).
+    miss_ratio: stable_miss_ratio, for showing accuracies as stable does."""
+    global _client, _miss_ratio
+    _client = name if name in CLIENTS else "lazer"
+    _miss_ratio = miss_ratio or _miss_ratio
+
+
+def client():
+    return _client
+
+
+def shown_acc(acc):
+    """A lazer-unit accuracy (predictions, targets inside the model) as the active client displays it."""
+    return acc if _client != "stable" or acc is None else 1 - (1 - acc) * _miss_ratio
+
+
+def model_acc(acc):
+    """shown_acc's inverse: a displayed accuracy (the target slider) in the model's lazer units."""
+    return acc if _client != "stable" or acc is None else 1 - (1 - acc) / _miss_ratio
+
+
+def stable_store():
+    """stable's .osu files under their SHA-256, in lazer's files/ layout (hard links): every sha → path lookup
+    works for both clients, and an edited chart keeps its old revision's identity."""
+    return os.path.join(paths.DATA, "stable")
+
+
 def local_origin():
     import socket
-    root = os.path.realpath(paths.lazer_data())
+    root = stable_store() if _client == "stable" else os.path.realpath(paths.lazer_data())
     return {"host": socket.gethostname(), "root": root}
 
 
@@ -279,6 +311,23 @@ def acc320(stats):
     return ((320 * p + 300 * g + 200 * gd + 100 * ok + 50 * meh) / (320 * n) if n else 0.0), n
 
 
+def acc_stable(stats):
+    """The accuracy stable's results screen shows: MAX and 300 both count 300."""
+    p, g, gd, ok, meh, miss = stats
+    n = p + g + gd + ok + meh + miss
+    return (300 * (p + g) + 200 * gd + 100 * ok + 50 * meh) / (300 * n) if n else 0.0
+
+
+def stable_miss_ratio(db):
+    """(1 − stable accuracy) / (1 − lazer accuracy) of the same judgements: predictions stay in lazer units, stable
+    shows MAX as 300 (≈0.88 for a 95 % player). The player's own median when they have lazer plays."""
+    ratios = sorted((1 - acc_stable(st)) / (1 - acc_lazer(st)) for st in
+                    (json.loads(r[0]) for r in db.execute("SELECT stats FROM scores WHERE stats IS NOT NULL "
+                                                          "ORDER BY played DESC LIMIT 2000"))
+                    if sum(st) >= 100 and acc_lazer(st) < .995)
+    return ratios[len(ratios) // 2] if len(ratios) >= 20 else .88
+
+
 def acc_lazer(stats):
     """The accuracy lazer's results screen shows: PERFECT 305, GREAT 300 (acc320 counts PERFECT 320)."""
     p, g, gd, ok, meh, miss = stats
@@ -373,6 +422,135 @@ def import_realm(db, realm=None, user_id=None):
     return {"user_id": user_id, "seen": len(scores), "new": after - before, "installed": len(maps)}
 
 
+# stable's ranked-status byte → lazer's BeatmapOnlineStatus (what `installed.status` holds)
+STABLE_STATUS = {4: 1, 5: 2, 6: 3, 7: 4, 2: 0}
+
+
+def stable_songs(root):
+    """The Songs folder: osu!.<user>.cfg's BeatmapDirectory when it exists here, else <root>/Songs."""
+    import glob
+    for cfg in glob.glob(os.path.join(root, "osu!.*.cfg")):
+        try:
+            with open(cfg, encoding="utf-8-sig", errors="replace") as fh:
+                for line in fh:
+                    k, _, v = line.partition("=")
+                    if k.strip() == "BeatmapDirectory" and v.strip():
+                        d = os.path.join(root, v.strip())
+                        if os.path.isdir(d):
+                            return d
+        except OSError:
+            pass
+    return os.path.join(root, "Songs")
+
+
+def long_path(path):
+    """Windows: stable's Songs paths often pass MAX_PATH (260); the long-path (\\\\?\\) form has no limit."""
+    return "\\\\?\\" + os.path.abspath(path) if paths.WINDOWS and not path.startswith("\\\\?\\") else path
+
+
+def stable_link(path, sha):
+    """The stable_store path of a stable .osu (hard link; a copy across file systems)."""
+    dest = local_file(sha, stable_store())
+    if not os.path.isfile(dest):
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = f"{dest}.{os.getpid()}.part"
+        try:
+            os.link(path, tmp)
+        except OSError:
+            shutil.copyfile(path, tmp)
+        os.replace(tmp, dest)
+    return dest
+
+
+def stable_key(sha, total, stats):
+    """One stable play from scores.db and from tosu's results screen alike (their timestamps differ)."""
+    return f"st|{sha}|{total}|{','.join(str(int(x)) for x in stats)}"
+
+
+def import_stable(db, root=None):
+    """stable's osu!.db (mania charts) and scores.db (the account's mania scores), the import_realm of stable."""
+    import native_backend
+    nat = native_backend.load()
+    root = root or paths.stable_data()
+    try:
+        player, charts = nat.stable_library(os.path.join(root, "osu!.db"))
+    except Exception as exc:
+        kv_set(db, "manifest_error", str(exc).splitlines()[0][:160])
+        raise
+    songs = stable_songs(root)
+    charts = [c for c in charts if c["mode"] == 3 and c["md5"] and c["file"]]
+    for c in charts:
+        c["path"] = long_path(os.path.join(songs, c["folder"], c["file"]))
+    db.execute("CREATE TABLE IF NOT EXISTS stable_files(path TEXT PRIMARY KEY, mtime REAL, size INTEGER, sha256 TEXT)")
+    known = {r[0]: (r[1], r[2], r[3]) for r in db.execute("SELECT path, mtime, size, sha256 FROM stable_files")}
+    stats, todo = {}, []
+    for c in charts:
+        try:
+            st = os.stat(c["path"])
+        except OSError:
+            continue
+        stats[c["path"]] = (st.st_mtime, st.st_size)
+        k = known.get(c["path"])
+        if not k or k[:2] != stats[c["path"]]:
+            todo.append(c["path"])
+    hashed = dict(zip(todo, nat.sha256_files(todo)))
+    sha_of = {p: (hashed[p] if p in hashed else known[p][2]) for p in stats}
+    maps, local, md5_sha, md5_bid = [], [], {}, {}
+    for c in charts:
+        sha = sha_of.get(c["path"])
+        if not sha:
+            continue
+        stable_link(c["path"], sha)
+        md5_sha[c["md5"]], md5_bid[c["md5"]] = sha, c["beatmap_id"] or None
+        maps.append((sha, c["beatmap_id"] or 0, c["set_id"] or 0, c["md5"], STABLE_STATUS.get(c["status"], -3),
+                     int(round(c["cs"])), c["od"], c["length"], c["title"], c["artist"], c["version"]))
+        local.append((sha, c["md5"], None, 0, c["creator"]))
+    user_id, now = kv_get(db, "user_id"), time.strftime("%FT%T")
+    try:
+        raw = nat.stable_scores(os.path.join(root, "scores.db"))
+    except Exception:
+        raw = []                                 # no plays yet: stable writes scores.db on the first one
+    scores = []
+    for s in raw:
+        if s["mode"] != 3 or s["player"] != player or s["md5"] not in md5_sha:
+            continue
+        st, mods = tuple(s["stats"]), s["mods"]
+        a, n = acc320(st)
+        rate = 1.5 if mods & (64 | 512) else 0.75 if mods & 256 else 1.0
+        ranked = not (mods & ~(1 | 2 | 8 | 64 | 256 | 512 | 1024 | 1048576 | 1073741824 | 16384 | 32))
+        played = datetime.datetime.fromtimestamp(s["played"], datetime.timezone.utc).strftime("%FT%T")
+        scores.append({"key": stable_key(md5_sha[s["md5"]], s["score"], st), "src": "stable", "local_id": None,
+                       "online_id": max(0, s["online_id"]), "player_id": user_id, "sha256": md5_sha[s["md5"]],
+                       "md5": s["md5"], "beatmap_id": md5_bid[s["md5"]], "status": None, "played": played, "imported": now,
+                       "client": "stable", "mods": json.dumps(mods), "rate": rate, "ranked": int(ranked),
+                       "stats": json.dumps(st), "acc": a, "n": n, "total": s["score"], "pp": None, "fresh": 0})
+    with db:
+        before = db.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
+        for r in scores:
+            upsert_score(db, r)
+        db.execute("DELETE FROM installed")
+        db.executemany("INSERT OR REPLACE INTO installed VALUES (?,?,?,?,?,?,?,?,?,?,?)", maps)
+        db.execute("DELETE FROM installed_local")
+        db.executemany("INSERT OR REPLACE INTO installed_local VALUES (?,?,?,?,?)", local)
+        db.execute("DELETE FROM stable_files")
+        db.executemany("INSERT INTO stable_files VALUES (?,?,?,?)",
+                       [(p, *stats[p], sha_of[p]) for p in stats if sha_of.get(p)])
+        after = db.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
+    kv_set(db, "realm_import", {"t": time.time(), "scores": len(scores), "new": after - before, "maps": len(maps)})
+    kv_set(db, "stable_player", player)
+    ratio = stable_miss_ratio(db)
+    kv_set(db, "stable_miss_ratio", ratio)
+    set_client("stable", ratio)
+    kv_set(db, "manifest_origin", local_origin())
+    kv_set(db, "manifest_error", None)
+    return {"user_id": user_id, "seen": len(scores), "new": after - before, "installed": len(maps)}
+
+
+def import_library(db):
+    """The active client's scores and installed maps."""
+    return import_stable(db) if _client == "stable" else import_realm(db)
+
+
 def import_public_user(db, pub):
     """The snapshot's stable high scores of this user (their own namespace; pp as the server had it)."""
     now = time.strftime("%FT%T")
@@ -439,7 +617,9 @@ def add_live_score(db, score, path, fresh, play=None):
         score = dict(score, played=datetime.datetime.now(datetime.timezone.utc).isoformat())
     if not score_allowed(db, score, play if fresh else None, exclude=True):
         return None, False
-    key = score_key(score["sha256"], score.get("score") or 0, stats, score.get("played"))
+    stable = score.get("client") == "stable"
+    key = (stable_key(score["sha256"], score.get("score") or 0, stats) if stable
+           else score_key(score["sha256"], score.get("score") or 0, stats, score.get("played")))
     with db:
         known = db.execute("SELECT fresh FROM scores WHERE key=?", (key,)).fetchone()
         old = db.execute("SELECT played, fresh FROM scores WHERE key=?", (
@@ -450,7 +630,8 @@ def add_live_score(db, score, path, fresh, play=None):
                           "sha256": score["sha256"], "md5": score.get("md5"), "beatmap_id": score.get("beatmap_id"),
                           "status": score.get("status"),
                           "played": score.get("played") or time.strftime("%FT%T"), "imported": time.strftime("%FT%T"),
-                          "client": "lazer-live", "mods": json.dumps(mods), "rate": rate, "ranked": int(ranked),
+                          "client": "stable-live" if stable else "lazer-live", "mods": json.dumps(mods), "rate": rate,
+                          "ranked": int(ranked),
                           "stats": json.dumps(stats), "acc": a, "n": n, "total": score.get("score") or 0,
                           "pp": None, "fresh": int(fresh)})
         if fresh and known is not None and not known[0]:
@@ -557,6 +738,8 @@ def feats_batch(items, threads=0, *, analyses=None):
             datas.append(None)
             continue
         try:
+            if not path:
+                raise FileNotFoundError("no local file for this chart")   # one bad chart, not the whole batch
             with open(path, "rb") as fh:
                 datas.append(fh.read())
         except OSError as exc:
