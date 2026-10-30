@@ -361,7 +361,7 @@ class LazerWatcher(threading.Thread):
                 # position, not a restart: the attempt starts again without an abort
                 if p and (time.time() - p["t"] > 5 or p["sha"] != rel):
                     self.on_attempt("void" if self._disconnected else "abort", dict(p, end=time.time()))
-                p = self._play = {"sha": rel, "path": path,
+                p = self._play = {"sha": rel, "path": path, "own": d.get("client") != "stable" or not self._replay_watching(),
                                   "rate": rate_from_mods(mods)[0], "t": time.time(), "pos": live, "progress": 0.0,
                                   "played_seconds": 0.,
                                   "mods": mods.get("array") if isinstance(mods, dict) else None}
@@ -369,6 +369,10 @@ class LazerWatcher(threading.Thread):
             delta = live - max(first, p["pos"])
             if 0 < delta < 2000 and p.get("rate"):
                 p["played_seconds"] = p.get("played_seconds", 0.) + delta / 1000 / p["rate"]
+            paused = bool((d.get("game") or {}).get("paused"))
+            if paused and not p.get("paused_now"):
+                p.setdefault("pauses", []).append(int(live))     # stable's .osr has no pause list (lazer's Realm does)
+            p["paused_now"] = paused
             p["partial_stats"] = d.get("play", {}).get("hits")
             p["pos"], p["progress"] = live, max(0.0, min(1.0, (live - first) / max(1, last - first)))
         elif self._play:
@@ -380,15 +384,24 @@ class LazerWatcher(threading.Thread):
                 self.on_attempt("void" if self._disconnected or auto else "abort", dict(p, end=time.time()))
         self._disconnected = False
 
+    @staticmethod
+    def _replay_watching():
+        """stable: tosu's StreamCompanion status (its v2 JSON lacks the flag) is 8 while a replay plays."""
+        try:
+            with urllib.request.urlopen(TOSU_URL.replace("/json/v2", "/json/sc"), timeout=0.6) as resp:
+                return json.load(resp).get("status") == 8
+        except (OSError, ValueError):
+            return False
+
     def _note_score(self, d, path):
         """Hand the user's own mania result to the UI; fresh only right after its own gameplay (a replay or
         an old result being viewed is history, not today's form)."""
         rs, rel = d.get("resultsScreen") or {}, path and os.path.basename(path)
         name = rs.get("playerName")
-        # tosu leaves stable's player name empty (2026-10-31, tosu 4.26.2): then only the result right after
-        # this app's own tracked attempt on the chart is the player's
-        own = name == (d.get("profile") or {}).get("name") if name else \
-            d.get("client") == "stable" and bool(self._done and self._done["sha"] == rel)
+        # tosu 4.26.2 reads stable's player name as "" or garbage ("wd" as guest, 2026-10-31): on stable the result
+        # right after this app's own tracked, not-a-replay attempt on the chart is the player's
+        own = name == (d.get("profile") or {}).get("name") or \
+            d.get("client") == "stable" and bool(self._done and self._done["sha"] == rel and self._done.get("own"))
         if not rel or not own or str((rs.get("mode") or {}).get("name", "")).lower() != "mania":
             return
         score = {"sha256": rel, "rate": rate_from_mods(rs.get("mods"))[0], "client": d.get("client"),

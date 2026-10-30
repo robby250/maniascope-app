@@ -40,6 +40,7 @@ fn maniascope_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stable::stable_library, m)?)?;
     m.add_function(wrap_pyfunction!(stable::stable_scores, m)?)?;
     m.add_function(wrap_pyfunction!(stable::sha256_files, m)?)?;
+    m.add_function(wrap_pyfunction!(stable::osr_header, m)?)?;
     choices::register(m)?;
     bind::register(m)
 }

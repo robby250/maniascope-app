@@ -94,3 +94,59 @@ def test_rates_search_and_shown_accuracy(stable):
     recdata.set_client("lazer")
     assert nps.snap(1.23) == 1.23 and nps.offerable(1.1) and recdata.shown_acc(.95) == .95
     assert json.loads(json.dumps(navigation.song_search(c))).startswith('artist="Art"')
+
+
+def test_tracked_stable_play_archives_its_replay_and_tosu_pauses(stable, tmp_path):
+    db, sha, md5 = stable
+    import replays
+    root = os.environ["STABLE_DATA"]
+    recdata.import_library(db)                  # links the chart (a live selection does the same)
+    st = (900, 80, 10, 5, 2, 3)
+    head = struct.pack("<Bi", 3, 20250107) + _s(md5) + _s("me") + _s("r")
+    head += struct.pack("<hhhhhhihBi", 80, 5, 2, 900, 10, 3, 812345, 500, 0, 64) + _s("") + struct.pack("<q", 0)
+    os.makedirs(os.path.join(root, "Data", "r"))
+    with open(os.path.join(root, "Data", "r", f"{md5}-638000000000000000.osr"), "wb") as fh:
+        fh.write(head + struct.pack("<i", 0))
+    with open(os.path.join(root, "Data", "r", f"{md5}-638000000000000001.osr"), "wb") as fh:
+        fh.write(head.replace(struct.pack("<i", 812345), struct.pack("<i", 812344)))        # another play
+    live = {"sha256": sha, "client": "stable", "hits": {"geki": 900, "300": 80, "katu": 10, "100": 5, "50": 2, "0": 3},
+            "score": 812345, "played": "2026-10-31T01:00:00", "mods_list": [{"acronym": "DT"}]}
+    key, _new = recdata.add_live_score(db, live, None, True)
+    recdata.log_event(db, "finish", None, key=key, pauses=[12000, 30500])
+    untracked = dict(live, score=700000, hits=dict(live["hits"], miss=4))
+    recdata.add_live_score(db, untracked, None, False)
+    assert replays.archive_stable(db, root, str(tmp_path)) == 1
+    row = dict(db.execute("SELECT * FROM replay_evidence").fetchone())
+    assert (row["score_key"], row["status"], json.loads(row["pauses"]), row["rate"]) == (key, "archived", [12000, 30500], 1.5)
+    with open(tmp_path / row["archive_path"], "rb") as fh:
+        assert fh.read() == head + struct.pack("<i", 0)
+    assert db.execute("SELECT COUNT(*) FROM replay_evidence").fetchone()[0] == 1       # only observed attempts
+    assert replays.archive_stable(db, root, str(tmp_path)) == 0                        # idempotent
+
+
+def test_watcher_records_pause_positions_during_play():
+    import skillsets
+    w = skillsets.LazerWatcher(*(lambda *a: None,) * 5)
+    def poll(live, paused, state="play"):
+        w._track(state, {"files": {"beatmap": "x"}, "beatmap": {"time": {"live": live, "firstObject": 0, "lastObject": 9e4}},
+                         "play": {"mods": {"array": []}}, "game": {"paused": paused}}, "/s/" + "a" * 64)
+    for live, paused in ((1000, False), (2000, False), (2100, True), (2100, True), (2200, False), (5000, True)):
+        poll(live, paused)
+    assert w._play["pauses"] == [2100, 5000]
+    poll(5000, False, "resultscreen")
+    assert w._done["pauses"] == [2100, 5000]
+
+
+@pytest.mark.parametrize("own", [True, False])
+def test_stable_result_counts_only_after_own_attempt_not_a_watched_replay(own):
+    import skillsets
+    got = []
+    w = skillsets.LazerWatcher(lambda *a: None, lambda *a: None, lambda *a: None, lambda *a: got.append(a), lambda *a: None)
+    sha = "a" * 64
+    w._done = {"sha": sha, "t": 0, "own": own}
+    d = {"client": "stable", "profile": {"name": "Guest"},
+         "resultsScreen": {"playerName": "wd", "mode": {"name": "mania"}, "mods": {"array": []},   # tosu: stable's own name
+                           "hits": {"geki": 9, "300": 1, "katu": 0, "100": 0, "50": 0, "0": 0}, "score": 1,
+                           "createdAt": "2026-10-31T00:00:00Z"}}
+    w._note_score(d, "/s/" + sha)
+    assert len(got) == (1 if own else 0)

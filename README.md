@@ -30,6 +30,8 @@ ManiaScope switches to whichever osu! tosu sees running. With stable:
   closes, so maps added in a session join the playlists after you next close stable (selecting them works at once);
 - playlists offer only HT (0.75×), NM and DT (1.5×), the rates stable has;
 - accuracies are shown as stable shows them (MAX counts 300, so about half a percent higher than lazer's);
+- your local replays (`Data/r`) of tracked plays are archived as lazer's are, with the pauses tosu saw (stable writes
+  them when it closes, so they are picked up the next time it starts);
 - a chart has the same identity in both games, so your lazer history keeps counting.
 
 Stable is found in `%LOCALAPPDATA%\osu!` (Windows) or osu-winello's folder (Linux); elsewhere, start ManiaScope

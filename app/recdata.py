@@ -473,7 +473,10 @@ def import_stable(db, root=None):
     nat = native_backend.load()
     root = root or paths.stable_data()
     try:
-        player, charts = nat.stable_library(os.path.join(root, "osu!.db"))
+        # stable writes osu!.db when it first closes; until then its library is empty here, not an error
+        player, charts = nat.stable_library(os.path.join(root, "osu!.db")) \
+            if os.path.isfile(os.path.join(root, "osu!.db")) or not os.path.isfile(os.path.join(root, "osu!.exe")) \
+            else ("", [])
     except Exception as exc:
         kv_set(db, "manifest_error", str(exc).splitlines()[0][:160])
         raise
@@ -538,6 +541,8 @@ def import_stable(db, root=None):
         after = db.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
     kv_set(db, "realm_import", {"t": time.time(), "scores": len(scores), "new": after - before, "maps": len(maps)})
     kv_set(db, "stable_player", player)
+    import replays
+    replays.archive_stable(db, root)
     ratio = stable_miss_ratio(db)
     kv_set(db, "stable_miss_ratio", ratio)
     set_client("stable", ratio)

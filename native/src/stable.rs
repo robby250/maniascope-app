@@ -235,6 +235,37 @@ pub fn stable_scores<'py>(py: Python<'py>, path: &str) -> PyResult<Vec<Bound<'py
     Ok(out)
 }
 
+/// A replay's header (.osr without its frames): which play it holds.
+#[pyfunction]
+pub fn osr_header<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyDict>> {
+    let data = read(path)?;
+    let parse = || -> Result<(u8, String, String, [i32; 6], i32, i32, f64), String> {
+        let mut r = Reader { b: &data, at: 0 };
+        let mode = r.u8()?;
+        r.i32()?;
+        let md5 = r.string()?;
+        let player = r.string()?;
+        r.string()?;
+        let (c300, c100, c50, geki, katu, miss) = (r.i16()?, r.i16()?, r.i16()?, r.i16()?, r.i16()?, r.i16()?);
+        let score = r.i32()?;
+        r.take(2 + 1)?; // combo, perfect
+        let mods = r.i32()?;
+        r.string()?;
+        let played = unix(r.i64()?);
+        Ok((mode, md5, player, [geki, c300, katu, c100, c50, miss].map(|x| x as u16 as i32), score, mods, played))
+    };
+    let (mode, md5, player, stats, score, mods, played) = parse().map_err(PyValueError::new_err)?;
+    let d = PyDict::new(py);
+    d.set_item("mode", mode)?;
+    d.set_item("md5", md5)?;
+    d.set_item("player", player)?;
+    d.set_item("stats", stats.to_vec())?;
+    d.set_item("score", score)?;
+    d.set_item("mods", mods)?;
+    d.set_item("played", played)?;
+    Ok(d)
+}
+
 /// SHA-256 hex of each file (None when unreadable): stable's .osu files get lazer's content identity.
 #[pyfunction]
 #[pyo3(signature = (paths, threads=0))]

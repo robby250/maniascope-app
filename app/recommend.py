@@ -2290,7 +2290,7 @@ class Worker(threading.Thread):
 
     def _catch_up_replays(self):
         """Archive independently: neither a busy queue nor slow Realm I/O blocks Next."""
-        if recdata.client() != "lazer" or not self._replay_due or self.busy() or time.monotonic() < self._replay_due \
+        if not self._replay_due or self.busy() or time.monotonic() < self._replay_due \
                 or self._replay_thread is not None and self._replay_thread.is_alive() \
                 or self._import_thread is not None and self._import_thread.is_alive():
             return
@@ -2301,7 +2301,11 @@ class Worker(threading.Thread):
             try:
                 import replays
                 db = recdata.connect(path)
-                replays.recent(db)
+                if recdata.client() == "stable":
+                    recover_results(db)
+                    replays.archive_stable(db)     # stable's scores came live; its replay file follows the result
+                else:
+                    replays.recent(db)
                 pending = bool(db.execute("SELECT 1 FROM replay_evidence WHERE status='missing' "
                                           "AND julianday(played)>=julianday('now','-3 days') LIMIT 1").fetchone())
                 fresh=[r[0] for r in db.execute("SELECT key FROM scores WHERE fresh=1 AND julianday(played)>=julianday('now','-3 days')")]
@@ -2883,7 +2887,8 @@ class Worker(threading.Thread):
                               start_id=start["id"] if start else None,
                               prediction_valid=info.get("mu") is not None,
                               y=math.log(max(1e-3, 1 - min(acc, 0.999))),
-                              y_lazer=math.log(max(1e-3,1-min(display_accuracy,.999))))
+                              y_lazer=math.log(max(1e-3,1-min(display_accuracy,.999))),
+                              pauses=(play or {}).get("pauses") or [])
             # Show the saved play even if subsequent feature calculation/refitting fails.
             self.emit(dict(self._verdict(key, bid, None, info), type="result", title=title,
                            targets=[m for m, c in self.targets.items()
