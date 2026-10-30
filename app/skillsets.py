@@ -444,10 +444,34 @@ def _map_markup(c):
     return f"<b>{esc(title.removesuffix('.osu'))}</b> <small>{esc(f'[{version}] ') if version else ''}{c['keys']}K</small>"
 
 
+class FixedBlock(Gtk.Box):
+    """Stacked labels, each capped at n lines: longer text wraps, then ends in …, with the whole block as tooltip.
+    The playlist's top is streamed and must never grow (user 2026-10-30); it may shrink, so no space is reserved
+    ("no need to force the empty space")."""
+    def __init__(self, *lines):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, no_show_all=True)
+        self.labels = []
+        for n in lines:
+            label = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, max_width_chars=50,
+                              ellipsize=Pango.EllipsizeMode.END, lines=n, no_show_all=True)
+            self.labels.append(label)
+            self.pack_start(label, False, False, 0)
+
+    def set_parts(self, parts, tip=None):
+        for label, markup in zip(self.labels, list(parts) + [""] * len(self.labels)):
+            label.set_markup(markup or "")
+            label.set_visible(bool(markup))
+        self.set_visible(any(parts))
+        self.set_tooltip_text(tip)
+
+    def get_text(self):
+        return "\n".join(label.get_text() for label in self.labels).rstrip("\n")
+
+
 def target_markup(c, obs):
-    """The picked map: the rate to set (green once osu! shows it) and expectation first, so they never move; title below."""
+    """The picked map: [rate to set (green once osu! shows it) and expectation, title], so they never move."""
     if not c:
-        return ""
+        return ["", ""]
     rate = c["rate"]
     wanted = "NM" if abs(rate-1.) < .0005 else "HT" if rate < 1. else "DT"
     actual = obs.get("rate")
@@ -464,23 +488,23 @@ def target_markup(c, obs):
     expected = f"~{100*c['acc_mid']:.1f}%" if c.get("acc_mid") is not None else "pending"
     if same_chart and sha and sha != observed_sha:
         expected = "Updated chart selected"
-    return (f'<span foreground="{colour}" weight="bold">{mark} SET {rate:.2f}× · {wanted}</span>  <b>{expected}</b>\n'
-            + _map_markup(c))
+    return [f'<span foreground="{colour}" weight="bold">{mark} SET {rate:.2f}× · {wanted}</span>  <b>{expected}</b>',
+            _map_markup(c)]
 
 
 def card_markup(c, mode="pp", note=None):
-    """The selected map: numbers on the first line, at a fixed place whatever the title (user 2026-10-30), then
-    title and details. The full card is its tooltip."""
+    """The selected map: [numbers, title, details], numbers at a fixed place whatever the title (user 2026-10-30).
+    PP gain leads the details line, so the numbers line never wraps. The full card is its tooltip."""
     if not c:
-        return "<small>" + GLib.markup_escape_text(note or "Select a map to see its prediction") + "</small>", None
+        return ["<small>" + GLib.markup_escape_text(note or "Select a map to see its prediction") + "</small>"], None
     m, sec = divmod(int(c["length"]), 60)
     skill = skill_calc.NAMES.get(c.get("skill"), c.get("skill") or "")
     line = (f"<small>SELECTED</small>  <b>~{100 * c['acc_mid']:.1f}%</b>"
             f" <small>({100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%)</small>  <b>{c.get('rate', 1.):.2f}×</b>")
+    details = GLib.markup_escape_text(" · ".join(x for x in (f"{m}:{sec:02d}", skill, f"{c['nps']:.1f} NPS" if c.get("nps") else "") if x))
     if mode == "pp" and c["ranked"]:
-        line += f"  <b>+{c['gain']:.1f}pp</b> · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'}"
-    details = [f"{m}:{sec:02d}", skill, f"{c['nps']:.1f} NPS" if c.get("nps") else ""]
-    line += "\n" + _map_markup(c) + "\n<small>" + GLib.markup_escape_text(" · ".join(x for x in details if x)) + "</small>"
+        details = f"<b>+{c['gain']:.1f}pp</b> · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'} · " + details
+    parts = [line, _map_markup(c), f"<small>{details}</small>"]
     tip = [f"Expected ~{100 * c['acc_mid']:.1f}%, usually {100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%",
            f"{c.get('rate', 1.):.2f}× · {m}:{sec:02d} · {skill}"]
     if not c["ranked"]:
@@ -495,7 +519,21 @@ def card_markup(c, mode="pp", note=None):
         # User 2026-10-02 could not tell whose stars or whose scores ("7.4* osu SR? or our SR?").
         tip.append(f"Top-1000 players score on it like a {stars:.1f}★ map "
                    f"(ManiaScope ★, their best of {n:,} scores at {c.get('rate', 1.):.2f}×)")
-    return line, "\n".join(tip)
+    return parts, "\n".join(tip)
+
+
+def result_markup(msg):
+    """The last play: [when · rate · news, big accuracy vs expected, title]."""
+    esc = GLib.markup_escape_text
+    head = " · ".join([time.strftime("%H:%M", time.localtime(msg["when"])) if msg.get("when") else "",
+                       f"{msg['rate']:.2f}×" if msg.get("rate") else "", *msg.get("news", ())]).strip(" ·")
+    acc = f"<big><b>{100 * msg['acc']:.2f}%</b></big>" if msg.get("acc") is not None else ""
+    if msg.get("expected") is not None:
+        acc += f"  <small>vs</small> ~{100 * msg['expected']:.2f}%"
+    if msg.get("z") is not None:
+        colour = "#238747" if msg["z"] > .5 else "#d9384f" if msg["z"] < -.5 else "#8a9099"
+        acc += f'  <span foreground="{colour}" weight="bold">{msg["z"]:+.2f}σ</span>'
+    return [f"<small>LAST PLAY</small>  {esc(head)}", acc or esc(msg.get("text", "")), f"<b>{esc(msg['title'])}</b>"]
 
 
 class ManiaScopeWindow(Gtk.Window):
@@ -587,7 +625,7 @@ class ManiaScopeWindow(Gtk.Window):
         if tracking_switch(self.tracking_db):
             self.track_btn = Gtk.ToggleButton(label="Tracking on", active=recdata.tracking_enabled(self.tracking_db))
             self.track_btn.set_label("Tracking on" if self.track_btn.get_active() else "Tracking off")
-            self.track_btn.set_tooltip_text("Turn off before controller play. Paused plays stay excluded after imports and restarts. Resume for the next play.")
+            self.track_btn.set_tooltip_text("Paused plays stay excluded after imports and restarts. Resume for the next play.")
             self.track_btn.connect("toggled", self._tracking_toggled)
         bar.pack_end(self._overflow())
         self.set_titlebar(bar)
@@ -1265,11 +1303,13 @@ class ManiaScopeWindow(Gtk.Window):
         win.add(outer)
         # Wrap, never ellipsize: a narrow window must still show every word (user 2026-10-30).
         line = lambda **kw: Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, max_width_chars=50, **kw)
-        self.card_lbl = line()          # the full card is its tooltip
-        self.card_lbl.set_markup("<small>select a map in lazer</small>")
+        self.card_lbl = FixedBlock(1, 2, 1)
+        self.card_lbl.set_parts(["<small>select a map in lazer</small>"])
         box.pack_start(self.card_lbl, False, False, 0)
-        self.result_lbl = line(no_show_all=True)
+        self.result_lbl = FixedBlock(1, 1, 2)          # shown from the first finished play
         box.pack_start(self.result_lbl, False, False, 0)
+        # The one status line and bar for the whole window, at the bottom (user 2026-10-30: "Analysing" three times).
+        self._status_text, self._bg_progress = "", None
         self.rec_status = line(no_show_all=True)
         self.rec_status.get_style_context().add_class("dim-label")
         self.rec_status.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
@@ -1283,11 +1323,8 @@ class ManiaScopeWindow(Gtk.Window):
         for mode in recommend.MODES:
             page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=6)
             key_btn = self._key_picker(mode)
-            target = line(no_show_all=True)        # the picked map, once there is one
+            target = FixedBlock(1, 2)            # the picked map, once there is one
             page.pack_start(target, False, False, 0)
-            from stats_view import WaitBanner
-            wait = WaitBanner()
-            page.pack_start(wait, False, False, 0)
             sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
             listing = Gtk.ListBox(activate_on_single_click=True)
             listing.connect("row-activated", lambda _l, row, m=mode: self._activate_rec(m, row))
@@ -1301,7 +1338,7 @@ class ManiaScopeWindow(Gtk.Window):
             note.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
             view = {"list": listing, "target": target, "note": note, "keys": key_btn,
                     "hover": False, "pending": None, "ready": False, "target_data": None,
-                    "placeholder": placeholder, "wait": wait, "learning": None, "analysing": None, "loaded": False,
+                    "placeholder": placeholder, "analysing": None, "loaded": False,
                     "status_text": "", "name": recommend.MODE_NAMES[mode]}
             self._rec_views[mode] = view
             sw.connect("enter-notify-event", lambda *_a, m=mode: self._rec_hover(m, True))
@@ -1320,6 +1357,7 @@ class ManiaScopeWindow(Gtk.Window):
             self._rec_notebook.append_page(stack, tab)
         self._rec_notebook.set_current_page(recommend.MODES.index(self._rec_mode))
         self._tab_labels[recommend.MODES.index(self._rec_mode)].pack_start(self.gear_btn, False, False, 0)
+        self.gear_btn.show_all()       # its tab label was already shown: the gear was missing until a tab switch
         from stats_view import StatsView
         self._stats_open = False
         self.stats_view = StatsView(self._practice_from_stats)
@@ -1347,21 +1385,15 @@ class ManiaScopeWindow(Gtk.Window):
                 self._rec_pinned["blocker"] = msg["text"]
             # A later import/replay note must not hide why there are no recommendations at all.
             text = "\n".join(dict.fromkeys(t for t in (*self._rec_pinned.values(), msg["text"]) if t))
-            self._set_status(text)
             done, total = msg.get("progress") or (0, 0)
-            if "learning" in msg:          # first learning gates every tab, not just the footer
+            self._bg_progress = (done, total) if total else None
+            self._set_status(text)
+            if "learning" in msg:          # Stats has no list to show meanwhile: it keeps its own banner
                 eta = msg["text"].rpartition(" · ~")[2] if " · ~" in msg["text"] else ""
                 learning = (f"Learning your level from your plays · {done:,} / {total:,} charts analysed"
                             + (f" · ~{eta}" if eta else "") if msg["learning"] and total else None)
-                for v in self._rec_views.values():
-                    v["learning"] = (learning + " — suggestions appear and sharpen as this runs", done, total) \
-                        if learning else None
-                    self._show_wait(v)
                 self.stats_view.wait.show_progress(learning and learning + " — your stats fill in as this runs",
                                                    done, total)
-            self.rec_progress.set_visible(bool(total))
-            if total:
-                self.rec_progress.set_fraction(min(1., done / total))
             for v in self._rec_views.values():
                 v["status_text"] = text
                 self._set_placeholder(v)
@@ -1377,10 +1409,7 @@ class ManiaScopeWindow(Gtk.Window):
             if not view["hover"] or not view["ready"]:
                 self._flush_pool(mode)
         elif msg["type"] == "result":
-            self.result_lbl.set_markup(f"<small>LAST PLAY</small>  {GLib.markup_escape_text(msg['text'].replace(chr(10), ' · '))}"
-                                       f"\n<b>{GLib.markup_escape_text(msg['title'])}</b>")
-            self.result_lbl.set_tooltip_text(f"{msg['title']}\n{msg['text']}")
-            self.result_lbl.show()
+            self.result_lbl.set_parts(result_markup(msg), f"{msg['title']}\n{msg['text']}")
             if self._auto_next and self._rec_mode in msg.get("targets", ()) and self.next_btn.get_sensitive():
                 self._next(False)
         elif msg["type"] == "history":
@@ -1400,22 +1429,30 @@ class ManiaScopeWindow(Gtk.Window):
             c = msg["c"]
             target = self._rec_views[mode]["target"]
             self._rec_views[mode]["target_data"] = c
-            target.set_markup(target_markup(c, self._obs) if c else GLib.markup_escape_text(msg.get("msg") or ""))
-            target.set_tooltip_text("\n".join(t for t in (msg.get("msg"), c and c.get("why"), msg.get("copy")) if t) or None)
-            target.set_visible(bool(target.get_text()))
+            target.set_parts(target_markup(c, self._obs) if c else [GLib.markup_escape_text(msg.get("msg") or "")],
+                             "\n".join(t for t in (msg.get("msg"), c and c.get("why"), msg.get("copy")) if t) or None)
             if msg.get("copy"):
                 Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(msg["copy"], -1)
         return False
 
     def _show_card(self):
-        markup, tip = card_markup(self._card_data, self._rec_mode, self._card_note)
-        self.card_lbl.set_markup(markup)
-        self.card_lbl.set_tooltip_text(tip)
+        self.card_lbl.set_parts(*card_markup(self._card_data, self._rec_mode, self._card_note))
 
     def _set_status(self, text):
+        self._status_text = text
+        self._bottom_status()
+
+    def _bottom_status(self):
+        """Status line + bar: the worker's status (its progress when it reports one), else this tab's list analysis."""
+        view = None if self._stats_open else self._rec_views.get(self._rec_mode)
+        analysing = view and not self._bg_progress and view["analysing"]
+        text = "\n".join(t for t in (self._status_text, analysing and analysing[0]) if t)
+        done, total = self._bg_progress or (analysing[1:] if analysing else (0, 0))
         self.rec_status.set_text(text.replace("\n", " · "))
         self.rec_status.set_tooltip_text(text or None)
         self.rec_status.set_visible(bool(text))
+        self.rec_progress.set_visible(bool(total))
+        self.rec_progress.set_fraction(min(1., done / total) if total else 0.)
 
     def _key_picker(self, mode):
         pop = Gtk.Popover()
@@ -1458,7 +1495,7 @@ class ManiaScopeWindow(Gtk.Window):
         for row in view["list"].get_children():
             view["list"].remove(row)
         view["ready"], view["pending"], view["target_data"] = False, None, None
-        view["target"].hide()
+        view["target"].set_parts([])
         view["note"].set_text("Finding " + skill_practice.label(selected) + " maps at your current level…")
         self._sync_rec()
 
@@ -1486,7 +1523,7 @@ class ManiaScopeWindow(Gtk.Window):
         view["ready"], view["pending"] = False, None
         if view.get("target_data") and view["target_data"]["keys"] not in self._rec_keys[mode]:
             view["target_data"] = None
-            view["target"].hide()
+            view["target"].set_parts([])
         view["note"].set_text("Refreshing…" if self._rec_keys[mode] else "Select at least one keymode")
         self._sync_rec()
 
@@ -1502,6 +1539,7 @@ class ManiaScopeWindow(Gtk.Window):
         self._stats_open = active
         if not active:
             self._set_rec_mode(recommend.MODES[index])
+        self._bottom_status()
         if active != old and hasattr(self, "rec"):
             self.rec.put("stats", active)
 
@@ -1629,9 +1667,6 @@ class ManiaScopeWindow(Gtk.Window):
         head = "Nothing to suggest yet." if view["loaded"] else f"Loading {view['name']} suggestions…"
         view["placeholder"].set_text(head + (f"\n\n{view['status_text']}" if view["status_text"] else ""))
 
-    @staticmethod
-    def _show_wait(view):
-        view["wait"].show_progress(*(view["learning"] or view["analysing"] or (None,)))
 
     def _flush_pool(self, mode):
         view = self._rec_views[mode]
@@ -1651,7 +1686,7 @@ class ManiaScopeWindow(Gtk.Window):
         done, total = msg.get("progress") or (0, 0)
         view["analysing"] = ((f"Analysing maps · {done:,} / {total:,} · paused while you play", done, total)
                              if total else None)
-        self._show_wait(view)
+        self._bottom_status()
         for c in msg["shown"]:
             m, sec = divmod(int(c["length"]), 60)
             length = f"{m}:{sec:02d}"
@@ -1867,7 +1902,7 @@ class ManiaScopeWindow(Gtk.Window):
         self._obs = obs
         for view in self._rec_views.values():
             if view.get("target_data"):
-                view["target"].set_markup(target_markup(view["target_data"], obs))
+                view["target"].set_parts(target_markup(view["target_data"], obs), view["target"].get_tooltip_text())
         died = self._tosu_proc is not None and self._tosu_proc.poll() is not None
         if obs["source"] != "tosu" and (died or time.monotonic() - self._tosu_tried > 10):
             self._start_tosu()           # helper died or was never up: bring it back

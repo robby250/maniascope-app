@@ -102,7 +102,7 @@ def test_category_sampling_matches_eligible_families_not_slots():
     assert abs(share-.02) < 1e-10
     cs += [dict(cs[0], sha="too-fast", family="x", rate=1.51), dict(cs[0], sha="too-slow", family="y", rate=.69)]
     assert all(.7 <= c["rate"] <= 1.5 for c in rank_rows(cs, R.Session([], 1000), [7]))
-    assert nps.central_target(R.Session([], 1000)) == .94
+    assert nps.central_target(R.Session([], 1000)) == nps.DEFAULT_TARGET
 
 
 def test_short_drills_penalized_without_banning_specialists():
@@ -127,20 +127,21 @@ def test_endurance_recovers_and_depends_on_margin():
 
 def test_rate_guidance_does_not_claim_unknown_matches():
     import skillsets as ui
+    markup = lambda *a: "\n".join(ui.target_markup(*a))
     c = {"title": "A & B [Test]", "keys": 7, "rate": .85, "sha": "a"*64, "acc_mid": .94}
     obs = {"source": "tosu", "path": "/tmp/"+c["sha"], "rate": .85000001, "mods": [{"acronym": "HT"}]}
-    assert "#238747" in ui.target_markup(c, obs)
-    assert "#d9384f" in ui.target_markup(c, dict(obs, rate=.9))
-    assert "#238747" not in ui.target_markup(c, dict(obs, source=None))
-    assert "#238747" not in ui.target_markup(c, dict(obs, path="other"))
-    assert "CURRENT" not in ui.target_markup(c, obs) and "A &amp; B" in ui.target_markup(c, obs)
+    assert "#238747" in markup(c, obs)
+    assert "#d9384f" in markup(c, dict(obs, rate=.9))
+    assert "#238747" not in markup(c, dict(obs, source=None))
+    assert "#238747" not in markup(c, dict(obs, path="other"))
+    assert "CURRENT" not in markup(c, obs) and "A &amp; B" in markup(c, obs)
     nm = dict(c, rate=1.)
-    assert "#d9384f" in ui.target_markup(nm, dict(obs, rate=1., mods=[{"acronym": "DT"}]))
-    assert "#238747" in ui.target_markup(nm, dict(obs, rate=1., mods=[]))
-    updated=ui.target_markup(dict(c,bid=1123210),dict(obs,path='/tmp/new-sha',bid=1123210))
+    assert "#d9384f" in markup(nm, dict(obs, rate=1., mods=[{"acronym": "DT"}]))
+    assert "#238747" in markup(nm, dict(obs, rate=1., mods=[]))
+    updated=markup(dict(c,bid=1123210),dict(obs,path='/tmp/new-sha',bid=1123210))
     assert '#238747' in updated and 'Updated chart selected' in updated
     assert 'Expected ~94.0%' not in updated
-    assert '#238747' not in ui.target_markup(dict(c,bid=1123210),dict(obs,path='/tmp/new-sha',bid=123))
+    assert '#238747' not in markup(dict(c,bid=1123210),dict(obs,path='/tmp/new-sha',bid=123))
 
 
 

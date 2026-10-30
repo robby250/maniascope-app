@@ -6,7 +6,7 @@ to play next:
 
 - **PP**: maps where you are likely to beat a best score. It pushes harder as you beat scores and eases
   off after bad plays.
-- **NPS**: dense practice at your chosen accuracy target (default 94%), including website maps you
+- **NPS**: dense practice at your chosen accuracy target (default 95%), including website maps you
   don't have yet (download suggested).
 - **Skills**: practice for chosen skills (jacks, LN, tech, …).
 

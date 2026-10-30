@@ -37,6 +37,7 @@ import navigation
 import skill_practice
 import score_units
 import accuracy_targets
+import nps
 
 MODES = ("pp", "nps", "skills")
 LOCAL_MODES = ("nps", "skills")
@@ -2142,11 +2143,10 @@ class Worker(threading.Thread):
         self._playlist_consumed = collections.deque(maxlen=20)
         self.nps_focus = .5
         self.web_bias = {"nps": .5, "skills": .5}
-        self.acc_targets = {"nps": .94, "skills": .94}
+        self.acc_targets = {"nps": nps.DEFAULT_TARGET, "skills": nps.DEFAULT_TARGET}
         self.pp_settings, self.pp_mix = dict(PP_DEFAULTS), dict(PP_MIX_DEFAULTS)
         self._selection_id = 0
         self.practice_skills = ()
-        import nps
         self.nps_state = {"candidates": nps.no_choices(), "total": 0, "analyzed": 0, "failed": 0, "error": ""}
         self.skills_state = dict(self.nps_state)
         self._local_request_id = 0
@@ -2223,7 +2223,6 @@ class Worker(threading.Thread):
             self.rec.pause = lambda: self._yield_urgent() or 0.
             self.rec.pp_settings = self.pp_settings
             self.generation += 1
-            import nps
             self.builder = nps.Builder(lambda kind, data: self.put("nps_update", kind, data), self.busy)
             self.builder.start()
             self._restore_local(self.mode)
@@ -2376,7 +2375,7 @@ class Worker(threading.Thread):
         if stamp != self._session_cache[0]:
             self._session_cache = (stamp, Session(load_events(self.db)))
         session = self._session_cache[1]
-        session.acc_target = self.acc_targets.get(self.mode, .94)    # NPS/Skills never build at once
+        session.acc_target = self.acc_targets.get(self.mode, nps.DEFAULT_TARGET)    # NPS/Skills never build at once
         return session.bind_warmup(getattr(getattr(self.rec,'model',None),'warmup',None))
 
     def _publish(self, mode=None):
@@ -2428,7 +2427,6 @@ class Worker(threading.Thread):
 
     def _prepared_playlist(self, mode, fresh):
         """Keep the displayed order; update predictions, then append new maps."""
-        import nps
         session = self._session()
         cached = self._local_pool_cache.get(mode) if mode in LOCAL_MODES else None
         fresh_by = {event_key(c): c for c in fresh} if mode in LOCAL_MODES and cached is None else {}
@@ -2527,7 +2525,6 @@ class Worker(threading.Thread):
         if mode == "pp":
             phase, shown, _pick, note = self.rec.pool(session, keys=self.keys[mode], choose=False)
             return phase, shown, note
-        import nps
         st = self.skills_state if mode == "skills" else self.nps_state
         prepared_key = ((self.generation, self._local_request_id), self.keys[mode],
                         self.practice_skills if mode == "skills" else (), self.acc_targets.get(mode))
@@ -2560,13 +2557,13 @@ class Worker(threading.Thread):
         # A queued map outside the current top 60 was queued under another state (cold start, restart
         # list): G835LX 2026-10-22 offered dEKA, 6 NPS, ranked 2242 of 2245, after seven such maps.
         self._credible[mode] = {event_key(c) for c in ranked}
-        note = f"target ~{100 * self.acc_targets.get(mode, .94):.0f}%"
+        note = f"target ~{100 * self.acc_targets.get(mode, nps.DEFAULT_TARGET):.0f}%"
         if st.get("build_failed"):
             note += " · local map analysis stopped"
         elif not st["total"]:
             note += " · no maps of these keymodes found yet"
         elif st["analyzed"] + st["failed"] < st["total"]:
-            note += f" · {st['analyzed']:,} / {st['total']:,} maps analysed"
+            pass                    # the window's bottom bar counts them (one "Analysing", user 2026-10-30)
         else:
             note += f" · {st['total']:,} maps"
         missing = sum(not c.get("installed", True) for c in shown)
@@ -2596,7 +2593,6 @@ class Worker(threading.Thread):
         # calculator update, but load features exclusively under the CURRENT
         # calculator key below and recompute predictions for this session.
         # Rejecting the references needlessly forced a full library pass.
-        import nps
         by_sha = {i["sha256"]: i for i in self.rec.installed.values() if i["keys"] in self.keys[mode]}
         catalog, analyses = {}, collections.defaultdict(dict)
         for sha, rate in saved.get("choices", ()):
@@ -2618,7 +2614,7 @@ class Worker(threading.Thread):
             self._local_request_id += 1
             self._nps_requested_at = time.monotonic()
             session = Session(load_events(self.db))
-            session.acc_target = self.acc_targets.get(self.mode, .94)
+            session.acc_target = self.acc_targets.get(self.mode, nps.DEFAULT_TARGET)
             self.builder.configure(self.rec.predictor, session, self.keys["nps"],
                                    self._local_request_id, self.generation, self.keys["skills"], self.practice_skills,
                                    "stats" if self._stats_visible else self.mode)
@@ -2664,7 +2660,6 @@ class Worker(threading.Thread):
             state["candidates"].fill_cache(self.rec.feats.cache, self.rec.feats.key, state.get("analyses"))
             # A filtered-out chart has no fresh candidate. Refresh only the
             # retained queue at this publication; Next keeps its cheap cache reads.
-            import nps
             refreshed = {}
             for i, c in enumerate(self.playlists[mode]):
                 f, _ = self.rec.feats({"sha256": c.get("sha") or c.get("sha256"),
@@ -2707,7 +2702,6 @@ class Worker(threading.Thread):
         self.keys = {m: recdata.normalize_keys(keys_by_mode.get(m, None if m == "pp" else [7])) for m in MODES}
         self.practice_skills = skill_practice.normalize(practice_skills)
         if nps_focus is not None:
-            import nps
             focus = nps.normalize_focus(nps_focus)
             if focus != self.nps_focus:
                 self.nps_focus = focus
@@ -2718,7 +2712,6 @@ class Worker(threading.Thread):
                 self.playlists[m] = []
         retarget = False
         for m, value in (acc_targets or {}).items():
-            import nps
             value = nps.normalize_target(value)
             if m in self.acc_targets and value != self.acc_targets[m]:
                 self.acc_targets[m], retarget = value, True
@@ -2785,7 +2778,6 @@ class Worker(threading.Thread):
         f = exp.get("f")
         pattern, family = None, None
         if f and f.get("nps", {}).get("version"):
-            import nps
             pattern, family = nps.profile(f).tolist(), f["nps"].get("family")
         exp.setdefault("md5", inst["md5"] if inst else None)
         exp.setdefault("keys", inst["keys"] if inst else None)
@@ -2872,9 +2864,9 @@ class Worker(threading.Thread):
                               y=math.log(max(1e-3, 1 - min(acc, 0.999))),
                               y_lazer=math.log(max(1e-3,1-min(display_accuracy,.999))))
             # Show the saved play even if subsequent feature calculation/refitting fails.
-            self.emit({"type": "result", "title": label, "text": self._verdict(key, bid, None, info),
-                       "targets": [m for m, c in self.targets.items()
-                                   if c and navigation.same_map(c, sha=score["sha256"], md5=md5, bid=bid)]})
+            self.emit(dict(self._verdict(key, bid, None, info), type="result", title=label,
+                           targets=[m for m, c in self.targets.items()
+                                    if c and navigation.same_map(c, sha=score["sha256"], md5=md5, bid=bid)]))
         if self.rec and (_new or fresh):
             if recdata.predictable_context(score.get("mods_list"), score.get("rate")):
                 self._request_feature(score.get("sha256"), path, score.get("rate"), refit=True)
@@ -2891,25 +2883,29 @@ class Worker(threading.Thread):
             if self._stats_visible:
                 self.t_stats(True)
             if fresh:
-                self.emit({"type": "result", "title": label, "text": self._verdict(key, bid, before, info)})
+                self.emit(dict(self._verdict(key, bid, before, info), type="result", title=label))
 
     def _verdict(self, key, bid, before, info):
-        """One line after a finished play: the result against what was shown, and what it did."""
+        """A finished play against what was shown, and what it did: `text` in one line, plus the fields the
+        playlist lays out (acc, expected, z, rate, when, news)."""
         st = json.loads(self.db.execute("SELECT stats FROM scores WHERE key=?", (key,)).fetchone()[0])
         acc, _n = recdata.acc320(st)
         out = [f"{100 * recdata.acc_lazer(st):.2f}%"]
+        fields = {"acc": recdata.acc_lazer(st), "expected": info.get("expected"), "z": None, "rate": info.get("rate"),
+                  "when": time.time(), "news": []}
         if info.get("mu") is not None and info.get("sd"):
             shown_mu = info.get("shown_mu", info["mu"] + PESSIMISM * (info.get("sdm") or 0.0))
             z = (shown_mu - math.log(max(1e-3, 1 - min(acc, 0.999)))) / info["sd"]
             if info.get('display_mu') is not None and info.get('display_sd'):
                 z=(info['display_mu']-math.log(max(1e-3,1-min(recdata.acc_lazer(st),.999))))/info['display_sd']
-            expected = info.get("expected")
+            expected, fields["z"] = info.get("expected"), z
             out.append((f"expected ~{100 * expected:.2f}% · " if expected is not None else "")
                        + ("way above expected" if z > 1.5 else "better than expected" if z > 0.5 else
                           "way below expected" if z < -1.5 else "below expected" if z < -0.5 else "about as expected"))
         if before is None:
-            return " · ".join(out)
+            return dict(fields, text=" · ".join(out))
         t0, b0, ph0 = before
+        news = len(out)
         L = self.rec.ledger
         b1 = L.best.get(bid, (0.0,))[0] if bid else 0.0
         if b1 > b0 + 0.05:
@@ -2919,7 +2915,7 @@ class Worker(threading.Thread):
         if ph1 != ph0:
             out.append({"build": "warmed up — building", "push": "in form — pushing", "recover": "easing off",
                         "warmup": "warming up"}[ph1])
-        return " · ".join(out)
+        return dict(fields, text=" · ".join(out), news=out[news:])
 
     def _card(self):
         path, rate, mods = getattr(self, "_sel", (None, None, None))
@@ -3170,7 +3166,10 @@ class Worker(threading.Thread):
         if result["new"] or recovered:
             rows = play_history(self.db, limit=1)
             if rows:
-                self.emit({"type": "result", "title": rows[0]["title"], "text": history_text(rows)})
+                r = rows[0]
+                self.emit({"type": "result", "title": r["title"], "text": history_text(rows), "acc": r["actual"],
+                           "expected": r["expected"], "z": r["z"], "rate": r["rate"], "when": _ts(r["played"]),
+                           "news": []})
         if result['new'] and self.rec:
             self._start_fill()          # before the refit: its publish must already know the level is pending
         if result['new'] or recovered or changed:

@@ -73,7 +73,7 @@ def test_density_incentive_waits_for_readiness_not_higher_accuracy_target():
     high=dict(f,nps=dict(f['nps'],nps=60.))
     e={'acc_mid':.94,'sd_model':.15}
     s=R.Session([],1000,warmup_model=cold_model())
-    assert nps.central_target(s)==.94
+    assert nps.central_target(s)==nps.DEFAULT_TARGET
     assert nps.practice_value(f,e,1.19,.94,s)==nps.practice_value(high,e,1.19,.94,s)
     assert nps.practice_value(f,e,1.19,.94,s)>nps.practice_value(high,dict(e,sd_model=.5),1.19,.94,s)
     s.warm_flag=True

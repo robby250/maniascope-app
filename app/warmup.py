@@ -14,7 +14,9 @@ import numpy as np
 VERSION = 2
 CAPACITY_PRIOR = -math.log(.90)
 GAP = 50*60
-COOLING = 40*60
+# G835LX history 2026-10-30 (rolling DEV, later 30% of plays): 10 min beat 20–120 on cold plays
+# (7K cold RMSE −.0035, CI −.006…−.001; 4K all −.011); GAP 50 beat 30/60/90/120/180.
+COOLING = 10*60
 TAUS = (.5, 1., 2., 4., 8., 16.)
 FAMILIES = ('rice','chords','chordjack','jack','ln','trill','technical','sv')
 MEMBERS = {

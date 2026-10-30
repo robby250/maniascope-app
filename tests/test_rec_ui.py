@@ -32,6 +32,7 @@ def test_tabs_keys_clipboard_and_persistence():
                 w.show_all(); w.recs_btn.set_active(True)
                 while Gtk.events_pending(): Gtk.main_iteration_do(False)
                 assert w._rec_mode == "nps" and w._rec_notebook.get_current_page() == 1
+                assert w.gear_btn.get_parent() is w._tab_labels[1] and w.gear_btn.get_visible()   # first open too
                 assert w._rec_keys["pp"] == (4,6,9) and w._rec_keys["nps"] == (7,)
                 assert w._rec_notebook.get_n_pages() == 4 and w._rec_keys['skills'] == (4,7)
                 assert w._practice_skills == ('ln','sv')
@@ -54,21 +55,22 @@ def test_tabs_keys_clipboard_and_persistence():
                 assert w._rec_views['pp']['placeholder'].get_text() == 'Loading PP suggestions…\n\nFitting…'
                 w._on_rec(dict(pool(w._rec_revision), mode='pp', shown=[]))
                 assert w._rec_views['pp']['placeholder'].get_text().startswith('Nothing to suggest yet.')
+                assert not w.result_lbl.get_visible() and not w._rec_views['nps']['target'].get_visible()  # nothing reserved
                 w._on_rec(pool(w._rec_revision - 1))
                 assert not w.next_btn.get_sensitive()
                 w._on_rec(pool(w._rec_revision))
                 assert w.next_btn.get_sensitive() and w.next_btn.get_label() == "Next · NPS"
-                # First learning shows on every tab and on Stats, with a bar; then a playlist's own analysis.
-                w._on_rec(dict(type='status', text='Analysing…', progress=(30, 120), learning=True))
-                for v in w._rec_views.values():
-                    assert v['wait'].get_visible() and abs(v['wait'].bar.get_fraction() - .25) < 1e-9
+                # One status line and bar at the window bottom: the worker's progress first, else this tab's analysis.
+                w._on_rec(dict(type='status', text='Analysing 11 new or updated maps in the background · 0 done',
+                               progress=(30, 120), learning=True))
+                w._on_rec(dict(pool(w._rec_revision), progress=(5, 50)))
+                assert w.rec_status.get_text().count('Analysing') == 1 and abs(w.rec_progress.get_fraction() - .25) < 1e-9
                 assert w.stats_view.wait.get_visible() and '30 / 120' in w.stats_view.wait.text.get_text()
                 w._on_rec(dict(type='status', text='', learning=False))
-                assert not w.stats_view.wait.get_visible() and not w._rec_views['pp']['wait'].get_visible()
-                w._on_rec(dict(pool(w._rec_revision), progress=(5, 50)))
-                assert '5 / 50' in w._rec_views['nps']['wait'].text.get_text() and w._rec_views['nps']['wait'].get_visible()
+                assert not w.stats_view.wait.get_visible()
+                assert '5 / 50' in w.rec_status.get_text() and abs(w.rec_progress.get_fraction() - .1) < 1e-9
                 w._on_rec(pool(w._rec_revision))
-                assert not w._rec_views['nps']['wait'].get_visible()
+                assert not w.rec_status.get_visible() and not w.rec_progress.get_visible()
                 q = 'artist="Cosmo"! title="Cyber Shaman"! diff="Local difficulty"! cs=7'
                 # Fake worker never drains its queue: Next must still navigate.
                 with patch.object(ui.recdata, 'local_file', return_value=local):
@@ -177,7 +179,7 @@ def test_tabs_keys_clipboard_and_persistence():
                 assert abs(w.get_size()[1] - compact[1]) <= 2
                 # Accuracy target and display choices reach the worker and persist.
                 w._acc_targets['skills'] = .925; w._sync_rec()
-                assert w.rec.tasks[-1][0] == 'configure' and w.rec.tasks[-1][7] == {'nps': .94, 'skills': .925}
+                assert w.rec.tasks[-1][0] == 'configure' and w.rec.tasks[-1][7] == {'nps': ui.nps_playlist.DEFAULT_TARGET, 'skills': .925}
                 w._set_display('rating', False); w._set_display('skills', 1)
                 assert not w.number_lbl.get_visible() and w.others_lbl.get_text().strip() == ''
                 def find(widget, kind):
@@ -228,7 +230,29 @@ def test_tabs_keys_clipboard_and_persistence():
                 assert '~94.1%' in w.card_lbl.get_text().split('\n')[0] and 'Cyber Shaman' in w.card_lbl.get_text().split('\n')[1]
                 assert '+3.1pp' not in w.card_lbl.get_text() and 'Top-1000' in w.card_lbl.get_tooltip_text()
                 w._set_rec_mode('pp')
-                assert '+3.1pp · 45% to beat' in w.card_lbl.get_text().split('\n')[0]
+                assert w.card_lbl.get_text().split('\n')[2].startswith('+3.1pp · 45% to beat')
+                # The streamed top never changes height, whatever the title; the last play's acc has its own line.
+                def heights():
+                    until = time.monotonic() + .2
+                    while time.monotonic() < until:
+                        while Gtk.events_pending(): Gtk.main_iteration_do(False)
+                        time.sleep(.01)
+                    return [b.get_allocated_height() for b in (w.card_lbl, w.result_lbl, w._rec_views['pp']['target'])]
+                short = heights()
+                long_title = 'Very long title ' * 14
+                w._on_rec(dict(type='card', c=dict(card, title=long_title, search_meta={})))
+                w._on_rec(dict(type='result', title=long_title, text='96.95% · expected ~95.57%', acc=.9695,
+                               expected=.9557, z=1.12, rate=1.15, when=time.time(), news=[]))
+                w._on_rec(dict(type='target', mode='pp', revision=w._rec_revision, selection_id=w._selection_id,
+                               c=dict(card, title=long_title, search_meta={}), msg=''))
+                tall = heights()
+                assert all(0 < a <= b for a, b in zip(short, tall))
+                w._on_rec(dict(type='card', c=dict(card, title=long_title + long_title, search_meta={})))
+                assert heights() == tall          # capped: a longer title cannot grow it further
+                assert [b.labels[-1].get_layout().get_line_count() for b in (w.card_lbl, w.result_lbl)] == [1, 2]
+                assert w.card_lbl.labels[1].get_layout().get_line_count() == 2     # the title: 2 lines, then …
+                assert w.result_lbl.get_text().split('\n')[1] == '96.95%  vs ~95.57%  +1.12σ'
+
                 w._set_rec_mode('skills')
                 w._save_ui()
                 geometry=json.load(open(prefs))

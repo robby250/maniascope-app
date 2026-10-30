@@ -5,6 +5,13 @@ import skill_practice as S
 import nps
 import recommend as R
 import warmup as W
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _target_94(monkeypatch):
+    """These scenarios were built around a 94% target; the 95% app default (user 2026-10-30) does not change them."""
+    monkeypatch.setattr(nps, "DEFAULT_TARGET", .94)
 
 
 def test_signed_cycle_parent_and_child_exceptions():
@@ -88,7 +95,7 @@ def test_capacity_prior_changes_rate_demand_not_accuracy_goal():
     assert .9 < m.capacity(7, 'chordstream', 4.) < m.capacity(7, 'chordstream', 12.) < 1.
     assert m.penalty(7, 'chordstream', 0., 120., 5.) > m.penalty(7, 'chordstream', 0., 120., 2.)
     assert m.penalty(7, 'chordstream', 0., 240., 3.) < m.penalty(7, 'chordstream', 0., 0., 3.)
-    assert nps.central_target(R.Session([], 1000)) == .94
+    assert nps.central_target(R.Session([], 1000)) == nps.DEFAULT_TARGET
 
 
 def test_target_offsets_shrink_with_the_error_left_to_100():

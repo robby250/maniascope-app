@@ -44,11 +44,11 @@ def web_factor(value):
     return share / (1. - share)
 
 
-DEFAULT_TARGET = .94
+DEFAULT_TARGET = .95
 
 
 def normalize_target(value):
-    """The tab's displayed-accuracy target (Settings slider): 88–98%, default 94%."""
+    """The tab's displayed-accuracy target (Settings slider): 88–98%, default 95%."""
     try:
         value = float(value)
         return min(.98, max(.88, value)) if math.isfinite(value) else DEFAULT_TARGET
