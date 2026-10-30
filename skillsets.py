@@ -432,6 +432,7 @@ class LazerWatcher(threading.Thread):
 
 # ---------------------------------------------------------------------------
 def _map_markup(c):
+    """One line: bold title, then small difficulty name and keymode."""
     meta = c.get("search_meta") or {}
     title, version = c.get("title", ""), meta.get("Version")
     if meta.get("Title"):
@@ -440,10 +441,11 @@ def _map_markup(c):
         title, version = title.split(" [", 1)
         version = version.rstrip()[:-1]
     esc = GLib.markup_escape_text
-    return f"<b>{esc(title.removesuffix('.osu'))}</b>" + (f"\n<small>{esc(version)} · {c['keys']}K</small>" if version else f" · {c['keys']}K")
+    return f"<b>{esc(title.removesuffix('.osu'))}</b> <small>{esc(f'[{version}] ') if version else ''}{c['keys']}K</small>"
 
 
 def target_markup(c, obs):
+    """The picked map in one line: the rate to set (green once osu! shows it), title, expectation."""
     if not c:
         return ""
     rate = c["rate"]
@@ -459,39 +461,38 @@ def target_markup(c, obs):
     correct = known and same_chart and abs(actual-rate) < .0005 and mod_ok
     colour = "#238747" if correct else "#d9384f" if known else "#8a9099"
     mark = "✓" if correct else "→"
-    expected = f"Expected ~{100*c['acc_mid']:.1f}%" if c.get("acc_mid") is not None else "Prediction pending"
+    expected = f"~{100*c['acc_mid']:.1f}%" if c.get("acc_mid") is not None else "pending"
     if same_chart and sha and sha != observed_sha:
-        expected = "Updated chart selected · see the current prediction above"
-    return ("<small>RECOMMENDED</small>\n" + _map_markup(c)
-            + f'\n<span foreground="{colour}" size="large" weight="bold">{mark} SET {rate:.2f}× · {wanted}</span>'
-            + f"\n<small>{expected}</small>")
+        expected = "Updated chart selected"
+    return (f'<span foreground="{colour}" weight="bold">{mark} SET {rate:.2f}× · {wanted}</span>  '
+            + _map_markup(c) + f"  <small>{expected}</small>")
 
 
-def card_markup(c, nps_mode=False, skills_mode=False, note=None):
-    """The selected map's expectation, as the recommendation list words it."""
+def card_markup(c, mode="pp", note=None):
+    """The selected map: one line of what only the playlist window shows, and the full card as its tooltip."""
     if not c:
-        return "<small>" + GLib.markup_escape_text(note or "Select a map to see its prediction") + "</small>"
+        return "<small>" + GLib.markup_escape_text(note or "Select a map to see its prediction") + "</small>", None
     m, sec = divmod(int(c["length"]), 60)
-    acc = f"~{100 * c['acc_mid']:.1f}%   ·   usual {100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%"
-    if not c["ranked"]:
-        pp = "no pp (unranked or unranked rate)"
-    else:
-        pp = (f"{c['pp_lo']:.0f}–{c['pp_hi']:.0f}pp · " + (f"best {c['best']:.0f} · " if c["best"] else "")
-              + f"+{c['gain']:.1f}pp expected · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'}")
-    if nps_mode:
-        pp = f"{c['nps']:.1f} raw NPS" if c.get("nps") else ""
-    if skills_mode:
-        pp = "Whole-map prediction · regular skill practice"
+    line = (f"<small>SELECTED</small>  {_map_markup(c)}  <b>{c.get('rate', 1.):.2f}× · ~{100 * c['acc_mid']:.1f}%</b>"
+            f" <small>({100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%)</small>")
+    if mode == "pp" and c["ranked"]:
+        line += f"  +{c['gain']:.1f}pp · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'}"
     skill = skill_calc.NAMES.get(c.get("skill"), c.get("skill") or "")
+    tip = [f"Expected ~{100 * c['acc_mid']:.1f}%, usually {100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%",
+           f"{c.get('rate', 1.):.2f}× · {m}:{sec:02d} · {skill}"]
+    if not c["ranked"]:
+        tip.append("No pp (unranked or unranked rate)")
+    else:
+        tip.append(f"{c['pp_lo']:.0f}–{c['pp_hi']:.0f}pp · " + (f"best {c['best']:.0f} · " if c["best"] else "")
+                   + f"+{c['gain']:.1f}pp expected · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'}")
+    if c.get("nps"):
+        tip.append(f"{c['nps']:.1f} raw NPS")
     if c.get("plays_like"):
         stars, n = c["plays_like"]
         # User 2026-10-02 could not tell whose stars or whose scores ("7.4* osu SR? or our SR?").
-        pp = (pp + "\n" if pp else "") + (f"Top-1000 players score on it like a {stars:.1f}★ map "
-                                          f"(ManiaScope ★, their best of {n:,} scores at {c.get('rate', 1.):.2f}×)")
-    return ("<small>SELECTED IN OSU!</small>\n" + _map_markup(c)
-            + f"\n<b>Expected {acc}</b>"
-            + f"\n<small>{c.get('rate', 1.):.2f}× · {m}:{sec:02d} · {GLib.markup_escape_text(skill)}</small>"
-            + (f"\n<small>{GLib.markup_escape_text(pp)}</small>" if pp else ""))
+        tip.append(f"Top-1000 players score on it like a {stars:.1f}★ map "
+                   f"(ManiaScope ★, their best of {n:,} scores at {c.get('rate', 1.):.2f}×)")
+    return line, "\n".join(tip)
 
 
 class ManiaScopeWindow(Gtk.Window):
@@ -512,6 +513,8 @@ class ManiaScopeWindow(Gtk.Window):
         self._web_bias = {m: nps_playlist.normalize_focus((ui.get("web_bias") or {}).get(m, .5)) for m in ("nps", "skills")}
         self._acc_targets = {m: nps_playlist.normalize_target(ui.get(f"{m}_acc_target", nps_playlist.DEFAULT_TARGET))
                              for m in ("nps", "skills")}
+        self._pp_settings = recommend.settled(recommend.PP_DEFAULTS, ui.get("pp_settings") or {}, None)
+        self._pp_mix = recommend.settled(recommend.PP_MIX_DEFAULTS, ui.get("pp_mix") or {}, None)
         self._display = dict(DISPLAY_DEFAULTS, **{k: v for k, v in (ui.get("display") or {}).items()
                                                   if k in DISPLAY_DEFAULTS})
         self._next_action = ui.get("next_action", "auto")
@@ -558,28 +561,28 @@ class ManiaScopeWindow(Gtk.Window):
 
         bar = Gtk.HeaderBar(show_close_button=True)
         bar.set_custom_title(Gtk.Box())   # no title text: the controls need the width
+        # Next, Skip and Tracking live on the playlist window's header (_recs_window): this one stays an OBS source.
         self.next_btn = Gtk.Button(label="Next · " + recommend.MODE_NAMES[self._rec_mode])
         self.next_btn.get_style_context().add_class("suggested-action")
         self.next_btn.set_tooltip_text("Pick from the active PP/NPS/Skills tab. Auto copies a local song-select search; set rate manually.")
         self.next_btn.connect("clicked", lambda _b: self._next(False))
         self.next_btn.set_sensitive(False)
-        bar.pack_start(self.next_btn)
-        self.recs_btn = Gtk.ToggleButton()
-        self.recs_btn.add(Gtk.Image.new_from_icon_name("view-list-bullet-symbolic", Gtk.IconSize.BUTTON))
-        self.recs_btn.set_tooltip_text("Recommendations")
+        self.recs_btn = Gtk.ToggleButton(label="Playlist", always_show_image=True,
+                                         image=Gtk.Image.new_from_icon_name("view-list-bullet-symbolic", Gtk.IconSize.BUTTON))
+        self.recs_btn.set_tooltip_text("Show or hide the playlist window (Next, Skip, Tracking, PP/NPS/Skills lists)")
         bar.pack_start(self.recs_btn)
-        skip = Gtk.Button.new_from_icon_name("media-skip-forward-symbolic", Gtk.IconSize.BUTTON)
+        skip = Gtk.Button(label="Skip", always_show_image=True,
+                          image=Gtk.Image.new_from_icon_name("media-skip-forward-symbolic", Gtk.IconSize.BUTTON))
         skip.set_tooltip_text("Skip: not this map (avoided for about 12 h)")
         skip.connect("clicked", lambda _b: self._next(True))
         self.skip_btn = skip
         skip.set_sensitive(False)
-        bar.pack_start(skip)
+        self.track_btn = None
         if tracking_switch(self.tracking_db):
             self.track_btn = Gtk.ToggleButton(label="Tracking on", active=recdata.tracking_enabled(self.tracking_db))
             self.track_btn.set_label("Tracking on" if self.track_btn.get_active() else "Tracking off")
             self.track_btn.set_tooltip_text("Turn off before controller play. Paused plays stay excluded after imports and restarts. Resume for the next play.")
             self.track_btn.connect("toggled", self._tracking_toggled)
-            bar.pack_start(self.track_btn)
         bar.pack_end(self._overflow())
         self.set_titlebar(bar)
         self.set_title("ManiaScope")   # taskbar name; the header bar shows none
@@ -1047,64 +1050,207 @@ class ManiaScopeWindow(Gtk.Window):
             GLib.timeout_add_seconds(2, lambda: (self._web_poll(), False)[1])
         return False
 
-    def _web_bias_row(self, mode):
-        """Settings: how often this tab suggests website charts (maps you don't have) next to your own."""
+    @staticmethod
+    def _slider(label, value, show, changed, lo=0., hi=1., step=.05, values=None, tooltip=None):
+        """A settings row: name, slider, current value. values: a list the slider steps through instead.
+        changed(v) runs on user moves only."""
         row = Gtk.Box(spacing=8)
-        row.pack_start(Gtk.Label(label="Maps you don't have"), False, False, 0)
-        value = Gtk.Label(width_chars=14, xalign=0)
-        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0., 1., .05)
+        row.pack_start(Gtk.Label(label=label, xalign=0, width_chars=16), False, False, 0)
+        text = Gtk.Label(width_chars=11, xalign=0)
+        if values:
+            lo, hi, step = 0, len(values) - 1, 1
+            value = min(range(len(values)), key=lambda i: abs(values[i] - value))
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, step)
         scale.set_draw_value(False)
-        scale.set_value(self._web_bias[mode])
-        scale.set_tooltip_text("Website charts (Settings → Website charts…): their share of the list. "
-                               "Middle: half. Right end: 80 %. Left end: never.")
-        def changed(s, initial=False):
-            v = round(s.get_value() * 20) / 20
+        scale.set_value(value)
+        scale.get_accessible().set_name(label)
+        row.set_tooltip_text(tooltip)
+        def moved(s, initial=False):
+            v = values[int(round(s.get_value()))] if values else round(round(s.get_value() / step) * step, 6)
+            text.set_text(show(v))
+            if not initial:
+                changed(v)
+        scale.connect("value-changed", moved)
+        moved(scale, True)
+        row.pack_start(scale, True, True, 0)
+        row.pack_end(text, False, False, 0)
+        return row
+
+    @staticmethod
+    def _switch(label, active, changed, tooltip=None):
+        row = Gtk.Box(spacing=8)
+        row.pack_start(Gtk.Label(label=label, xalign=0), False, False, 0)
+        switch = Gtk.Switch(active=active, valign=Gtk.Align.CENTER)
+        switch.get_accessible().set_name(label)
+        switch.connect("notify::active", lambda w, _p: changed(w.get_active()))
+        row.set_tooltip_text(tooltip)
+        row.pack_end(switch, False, False, 0)
+        return row
+
+    @staticmethod
+    def _section(box, title):
+        head = Gtk.Label(xalign=0, margin_top=8)
+        head.set_markup(f"<small><b>{title}</b></small>")
+        head.get_style_context().add_class("dim-label")
+        box.pack_start(head, False, False, 0)
+
+    def _web_bias_row(self, mode):
+        """How often this tab suggests website charts (maps you don't have) next to your own."""
+        def show(v):
             f = nps_playlist.web_factor(v)
-            value.set_text(f"{f / (1 + f):.0%} of the list" if f else "never")
-            if not initial and v != self._web_bias[mode]:
+            return f"{f / (1 + f):.0%} of list" if f else "never"
+        def changed(v):
+            if v != self._web_bias[mode]:
                 self._web_bias[mode] = v
                 self._sync_rec()
-        scale.connect("value-changed", changed)
-        changed(scale, True)
-        row.pack_start(scale, True, True, 0)
-        row.pack_end(value, False, False, 0)
-        return row
+        return self._slider("Maps you don't have", self._web_bias[mode], show, changed,
+                            tooltip="Website charts (Website charts…): their share of the list. "
+                                    "Middle: half. Right end: 80 %. Left end: never.")
 
     def _acc_target_row(self, mode):
-        """Settings: the displayed-accuracy target this tab's picks aim at."""
-        row = Gtk.Box(spacing=8)
-        row.pack_start(Gtk.Label(label="Accuracy target"), False, False, 0)
-        value = Gtk.Label(width_chars=14, xalign=0)
-        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 88., 98., .5)
-        scale.set_draw_value(False)
-        scale.set_value(100 * self._acc_targets[mode])
-        scale.set_tooltip_text("Maps and rates are chosen so the predicted accuracy lands near this.")
-        def changed(s, initial=False):
-            target = nps_playlist.normalize_target(round(s.get_value() * 2) / 200)
-            value.set_text(f"{100 * target:.1f}%" + (" (default)" if target == nps_playlist.DEFAULT_TARGET else ""))
-            if not initial and target != self._acc_targets[mode]:
+        """The displayed-accuracy target this tab's picks aim at."""
+        def changed(v):
+            target = nps_playlist.normalize_target(v / 100)
+            if target != self._acc_targets[mode]:
                 self._acc_targets[mode] = target
                 self._sync_rec()
-        scale.connect("value-changed", changed)
-        changed(scale, True)
-        row.pack_start(scale, True, True, 0)
-        row.pack_end(value, False, False, 0)
-        return row
+        return self._slider("Accuracy target", 100 * self._acc_targets[mode],
+                            lambda v: f"{v:.1f}%" + (" (default)" if v / 100 == nps_playlist.DEFAULT_TARGET else ""),
+                            changed, 88., 98., .5, tooltip="Maps and rates are chosen so the predicted accuracy lands near this.")
+
+    def _set_option(self, store, key, value):
+        if store[key] != value:
+            store[key] = value
+            self._sync_rec()
+
+    def _revealed(self, box, active, rows):
+        """Rows that only show while their switch is on."""
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        for row in rows:
+            inner.pack_start(row, False, False, 0)
+        revealer = Gtk.Revealer(reveal_child=active)
+        revealer.add(inner)
+        box.pack_start(revealer, False, False, 0)
+        return revealer
+
+    def _settings_page(self, mode, key_btn):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=6)
+        keys = Gtk.Box(spacing=8)
+        keys.pack_start(Gtk.Label(label="Keymodes", xalign=0, width_chars=16), False, False, 0)
+        keys.pack_start(key_btn, True, True, 0)
+        pct = lambda v: f"{100 * v:.0f}%"
+        if mode == "nps":
+            self._section(box, "MAPS")
+            box.pack_start(keys, False, False, 0)
+            box.pack_start(self._acc_target_row(mode), False, False, 0)
+            self._section(box, "MIX")
+            box.pack_start(self._slider("Variety ↔ high NPS", self._nps_focus, lambda v: f"{100 * v:.0f}% NPS",
+                                        self._set_nps_focus, tooltip="Choose more variety or prioritize the highest "
+                                                                     "NPS. Both aim at the accuracy target."),
+                           False, False, 0)
+            box.pack_start(self._web_bias_row(mode), False, False, 0)
+            web = Gtk.Box()
+            web.pack_end(self._web_charts_row(), False, False, 0)
+            box.pack_start(web, False, False, 0)
+            GLib.idle_add(self._web_poll)      # a paused download shows on the button after a restart
+            self._section(box, "PP MAPS IN THIS LIST")
+            mix = self._pp_mix
+            rows = [self._slider("One PP map every", mix["every"], lambda v: f"{v:.0f} picks",
+                                 lambda v: self._set_option(mix, "every", int(v)), 2, 8, 1),
+                    self._slider("Min gain", mix["min_gain"], lambda v: f"{v:g}pp",
+                                 lambda v: self._set_option(mix, "min_gain", v), values=(1., 2., 3., 5., 8., 10., 15.)),
+                    self._slider("Min chance", mix["chance"], pct, lambda v: self._set_option(mix, "chance", v),
+                                 .2, .9, .05, tooltip="Chance to beat your best, NM and DT. It already includes "
+                                                      "this session's form."),
+                    self._slider("Min chance (HT)", mix["ht_chance"], pct,
+                                 lambda v: self._set_option(mix, "ht_chance", v), .4, .95, .05)]
+            def mix_on(on):
+                revealer.set_reveal_child(on)
+                self._set_option(mix, "on", on)
+            box.pack_start(self._switch("Mix in likely PP gains", mix["on"], mix_on,
+                                        "PP maps you are likely to beat now, between NPS maps. Off: no PP "
+                                        "scoring while you play NPS."), False, False, 0)
+            revealer = self._revealed(box, mix["on"], rows)
+        elif mode == "skills":
+            self._section(box, "MAPS")
+            skill_row = Gtk.Box(spacing=8)
+            skill_row.pack_start(Gtk.Label(label="Skills", xalign=0, width_chars=16), False, False, 0)
+            self.practice_btn = self._skill_picker()
+            skill_row.pack_start(self.practice_btn, True, True, 0)
+            box.pack_start(skill_row, False, False, 0)
+            box.pack_start(keys, False, False, 0)
+            box.pack_start(self._acc_target_row(mode), False, False, 0)
+            box.pack_start(self._web_bias_row(mode), False, False, 0)
+        else:
+            opt = self._pp_settings
+            set_ = lambda key: lambda v: self._set_option(opt, key, v)
+            self._section(box, "CHOICE")
+            box.pack_start(keys, False, False, 0)
+            box.pack_start(self._slider("Min gain", opt["min_gain"], lambda v: f"{v:g}pp", set_("min_gain"),
+                                        values=(.01, .1, .25, .5, 1., 2., 3., 5., 10.),
+                                        tooltip="Expected account pp gain a map needs."), False, False, 0)
+            box.pack_start(self._slider("Min chance", opt["min_chance"], pct, set_("min_chance"), .05, .6, .01,
+                                        tooltip="Chance to beat your best. Maps above your usual level keep at "
+                                                "least 25%."), False, False, 0)
+            box.pack_start(self._switch("Top-100 maps only", opt["top100"], set_("top100"),
+                                        "Only maps that are, or would enter, your top 100."), False, False, 0)
+            self._section(box, "MODS")
+            box.pack_start(self._switch("DT", opt["dt"], set_("dt")), False, False, 0)
+            def ht_on(on):
+                revealer.set_reveal_child(on)
+                set_("ht")(on)
+            box.pack_start(self._switch("HT", opt["ht"], ht_on, "HT only as a likely, real improvement."),
+                           False, False, 0)
+            revealer = self._revealed(box, opt["ht"], [
+                self._slider("HT min chance", opt["ht_chance"], pct, set_("ht_chance"), .3, .95, .05),
+                self._slider("HT min gain", opt["ht_gain"], lambda v: f"{v:g}pp", set_("ht_gain"),
+                             values=(1., 2., 3., 5., 8., 10., 15., 20.))])
+            self._section(box, "STYLE")
+            box.pack_start(self._slider("Safe ↔ Push", opt["push"],
+                                        lambda v: "auto" if abs(v) < .01 else f"{'push' if v > 0 else 'safe'} {abs(v):.2f}",
+                                        set_("push"), -.5, .5, .05,
+                                        tooltip="Middle: follows your form. Push: higher-pp, lower-accuracy maps. "
+                                                "Safe: comfortable ones."), False, False, 0)
+            self._section(box, "REPEATS")
+            box.pack_start(self._slider("Repeat cooldown", opt["cooldown_days"], lambda v: f"{v:.0f} days",
+                                        set_("cooldown_days"), 1, 14, 1,
+                                        tooltip="Offers and plays older than this no longer hold a map back."),
+                           False, False, 0)
+        done = Gtk.Button(label="Done", halign=Gtk.Align.END, margin_top=10)
+        done.connect("clicked", lambda _b: self.gear_btn.set_active(False))
+        box.pack_start(done, False, False, 0)
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        sw.add(box)
+        return sw
 
     def _recs_window(self):
-        """Its own window, so the main one can stay an OBS source: selected-map card, pick, list."""
-        win = self.recs = Gtk.Window(title="ManiaScope — Next", default_width=self._recs_size[0],
+        """Its own window, so the main one can stay an OBS source: selected map, pick, list."""
+        win = self.recs = Gtk.Window(title="ManiaScope — Playlist", default_width=self._recs_size[0],
                                     default_height=self._recs_size[1])
+        bar = Gtk.HeaderBar(show_close_button=True)
+        bar.set_custom_title(Gtk.Box())   # no title text: the controls need the width
+        for button in (self.next_btn, self.skip_btn, self.track_btn):
+            if button is not None:
+                bar.pack_start(button)
+        # In-tab settings page, not a popover: the PP tab has ~8 controls (GNOME HIG keeps popovers small).
+        self.gear_btn = Gtk.ToggleButton(image=Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
+        self.gear_btn.set_tooltip_text("Settings for this tab")
+        self.gear_btn.connect("toggled", self._toggle_settings)
+        bar.pack_end(self.gear_btn)
+        bar.show_all()
+        win.set_titlebar(bar)
         win.connect("size-allocate", self._on_recs_size)
         win.set_transient_for(self)
         win.connect("delete-event", lambda *_: (self.recs_btn.set_active(False), True)[1])
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=10)
         win.add(box)
-        # Selectable for copying, but not focusable: the first focus selected the whole card text.
-        self.card_lbl = Gtk.Label(xalign=0, wrap=True, selectable=True, can_focus=False)
+        line = lambda **kw: Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, **kw)
+        self.card_lbl = line()          # the full card is its tooltip
         self.card_lbl.set_markup("<small>select a map in lazer</small>")
         box.pack_start(self.card_lbl, False, False, 0)
-        self.rec_status = Gtk.Label(xalign=0, wrap=True)
+        self.result_lbl = line(no_show_all=True)
+        box.pack_start(self.result_lbl, False, False, 0)
+        self.rec_status = line(no_show_all=True)
         self.rec_status.get_style_context().add_class("dim-label")
         self.rec_status.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
         box.pack_end(self.rec_status, False, False, 0)
@@ -1112,52 +1258,13 @@ class ManiaScopeWindow(Gtk.Window):
         self.rec_progress = Gtk.ProgressBar(no_show_all=True)
         box.pack_end(self.rec_progress, False, False, 0)
         self._rec_pinned = {}              # lines later statuses must not hide: why nothing loads, slow mode
-        self.result_lbl = Gtk.Label(xalign=0, wrap=True, no_show_all=True)
-        box.pack_start(self.result_lbl, False, False, 0)
         self._rec_notebook = Gtk.Notebook()
         box.pack_start(self._rec_notebook, True, True, 2)
         for mode in recommend.MODES:
-            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=6)
-            # Settings stay collapsed: the playlist is what the tab is for.
-            settings = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=4)
-            expander = Gtk.Expander(label="Settings")
-            expander.add(settings)
-            page.pack_start(expander, False, False, 0)
-            top = Gtk.Box(spacing=8)
-            top.pack_start(Gtk.Label(label="Keymodes", xalign=0), False, False, 0)
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=6)
             key_btn = self._key_picker(mode)
-            top.pack_start(key_btn, True, True, 0)
-            settings.pack_start(top, False, False, 0)
-            if mode in self._acc_targets:
-                settings.pack_start(self._acc_target_row(mode), False, False, 0)
-            if mode in self._web_bias:
-                settings.pack_start(self._web_bias_row(mode), False, False, 0)
-            if mode == "nps":
-                preference = Gtk.Box(spacing=8)
-                preference.pack_start(Gtk.Label(label="Variety"), False, False, 0)
-                self.nps_focus_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0., 1., .05)
-                self.nps_focus_scale.set_draw_value(False)
-                self.nps_focus_scale.set_value(self._nps_focus)
-                self.nps_focus_scale.set_tooltip_text("Choose more variety or prioritize the highest NPS. Both aim at the accuracy target.")
-                self.nps_focus_scale.get_accessible().set_name("NPS playlist: variety to high NPS")
-                self.nps_focus_scale.connect("value-changed", self._set_nps_focus)
-                preference.pack_start(self.nps_focus_scale, True, True, 0)
-                preference.pack_end(Gtk.Label(label="High NPS"), False, False, 0)
-                settings.pack_start(preference, False, False, 0)
-                settings.pack_start(self._web_charts_row(), False, False, 0)
-                GLib.idle_add(self._web_poll)      # a paused download shows on the button after a restart
-            if mode == "skills":
-                skill_row = Gtk.Box(spacing=8)
-                skill_row.pack_start(Gtk.Label(label="Skills", xalign=0), False, False, 0)
-                self.practice_btn = self._skill_picker()
-                skill_row.pack_start(self.practice_btn, True, True, 0)
-                page.pack_start(skill_row, False, False, 0)
-            target = Gtk.Label(xalign=0, wrap=True, selectable=True, max_width_chars=54)
-            target.set_tooltip_text("Rate guidance only. You remain free to choose any rate in osu!.")
+            target = line(no_show_all=True)        # the picked map, once there is one
             page.pack_start(target, False, False, 0)
-            note = Gtk.Label(xalign=0, wrap=True, max_width_chars=54)
-            note.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
-            page.pack_start(note, False, False, 0)
             from stats_view import WaitBanner
             wait = WaitBanner()
             page.pack_start(wait, False, False, 0)
@@ -1169,10 +1276,11 @@ class ManiaScopeWindow(Gtk.Window):
             placeholder.get_style_context().add_class("dim-label")
             placeholder.show()
             listing.set_placeholder(placeholder)
-            status = Gtk.Label(xalign=0, wrap=True, max_width_chars=54)
-            status.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
+            note = line()
+            note.get_style_context().add_class("dim-label")
+            note.set_attributes(Pango.AttrList.from_string("0 -1 scale 0.85"))
             view = {"list": listing, "target": target, "note": note, "keys": key_btn,
-                    "status": status, "hover": False, "pending": None, "ready": False, "target_data": None,
+                    "hover": False, "pending": None, "ready": False, "target_data": None,
                     "placeholder": placeholder, "wait": wait, "learning": None, "analysing": None, "loaded": False,
                     "status_text": "", "name": recommend.MODE_NAMES[mode]}
             self._rec_views[mode] = view
@@ -1180,9 +1288,12 @@ class ManiaScopeWindow(Gtk.Window):
             sw.connect("leave-notify-event", lambda *_a, m=mode: self._rec_hover(m, False))
             sw.add(listing)
             page.pack_start(sw, True, True, 0)
-            page.pack_end(status, False, False, 0)
-            page.show_all()
-            self._rec_notebook.append_page(page, Gtk.Label(label=recommend.MODE_NAMES[mode]))
+            page.pack_end(note, False, False, 0)
+            stack = view["stack"] = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+            stack.add_named(page, "list")
+            stack.add_named(self._settings_page(mode, key_btn), "settings")
+            stack.show_all()
+            self._rec_notebook.append_page(stack, Gtk.Label(label=recommend.MODE_NAMES[mode]))
         self._rec_notebook.set_current_page(recommend.MODES.index(self._rec_mode))
         from stats_view import StatsView
         self._stats_open = False
@@ -1193,6 +1304,11 @@ class ManiaScopeWindow(Gtk.Window):
         box.show_all()
         self.recs_btn.connect("toggled", lambda b: win.present() if b.get_active() else win.hide())
 
+    def _toggle_settings(self, button):
+        mode = recommend.MODES[self._rec_notebook.get_current_page()] if not self._stats_open else None
+        if mode:
+            self._rec_views[mode]["stack"].set_visible_child_name("settings" if button.get_active() else "list")
+
     def _on_rec(self, msg):
         """Messages from the recommendation worker (main thread)."""
         if self._closed:
@@ -1200,17 +1316,13 @@ class ManiaScopeWindow(Gtk.Window):
         if msg["type"] == "stats":
             self.stats_view.update(msg["data"])
         elif msg["type"] == "status":
-            view = self._rec_views.get(msg.get("mode"))
-            if view:
-                view["status"].set_text(msg["text"])
-                return False
             if msg.get("pin"):
                 self._rec_pinned[msg["pin"]] = msg["text"]
             elif msg.get("blocking"):
                 self._rec_pinned["blocker"] = msg["text"]
             # A later import/replay note must not hide why there are no recommendations at all.
             text = "\n".join(dict.fromkeys(t for t in (*self._rec_pinned.values(), msg["text"]) if t))
-            self.rec_status.set_text(text)
+            self._set_status(text)
             done, total = msg.get("progress") or (0, 0)
             if "learning" in msg:          # first learning gates every tab, not just the footer
                 eta = msg["text"].rpartition(" · ~")[2] if " · ~" in msg["text"] else ""
@@ -1240,8 +1352,9 @@ class ManiaScopeWindow(Gtk.Window):
             if not view["hover"] or not view["ready"]:
                 self._flush_pool(mode)
         elif msg["type"] == "result":
-            self.result_lbl.set_markup(f"<b>Last play · {GLib.markup_escape_text(msg['title'])}</b>\n"
-                                       f"{GLib.markup_escape_text(msg['text'])}")
+            self.result_lbl.set_markup(f"<small>LAST PLAY</small>  <b>{GLib.markup_escape_text(msg['title'])}</b>  "
+                                       f"{GLib.markup_escape_text(msg['text'].replace(chr(10), ' · '))}")
+            self.result_lbl.set_tooltip_text(f"{msg['title']}\n{msg['text']}")
             self.result_lbl.show()
             if self._auto_next and self._rec_mode in msg.get("targets", ()) and self.next_btn.get_sensitive():
                 self._next(False)
@@ -1253,7 +1366,7 @@ class ManiaScopeWindow(Gtk.Window):
                 return False
             self._card_data = msg["c"]
             self._card_note = msg.get("note")
-            self.card_lbl.set_markup(card_markup(msg["c"], self._rec_mode == "nps", self._rec_mode == "skills", self._card_note))
+            self._show_card()
         elif msg["type"] == "target":
             mode = msg.get("mode", "pp")
             if (msg.get("revision", self._rec_revision) != self._rec_revision or mode not in self._rec_views
@@ -1263,11 +1376,21 @@ class ManiaScopeWindow(Gtk.Window):
             target = self._rec_views[mode]["target"]
             self._rec_views[mode]["target_data"] = c
             target.set_markup(target_markup(c, self._obs) if c else GLib.markup_escape_text(msg.get("msg") or ""))
-            target.set_tooltip_text(msg.get("copy") or (c.get("why") if c else None))
-            self.rec_status.set_text(msg.get("msg") or "")
+            target.set_tooltip_text("\n".join(t for t in (msg.get("msg"), c and c.get("why"), msg.get("copy")) if t) or None)
+            target.set_visible(bool(target.get_text()))
             if msg.get("copy"):
                 Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(msg["copy"], -1)
         return False
+
+    def _show_card(self):
+        markup, tip = card_markup(self._card_data, self._rec_mode, self._card_note)
+        self.card_lbl.set_markup(markup)
+        self.card_lbl.set_tooltip_text(tip)
+
+    def _set_status(self, text):
+        self.rec_status.set_text(text.replace("\n", " · "))
+        self.rec_status.set_tooltip_text(text or None)
+        self.rec_status.set_visible(bool(text))
 
     def _key_picker(self, mode):
         pop = Gtk.Popover()
@@ -1310,7 +1433,7 @@ class ManiaScopeWindow(Gtk.Window):
         for row in view["list"].get_children():
             view["list"].remove(row)
         view["ready"], view["pending"], view["target_data"] = False, None, None
-        view["target"].set_text("")
+        view["target"].hide()
         view["note"].set_text("Finding " + skill_practice.label(selected) + " maps at your current level…")
         self._sync_rec()
 
@@ -1338,12 +1461,14 @@ class ManiaScopeWindow(Gtk.Window):
         view["ready"], view["pending"] = False, None
         if view.get("target_data") and view["target_data"]["keys"] not in self._rec_keys[mode]:
             view["target_data"] = None
-            view["target"].set_text("")
+            view["target"].hide()
         view["note"].set_text("Refreshing…" if self._rec_keys[mode] else "Select at least one keymode")
         self._sync_rec()
 
     def _switch_rec_page(self, _notebook, _page, index):
         active = index == len(recommend.MODES)
+        self.gear_btn.set_active(False)        # still the old page: its settings close
+        self.gear_btn.set_visible(not active)
         old = self._stats_open
         self._stats_open = active
         if not active:
@@ -1363,7 +1488,7 @@ class ManiaScopeWindow(Gtk.Window):
         self._rec_mode = mode
         self._mode_items[mode].set_active(True)
         self._rec_notebook.set_current_page(recommend.MODES.index(mode))
-        self.card_lbl.set_markup(card_markup(self._card_data, mode == "nps", mode == "skills", self._card_note))
+        self._show_card()
         self._sync_rec()
 
     def _set_next_action(self, action):
@@ -1371,8 +1496,8 @@ class ManiaScopeWindow(Gtk.Window):
             self._next_action = action
             self._sync_rec()
 
-    def _set_nps_focus(self, scale):
-        self._nps_focus = nps_playlist.normalize_focus(scale.get_value())
+    def _set_nps_focus(self, value):
+        self._nps_focus = nps_playlist.normalize_focus(value)
         self._sync_rec()
 
     def _sync_rec(self):
@@ -1384,7 +1509,7 @@ class ManiaScopeWindow(Gtk.Window):
         if hasattr(self, "rec"):
             self.rec.put("configure", self._rec_mode, {k: list(v) for k, v in self._rec_keys.items()},
                          self._next_action, self._rec_revision, list(self._practice_skills), self._nps_focus,
-                         dict(self._acc_targets), dict(self._web_bias))
+                         dict(self._acc_targets), dict(self._web_bias), dict(self._pp_settings), dict(self._pp_mix))
         self._next_sensitive()
         self._queue_save()
 
@@ -1415,7 +1540,7 @@ class ManiaScopeWindow(Gtk.Window):
             else:
                 self.rec.put("next", skip, mode, self._rec_revision, c, result, selected_at, self._selection_id)
             if result.get("unavailable"):
-                self.rec_status.set_text(result["msg"])
+                self._set_status(result["msg"])
             else:
                 self._on_rec(dict(type="target", mode=mode, revision=self._rec_revision,
                                   selection_id=self._selection_id, c=c, copy=result["copy"],
@@ -1439,7 +1564,7 @@ class ManiaScopeWindow(Gtk.Window):
         recdata.set_tracking(self.tracking_db, enabled, start=play["t"] if play else None)
         btn.set_label("Tracking on" if enabled else "Tracking off")
         self.rec.put("tracking")
-        self.rec_status.set_text("Tracking resumed for the next play" if enabled else "Tracking paused — controller plays will be excluded")
+        self._set_status("Tracking resumed for the next play" if enabled else "Tracking paused — controller plays will be excluded")
 
     def _show_history(self, _button):
         if getattr(self, "_history_dialog", None):
@@ -1491,38 +1616,42 @@ class ManiaScopeWindow(Gtk.Window):
             view["list"].remove(row)
         if msg["shown"]:
             self._rec_pinned.pop("blocker", None)
-        phase = {"warmup": "Session: warming up", "build": "Session: warmed up",
-                 "push": "Session: strong form", "recover": "Session: easing off"}[msg["phase"]]
+        phase = {"warmup": "Warming up", "build": "Warmed up", "push": "Strong form", "recover": "Easing off"}[msg["phase"]]
         view["note"].set_text(f"{phase}{' · ' + msg['note'] if msg['note'] else ''}")
+        view["note"].set_tooltip_text("\n".join(t for t in (view["note"].get_text(), msg["summary"]) if t))
         done, total = msg.get("progress") or (0, 0)
         view["analysing"] = ((f"Maps analysed for this playlist · {done:,} / {total:,} (more are analysed "
                               "in the background, paused while you play)", done, total) if total else None)
         self._show_wait(view)
-        view["note"].set_tooltip_text(msg["summary"])
         for c in msg["shown"]:
             m, sec = divmod(int(c["length"]), 60)
-            head = _map_markup(c)
-            if mode == "nps":
-                tail = (f"{c['nps']:.1f} NPS · expect ~{100*c['acc_mid']:.1f}% · {m}:{sec:02d} · {c.get('description') or c.get('skill') or ''}"
-                        + ("" if c.get("installed", True) else " · not installed · download"))
-            elif mode == "skills":
-                acc = f"Expected ~{100*c['acc_mid']:.1f}%"
-                if c.get("acc_lo") is not None and c.get("acc_hi") is not None:
-                    acc += f" ({100*c['acc_lo']:.1f}–{100*c['acc_hi']:.1f})"
-                tail = f"{acc} · {m}:{sec:02d} · {c.get('description') or c.get('skill') or ''}"
-            elif c["purpose"] == "warmup":
-                tail = f"warmup · ~{100 * c['acc_mid']:.1f}% · {m}:{sec:02d}"
+            length = f"{m}:{sec:02d}"
+            if c.get("purpose") == "nps_mix" or (mode == "pp" and c["purpose"] != "warmup"):
+                number = ("PP " if mode != "pp" else "") + f"+{c['gain']:.1f}pp · {100 * c['p_up']:.0f}%"
+                sub = [c["var"], f"{c['stars']:.1f}★" if c.get("stars") else "",
+                       f"best {c['best']:.0f}pp" if c.get("best") else "new", length]
+            elif mode == "pp":
+                number, sub = f"warm-up ~{100 * c['acc_mid']:.1f}%", [length]
             else:
-                tail = (f"+{c['gain']:.1f}pp · ~{100 * c['acc_mid']:.1f}% · {c['pp_lo']:.0f}–{c['pp_hi']:.0f}pp · "
-                        + (f"best {c['best']:.0f} · " if c["best"] else "") + f"{m}:{sec:02d}"
-                        + ("" if c["installed"] else " · not installed"))
-            lb = Gtk.Label(xalign=0, wrap=True, max_width_chars=60, margin_top=7, margin_bottom=7)
-            lb.set_markup(f"{head}\n<b>{c['rate']:.2f}×</b>  <small>{GLib.markup_escape_text(tail)}</small>")
-            lb.set_tooltip_text(c.get("why"))
-            row = Gtk.ListBoxRow()
+                number = f"~{100 * c['acc_mid']:.1f}%"
+                sub = ([f"{c['nps']:.1f} NPS"] if mode == "nps" else []) + [length, c.get("description") or c.get("skill") or ""]
+            if not c.get("installed", True):
+                sub.append("download" if mode != "pp" else "not installed")
+            title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, hexpand=True)
+            title.set_markup(f"<b>{c['rate']:.2f}×</b>  {_map_markup(c)}")
+            key = Gtk.Label(xalign=1)
+            key.set_markup(f"<b>{GLib.markup_escape_text(number)}</b>")
+            detail = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+            detail.set_markup(f"<small>{GLib.markup_escape_text(' · '.join(x for x in sub if x))}</small>")
+            detail.get_style_context().add_class("dim-label")
+            grid = Gtk.Grid(column_spacing=10, margin_top=5, margin_bottom=5, margin_start=4, margin_end=4)
+            grid.attach(title, 0, 0, 1, 1)
+            grid.attach(key, 1, 0, 1, 1)
+            grid.attach(detail, 0, 1, 2, 1)
+            row = Gtk.ListBoxRow(tooltip_text=c.get("why"))
             row.cand = c
             row.revision = self._rec_revision
-            row.add(lb)
+            row.add(grid)
             view["list"].add(row)
         view["list"].show_all()
         view["ready"] = bool(msg["shown"])
@@ -1631,6 +1760,7 @@ class ManiaScopeWindow(Gtk.Window):
                            "skills_keys": None if "skills" in self._keys_auto else list(self._rec_keys["skills"]), "practice_skills": list(self._practice_skills),
                            "nps_focus": self._nps_focus, "web_bias": self._web_bias,
                            "nps_acc_target": self._acc_targets["nps"], "skills_acc_target": self._acc_targets["skills"],
+                           "pp_settings": self._pp_settings, "pp_mix": self._pp_mix,
                            "display": self._display,
                            "rate": self._manual_rate,   # observed rates are never persisted
                            "details": self.details_btn.get_active(),

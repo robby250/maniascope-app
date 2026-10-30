@@ -82,6 +82,22 @@ def _table():
     return {s: [(t["tier"], t["value"]) for t in tiers] for s, tiers in _data().get("series", {}).items()}
 
 
+def songs(series):
+    """{tier: [features at 1.0×]} of the series' dan songs (calib/dan_table.py)."""
+    return _data().get("songs", {}).get(series, {})
+
+
+def rating_at(series, p):
+    """Rating at continuous tier index p (position's inverse), linear between and beyond the anchors."""
+    tiers = _table().get(series)
+    if not tiers:
+        return None
+    if len(tiers) == 1:
+        return math.exp(tiers[0][1])
+    j = min(len(tiers) - 2, max(0, int(math.floor(p))))
+    return math.exp(tiers[j][1] + (p - j) * (tiers[j+1][1] - tiers[j][1]))
+
+
 def monotone(points):
     """[(order, tier, value)] → [(tier, value)] in order, adjacent violators pooled; tied tiers share the
     gap up to the next block so each stays reachable."""
@@ -148,9 +164,16 @@ def label(keys, rating, ln_share, vibro=None):
     return " · ".join(p for p in parts if p) or None
 
 
-def ability(keys, value, skill="overall"):
-    """Dan whose charts sit at a player's ~94 % difficulty for this Stats skill (LN skills on the LN dans).
+def ability_kind(skill):
+    """The dan series kind a Stats skill is placed on: LN skills on the LN dans."""
+    return "ln" if skill.split("/")[0] == "ln" else "rice"
+
+
+def ability(keys, value, skill="overall", scale=None):
+    """Dan whose charts sit at a player's ~94 % difficulty for this Stats skill. scale: {kind: factor} from
+    the player's predicted accuracy on the dan songs (player_stats); without it the level's rating is placed.
     None for vibro (its dans need a vibro speed) and keymodes without dans."""
     if value is None or skill.endswith("vibro"):
         return None
-    return place(SERIES.get((keys, "ln" if skill.split("/")[0] == "ln" else "rice")), value)
+    kind = ability_kind(skill)
+    return place(SERIES.get((keys, kind)), value * (scale or {}).get(kind, 1.))

@@ -8,7 +8,7 @@ import sys
 
 root = os.path.abspath(os.path.join(SPECPATH, ".."))
 R = lambda *p: os.path.join(root, *p)
-datas = [(R("calc_id.txt"), "."), (R("lazer_scores.js"), "."), (R("icon.png"), "."),
+datas = [(R("calc_id.txt"), "."), (R("lazer_scores.js"), "."), (R("assets/icon.png"), "."),
          (R("calib/difficulty.json"), "calib"), (R("calib/dans.json"), "calib"),
          (R("packaging/selftest.osu"), "packaging"), (R("theme"), "theme"),
          (R("native/src/personal.rs"), "native/src")]   # recommend.predictor_id hashes the personal fit

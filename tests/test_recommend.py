@@ -3,7 +3,6 @@
 Run one: python3 test_recommend.py test_ledger_cases"""
 import json
 import os
-import sys
 import tarfile
 import tempfile
 import time
@@ -530,13 +529,6 @@ def test_autoplay_is_not_an_attempt():
     w._track("play", d)
     w._track("songselect", d)
     assert [a[0] for a in attempts] == ["start", "void", "start", "abort"]
-
-
-if __name__ == "__main__":
-    names = sys.argv[1:] or [n for n in dir() if n.startswith("test_")]
-    for n in names:
-        globals()[n]()
-        print("ok", n)
 
 
 def test_website_top_plays_become_ledger_bests(tmp_path):

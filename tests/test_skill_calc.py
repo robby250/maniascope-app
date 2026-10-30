@@ -3,7 +3,6 @@
 import atexit
 import os
 import shutil
-import sys
 import tempfile
 from unittest.mock import patch
 
@@ -375,13 +374,6 @@ def test_tech_card():
     half = dump([60], n=400) + [(t + 30000, c) for t, c in dump([40, 40, 40, 60, 60], n=300)]
     names = [e["name"] for e in S.card(res(half, keys=4))]
     assert not ("Dump" in names and "Tech Dump" in names), names
-
-
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and (len(sys.argv) < 2 or name in sys.argv[1:]):
-            fn()
-            print("ok", name)
 
 
 

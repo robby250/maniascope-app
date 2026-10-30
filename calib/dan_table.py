@@ -110,6 +110,23 @@ def anchors(charts, weights):
     return out
 
 
+def songs(charts, paths):
+    """{series: {tier: [features at 1.0×]}}: each tier's songs, else its courses. The Stats page predicts the
+    player on these to place them on the ladder (dans.songs)."""
+    keep = collections.defaultdict(lambda: collections.defaultdict(list))
+    for c in charts:
+        if c["kind"] != "split":
+            keep[c["series"]][c["tier"]].append(c)
+    picked = [c for tiers in keep.values() for cs in tiers.values()
+              for c in ([c for c in cs if c["kind"] == "song"] or cs)]
+    feats = recdata.feats_batch([(paths[c["sha256"]], [1.0], None) for c in picked])
+    out = collections.defaultdict(lambda: collections.defaultdict(list))
+    for c, f in zip(picked, feats):
+        if not isinstance(f, Exception):
+            out[c["series"]][c["tier"]].append(f[1.0])
+    return out
+
+
 def ladder(series_anchors):
     return dans.monotone([(a["order"], a["tier"], a["value"]) for a in series_anchors])
 
@@ -172,7 +189,8 @@ def main(argv):
             print(f"pooled (not monotone) {s}: {flips}")
     with open(os.path.join(HERE, "dans.json"), "w", encoding="utf-8") as fh:
         json.dump({"calc": recdata.calc_id(), "vibro_weights": weights, "series": {s: [dict(tier=t, value=round(v, 5)) for t, v in ladder(a)]
-                                                         for s, a in table.items()}}, fh, indent=1, ensure_ascii=False)
+                                                         for s, a in table.items()},
+                   "songs": songs(charts, {row["sha256"]: path for row, path in jobs})}, fh, indent=1, ensure_ascii=False)
     return 0
 
 

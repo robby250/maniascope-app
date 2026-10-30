@@ -16,11 +16,13 @@ def month_name(m):
     return f"{MONTHS[int(m) % 12]} {2000 + int(m) // 12}"
 
 
-def dan_ticks(keys, lo, hi):
-    """[(stars, short name)] of the keymode's main dan series inside lo..hi."""
+def dan_ticks(keys, lo, hi, factor=1.):
+    """[(level, short name)] of the keymode's main dan series inside lo..hi: the level matching each dan
+    (its rating / the page's dan scale)."""
     tiers = dans._table().get(dans.SERIES.get((keys, "rice")), [])
     prefix = dans.SHORT.get(dans.SERIES.get((keys, "rice")), "")
-    return [(math.exp(v), t.replace(prefix.strip(), "").strip() or t) for t, v in tiers if lo <= math.exp(v) <= hi]
+    return [(math.exp(v) / factor, t.replace(prefix.strip(), "").strip() or t) for t, v in tiers
+            if lo <= math.exp(v) / factor <= hi]
 
 
 def _ink(widget, alpha):
@@ -35,8 +37,8 @@ def _accent(widget):
 
 class Scale:
     """Shared stars → x mapping so every skill row and the dan axis line up."""
-    def __init__(self, lo, hi):
-        self.lo, self.hi = lo, max(hi, lo + .5)
+    def __init__(self, lo, hi, dan=1.):
+        self.lo, self.hi, self.dan = lo, max(hi, lo + .5), dan
 
     def x(self, value, width):
         return 6 + (width - 12) * min(1., max(0., (value - self.lo) / (self.hi - self.lo)))
@@ -54,7 +56,7 @@ class DanAxis(Gtk.DrawingArea):
         width = self.get_allocated_width()
         cr.set_font_size(9)
         last = -99
-        for stars, name in dan_ticks(self.keys, self.scale.lo, self.scale.hi):
+        for stars, name in dan_ticks(self.keys, self.scale.lo, self.scale.hi, self.scale.dan):
             x = self.scale.x(stars, width)
             extent = cr.text_extents(name)
             left = min(max(0., x - extent.width / 2), width - extent.width)     # edge names stay whole
@@ -81,7 +83,7 @@ class SkillBar(Gtk.DrawingArea):
         y, x = height / 2, lambda v: self.scale.x(v, width)
         cr.set_source_rgba(*_ink(self, .10))
         cr.set_line_width(2); cr.move_to(6, y); cr.line_to(width - 6, y); cr.stroke()
-        for stars, _name in dan_ticks(self.keys, self.scale.lo, self.scale.hi):
+        for stars, _name in dan_ticks(self.keys, self.scale.lo, self.scale.hi, self.scale.dan):
             cr.move_to(x(stars), y - 4); cr.line_to(x(stars), y + 4); cr.set_line_width(1); cr.stroke()
         r = self.row
         if r.get("value") is None:
@@ -99,9 +101,9 @@ class SkillBar(Gtk.DrawingArea):
 
 class HistoryChart(Gtk.DrawingArea):
     """Overall level per month, dan lines behind it, peak and today marked."""
-    def __init__(self, keys, history, peak):
+    def __init__(self, keys, history, peak, dan=1.):
         super().__init__(hexpand=True)
-        self.keys, self.history, self.peak = keys, history, peak
+        self.keys, self.history, self.peak, self.dan = keys, history, peak, dan
         self.set_size_request(200, 110)
         self.connect("draw", self.draw)
 
@@ -117,7 +119,7 @@ class HistoryChart(Gtk.DrawingArea):
         y = lambda v: height - 16 - (height - 24) * (v - lo) / max(1e-6, hi - lo)
         cr.set_font_size(9)
         last = None
-        for stars, name in sorted(dan_ticks(self.keys, lo, hi), reverse=True):
+        for stars, name in sorted(dan_ticks(self.keys, lo, hi, self.dan), reverse=True):
             if last is not None and y(stars) - last < 11:
                 continue                        # crowded low tiers: every other line stays readable
             last = y(stars)
@@ -223,18 +225,24 @@ class StatsView(Gtk.Box):
             overall = groups.get("overall", {})
             value = overall.get("value")
             title = Gtk.Label(xalign=0)
-            dan = dans.ability(keys, value)
+            self.dan_scale = page.get("dan_scale", {})
+            dan = dans.ability(keys, value, scale=self.dan_scale)
             title.set_markup(f"<span size='220%' weight='bold'>{value:.1f}</span>  <b>your {keys}K level</b>"
                              + (f"  ·  ≈ {GLib.markup_escape_text(dan)}" if dan else "")
                              if value is not None else f"<b>{keys}K · not enough history yet</b>")
             self.body.pack_start(title, False, False, 0)
             peak, session = page.get("peak"), page.get("session")
+            history = page.get("history") or ()
+            # Months with too few plays leave the history: its last month is not "now" after a break (user 2026-10-30).
+            stale = bool(history) and page.get("now", history[-1][0]) - history[-1][0] > 2
             lines = []
             if value is not None and peak and peak[1] > value + .05:
-                pdan = dans.ability(keys, peak[1])
+                pdan = dans.ability(keys, peak[1], scale=self.dan_scale)
                 lines.append(f"Peak {peak[1]:.1f} in {month_name(peak[0])}" + (f" (≈ {pdan})" if pdan else ""))
-            elif value is not None and peak:
+            elif value is not None and peak and not stale:
                 lines.append("This is your peak so far.")
+            if value is not None and stale:
+                lines.append(f"Last measured in {month_name(history[-1][0])}: too few {keys}K plays since to tell your form now.")
             current = overall.get("current")
             if value is not None and session and current is not None:
                 lines.append(f"This session: {current:.1f} (○ on the bars)")
@@ -244,14 +252,16 @@ class StatsView(Gtk.Box):
             if lines:
                 self.body.pack_start(self.label("\n".join(lines)), False, False, 0)
             if len(page.get("history", ())) >= 2:
-                self.body.pack_start(HistoryChart(keys, page["history"], peak or page["history"][-1]), False, False, 0)
+                self.body.pack_start(HistoryChart(keys, page["history"], peak or page["history"][-1],
+                                                            self.dan_scale.get("rice", 1.)), False, False, 0)
             self.body.pack_start(self.label(
                 f"{page.get('maps', 0):,} charts · {page.get('plays', 0):,} plays. Level = the chart difficulty you "
-                "play at ~94% when warmed up, from your recent months. ≈ dan: the dan whose songs sit there "
-                "(one song, not passing the course).", True), False, False, 0)
+                "play at ~94%, from your own recent completed plays. ≈ dan: the dan whose songs you are predicted to "
+                "play at ~94% (one song, not passing the course).", True), False, False, 0)
             shown = [r for r in groups.values() if r.get("value") is not None]
             scale = Scale(min([r["low"] for r in shown] + ([peak[1]] if peak else []), default=1.) - .2,
-                          max([r["high"] for r in shown] + ([peak[1]] if peak else []), default=10.) + .2)
+                          max([r["high"] for r in shown] + ([peak[1]] if peak else []), default=10.) + .2,
+                          self.dan_scale.get("rice", 1.))
             self.scale, self.session = scale, session
             # Every row's bar starts and ends at the same x, under the dan axis.
             self.names = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
@@ -327,7 +337,7 @@ class StatsView(Gtk.Box):
         grid.attach(name, 0, 0, 1, 1)
         bar = SkillBar(keys, row, self.scale, self.session)
         grid.attach(bar, 1, 0, 1, 1)
-        dan = dans.ability(keys, row.get("value"), node.key)
+        dan = dans.ability(keys, row.get("value"), node.key, self.dan_scale)
         value = Gtk.Label(xalign=0)
         value.set_size_request(130, -1)
         value.set_markup("—" if row.get("value") is None else

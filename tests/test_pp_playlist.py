@@ -156,12 +156,14 @@ def test_positive_pp_opportunity_below_top100_is_not_discarded():
 
 def test_ht_is_offered_only_as_a_likely_improvement():
     f={'keys':7,'overall':6.,'sk':{'chordstream':1.},'length':120000,'stars':6.,'notes':1000,'hits':1000}
-    def offers(ht_miss):
+    def offers(ht_miss, dt_miss=None, **settings):
         rec=R.Recommender.__new__(R.Recommender)
+        rec.pp_settings=dict(R.PP_DEFAULTS, **settings)
         rec.model=SimpleNamespace(retry=0,rate_response=lambda *_:3.,rate_loss=lambda *a:3.*a[-1],
-                                  predict_many=lambda items:[(math.log(ht_miss) if i[3]<1 else -1.,.05,.1) for i in items])
+                                  predict_many=lambda items:[(math.log(ht_miss) if i[3]<1 else math.log(dt_miss) if i[3]>1 else -1.,.05,.1)
+                                                            for i in items])
         rec._shown=(0.,1.)
-        rec.pub={'feats':{42:{.75:f,1.:f}},'maps':{42:{'md5':'chart','approved':1,'set':1,'file':'fixture'}}}
+        rec.pub={'feats':{42:{.75:f,1.:f,**({1.5:f} if dt_miss else {})}},'maps':{42:{'md5':'chart','approved':1,'set':1,'file':'fixture'}}}
         rec.installed={};rec.newer_ranked=lambda:[]
         rec.ledger=R.Ledger({42:(float(R.pp_at(6.,1000,.96)),'test',None)})
         rec.typical=lambda _k:math.log(.04)
@@ -171,8 +173,27 @@ def test_ht_is_offered_only_as_a_likely_improvement():
     likely,unlikely=offers(.03),offers(.043)
     assert likely and likely[0][0]==.75 and likely[0][1]>=.5
     assert unlikely==[]           # a 12–50% HT long shot is no longer offered
-    old=R.HT_MIN_GAIN;R.HT_MIN_GAIN=1e9
-    try:
-        assert offers(.03)==[]    # a likely HT that gains under the floor is not offered either
-    finally:
-        R.HT_MIN_GAIN=old
+    assert offers(.03,ht_gain=1e9)==[]    # a likely HT that gains under the floor is not offered either
+    assert offers(.03,ht=False)==[] and offers(.043,ht_chance=.15,ht_gain=.5)   # PP settings: HT off; lower HT bars
+    assert [r for r,_ in offers(.5,.03)]==[1.5] and offers(.5,.03,dt=False)==[]    # DT off
+
+
+def test_pp_settings_change_the_list():
+    rec=_FakeRec([]);rec.ledger=R.Ledger({i:(500.,'test',None) for i in range(100)})
+    small=dict(_cand(1,.05),acc_mid=.985,pp_mid=105.)
+    long=dict(_cand(2,3.),acc_mid=.985,pp_mid=105.,p_up=.15)
+    top=dict(_cand(3,1.),acc_mid=.985,pp_mid=520.,pp_hi=560.,best_rank=40)
+    s=R.Session([],1000);s.warm_flag=True
+    bids=lambda **o:(setattr(rec,'pp_settings',dict(R.PP_DEFAULTS,**o)),
+                     sorted(c['bid'] for c in P.prepare(rec,[small,long,top],s)[0]))[1]
+    assert bids()==[1,2,3]
+    assert bids(min_gain=.5)==[2,3] and bids(min_chance=.3)==[1,3] and bids(top100=True)==[3]
+    # Push raises readiness, Safe lowers it (clamped 0–1).
+    hot=session([.9,1.,1.2,1.1])
+    assert P.readiness(hot,7,'delay',.5)>P.readiness(hot,7,'delay')>P.readiness(hot,7,'delay',-.5)>=0.
+    assert P.readiness(hot,7,'delay',5.)==1.
+    # Cooldown: an offer older than the cooldown no longer holds the map back.
+    offered=[dict(id=1,t=1000,kind='offer',beatmap=R.event_key(small),info={'mode':'pp'})]
+    later=R.Session(offered,1000+4*86400)
+    assert later.freshness(R.event_key(small),120,mode='pp',pool=40)<1e-3
+    assert later.freshness(R.event_key(small),120,mode='pp',pool=40,window=3*86400)==1.

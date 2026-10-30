@@ -48,9 +48,15 @@ HISTORY_S = 3 * 86400          # events that shape form/predictions
 EXPOSURE_S = 14 * 86400        # offers/plays that keep a map back (3 days let PP repeats return daily, G835LX 2026-10)
 ATT_SD = 1.0                   # attempt spread inflation over the within-chart residual sd (retro: 1.0 covers 83 %)
 QUANTS = (np.arange(21) + 0.5) / 21
-HT_MIN_P_UP = .5
-HT_MIN_GAIN = 5.      # pp: HT only for a real gain, at least an even chance (user 2026-10-03)
-MIN_GAIN = .01        # pp: below this expected gain a PP map is not worth offering (user 2026-10-09: .1 left 0–75 maps; was .001)
+# PP tab settings (user 2026-10-30); the defaults are the former fixed bars.
+# min_gain: below this expected gain a PP map is not worth offering (user 2026-10-09: .1 left 0–75 maps; was .001).
+# ht_chance/ht_gain: HT only for a real gain, at least an even chance (user 2026-10-03).
+# push: added to readiness (−.5 safe … +.5 push). cooldown_days: offers/plays older than this no longer hold a map back.
+PP_DEFAULTS = {"min_gain": .01, "min_chance": .12, "ht": True, "ht_chance": .5, "ht_gain": 5., "dt": True,
+               "push": 0., "cooldown_days": EXPOSURE_S / 86400, "top100": False}
+# PP maps inside the NPS list (user 2026-10-30): off by default, so NPS never pays for PP scoring.
+# The chance bar is the form check: p_up already carries the session's form.
+PP_MIX_DEFAULTS = {"on": False, "every": 4, "min_gain": 3., "chance": .4, "ht_chance": .7}
 # Push is a weighted up-down staircase (Kaernbach 1991), no threshold (user 2026-10-01):
 # a beaten PP-offered best is one step up; a PP attempt that neither beats its best nor
 # meets the prediction, or any clearly bad play, is PUSH_DOWN steps down. The walk
@@ -995,7 +1001,7 @@ class Session:
                 return a["keys"]
         return None
 
-    def freshness(self, bid, length_s, mode=None, pool=None):
+    def freshness(self, bid, length_s, mode=None, pool=None, window=EXPOSURE_S):
         """1 = fresh. A restart/reset affects form, never recent-play avoidance.
 
         pool: the playlist's effective size. An offered or played chart then recovers by how many other
@@ -1003,12 +1009,15 @@ class Session:
         after all of it, so a favourite can return before the pool is exhausted but never right away. Not
         a hard bag ("not guaranteed … but it shouldn't come back very soon", user 2026-10-01), and not a
         clock — a 40-minute recovery brought charts back within one session, an 18-hour one brought PP
-        maps back every day (G835LX 2026-10-08: Psychoboost offered 7×, repeats 1/2/3/4/5 days apart)."""
+        maps back every day (G835LX 2026-10-08: Psychoboost offered 7×, repeats 1/2/3/4/5 days apart).
+        window: exposures older than this are forgotten (the PP tab's repeat cooldown)."""
         f, now = 1.0, self.now
-        att = [a for a in self._attempts_by_map.get(str(bid), []) if a.get("meaningful")]
+        att = [a for a in self._attempts_by_map.get(str(bid), []) if a.get("meaningful") and a["t"] >= now - window]
         last_offer = None
         for e in self._events_by_map.get(str(bid), []):
             dt = now - e["t"]
+            if dt > window:
+                continue
             if e["kind"] in ("offer", "next", "open"):
                 # One offer may also log next/open. Use its latest timestamp,
                 # not three accidental independent votes for the same exposure.
@@ -1253,6 +1262,8 @@ def history_text(rows):
 # the recommender
 # ---------------------------------------------------------------------------
 class Recommender:
+    pp_settings = PP_DEFAULTS      # the Worker replaces it with the PP tab's settings
+
     def __init__(self, db, pub=None, keys=None, progress=None):
         """progress(text, done, total): startup steps a first run waits on (download, fit)."""
         self.db = db
@@ -1476,7 +1487,7 @@ class Recommender:
         Vectorised over all variants; every credible difficulty stays eligible."""
         session = session or Session(load_events(self.db), now)
         session.bind_warmup(getattr(self.model,'warmup',None))
-        cache_key = (recdata.normalize_keys(keys), session.model_key())
+        cache_key = (recdata.normalize_keys(keys), session.model_key(), tuple(sorted(self.pp_settings.items())))
         cached = self._score_cache.get(cache_key)
         if cached is not None:
             return cached, session
@@ -1515,9 +1526,12 @@ class Recommender:
         ceiling = np.array([1.25 + PUSH_STEP * min(4., ready[(k, sk)])
                             for k, sk in zip(A["keys"].tolist(), A["skill"])])
         sustainable = chal <= ceiling
-        credible = sustainable & (p_up >= np.where(normal, .12, .25))
+        opt = self.pp_settings
+        credible = sustainable & (p_up >= np.where(normal, opt["min_chance"], max(.25, opt["min_chance"])))
         # The user dislikes HT: offer it only as a likely improvement (2026-09-30).
-        credible &= (A["rate"] >= 1.) | ((p_up >= HT_MIN_P_UP) & (gain >= HT_MIN_GAIN))
+        credible &= (A["rate"] >= 1.) | (opt["ht"] & (p_up >= opt["ht_chance"]) & (gain >= opt["ht_gain"]))
+        if not opt["dt"]:
+            credible &= A["rate"] <= 1.
         # The first play in an unactivated keymode is a comfortable probe. A
         # long 7K session never authorises cold 10K DT through global warmup.
         cold = {k: session.activation(k) < 1.5 for k in recdata.SUPPORTED_KEYS}
@@ -1542,7 +1556,7 @@ class Recommender:
         # Choose the variant for this readiness BEFORE reducing a chart to one
         # entry. Otherwise a high-gain DT variant hides its safer NM/HT option,
         # even though the playlist later tries to prefer comfortable choices.
-        state = {(k,sk): pp_playlist.readiness(session,k,sk) for k,sk in ready}
+        state = {(k,sk): pp_playlist.readiness(session,k,sk,opt["push"]) for k,sk in ready}
         acc_target, pp_target = {}, {}
         for (k,sk), readiness in state.items():
             ref = getattr(self,"pp_reference",{}).get(k,{})
@@ -1558,7 +1572,7 @@ class Recommender:
         # A comfortable zero-gain variant must not hide another variant which
         # passes readiness and offers a real gain. Keep the former only as a
         # possible warmup when no useful variant of that chart exists.
-        order = np.lexsort(((A["rate"] != 1.0).astype(int), -variant_value, -(gain>=MIN_GAIN).astype(int)))
+        order = np.lexsort(((A["rate"] != 1.0).astype(int), -variant_value, -(gain>=opt["min_gain"]).astype(int)))
         order = order[credible[order]]
         seen, out = set(), []
         generated_at = time.time()
@@ -1614,7 +1628,7 @@ class Recommender:
         allowed = recdata.normalize_keys(keys)
         phase = session.phase()
         context = (session, session.model_key(), session._warmup_model, allowed,
-                   getattr(self, 'ledger', None), getattr(self, 'pp_reference', None))
+                   getattr(self, 'ledger', None), getattr(self, 'pp_reference', None), tuple(sorted(self.pp_settings.items())))
         cached = getattr(self, '_pp_pool_cache', None)
         if cached is not None and cached[0] is cands and cached[1] == context:
             pick_from, relaxed = cached[2]
@@ -1632,11 +1646,10 @@ class Recommender:
         self.pp_choices = pick_from
         shown = pp_playlist.preview(pick_from, n_show, seed) if n_show else []
         top = sum(c.get("best_rank", 101) <= 100 for c in pick_from)
-        note = (f"{len(pick_from):,} eligible opportunities · {top} current top-100 maps · "
-                "Next follows the displayed order; predictions refresh in the background" if pick_from else
-                "No credible PP opportunities at this readiness — try skill practice or an easier manual map")
+        note = (f"{len(pick_from):,} eligible · {top} top-100" if pick_from else
+                "No likely PP gains at this readiness — try Skills or an easier map")
         if relaxed:
-            note += " · freshness relaxed: the credible pool has been cycled"
+            note += " · all cycled, repeats allowed"
         pick = None
         if pick_from and choose:
             pick_from = [c for c in pick_from if event_key(c) != avoid] or pick_from
@@ -1817,6 +1830,13 @@ def skill_related(a, b):
     if {x, y} == {"jack", "chords"}:
         return .3
     return 0.
+
+
+def settled(defaults, given, current):
+    """Settings from the UI over the defaults; None keeps the current ones."""
+    if given is None:
+        return current
+    return dict(defaults, **{k: type(defaults[k])(v) for k, v in given.items() if k in defaults})
 
 
 def rate_label(rate):
@@ -2123,6 +2143,7 @@ class Worker(threading.Thread):
         self.nps_focus = .5
         self.web_bias = {"nps": .5, "skills": .5}
         self.acc_targets = {"nps": .94, "skills": .94}
+        self.pp_settings, self.pp_mix = dict(PP_DEFAULTS), dict(PP_MIX_DEFAULTS)
         self._selection_id = 0
         self.practice_skills = ()
         import nps
@@ -2200,6 +2221,7 @@ class Worker(threading.Thread):
                 gc.set_threshold(100_000, 20, 20)
             self.rec = Recommender(self.db, public, keys=self.keys['pp'], progress=self._stage)
             self.rec.pause = lambda: self._yield_urgent() or 0.
+            self.rec.pp_settings = self.pp_settings
             self.generation += 1
             import nps
             self.builder = nps.Builder(lambda kind, data: self.put("nps_update", kind, data), self.busy)
@@ -2367,6 +2389,8 @@ class Worker(threading.Thread):
             kept = (list(self.playlists[mode]), self._credible.get(mode)) if st.get("partial") else None
             phase, shown, note = self._pool(mode)
             shown = self._prepared_playlist(mode, shown)
+            if mode == "nps" and self.pp_mix["on"]:
+                shown = self.playlists[mode] = self._mix_pp(shown)
             if kept:            # a first look from the previous leaders: the full list still decides the queue
                 self.playlists[mode], self._credible[mode] = kept
             # Charts that cannot be analysed (converts, broken files) are done too, or the bar waits forever.
@@ -2375,6 +2399,32 @@ class Worker(threading.Thread):
             self.emit({"type": "pool", "mode": mode, "revision": self.revision, "selection_id": self._selection_id,
                        "phase": phase, "shown": shown, "note": note, "summary": summary(self.rec),
                        "progress": progress})
+
+    def _mix_pp(self, shown):
+        """PP maps past the mix bars at every N-th place of the NPS list (user 2026-10-30)."""
+        m, session = self.pp_mix, self._session()
+        cands, _ = self.rec.score(session, keys=self.keys["nps"])
+        listed = {event_key(c) for c in shown}
+        # Time-based freshness (no pool): an offered PP map stays back ~half an hour, a played one ~6 plays.
+        picks = [dict(c, purpose="nps_mix", why=reason(c) + " · PP map in the NPS list") for c in cands
+                 if c["ranked"] and c["gain"] >= m["min_gain"]
+                 and c["p_up"] >= (m["ht_chance"] if c["rate"] < 1. else m["chance"])
+                 and event_key(c) not in listed and session.freshness(event_key(c), c["length"], mode="pp") >= .5]
+        picks.sort(key=lambda c: -c["p_up"] * (.3 + math.log1p(c["gain"] / .05) ** .65))
+        # NPS picks since the last PP offer place the first one: one in `every` offers is PP.
+        since = 0
+        for e in reversed(session.all):
+            if e["kind"] == "offer":
+                if e["info"].get("mode") == "pp":
+                    break
+                since += 1
+        out, i = list(shown), max(0, m["every"] - 1 - since)
+        for c in picks:
+            if i > len(out):
+                break
+            out.insert(i, c)
+            i += m["every"]
+        return out[:20]
 
     def _prepared_playlist(self, mode, fresh):
         """Keep the displayed order; update predictions, then append new maps."""
@@ -2510,26 +2560,25 @@ class Worker(threading.Thread):
         # A queued map outside the current top 60 was queued under another state (cold start, restart
         # list): G835LX 2026-10-22 offered dEKA, 6 NPS, ranked 2242 of 2245, after seven such maps.
         self._credible[mode] = {event_key(c) for c in ranked}
-        note = f"target ~{100 * self.acc_targets.get(mode, .94):.0f}% · 0.70–1.50×"
+        note = f"target ~{100 * self.acc_targets.get(mode, .94):.0f}%"
         if st.get("build_failed"):
             note += " · local map analysis stopped"
         elif not st["total"]:
             note += " · no maps of these keymodes found yet"
         elif st["analyzed"] + st["failed"] < st["total"]:
-            note += (f" · {st['analyzed']:,} of {st['total']:,} maps analysed so far; "
-                     "the rest are analysed in the background, paused while you play")
+            note += f" · {st['analyzed']:,} / {st['total']:,} maps analysed"
         else:
-            note += f" · all {st['total']:,} maps analysed"
+            note += f" · {st['total']:,} maps"
         missing = sum(not c.get("installed", True) for c in shown)
         if missing:
-            note += f" · {missing} of {len(shown)} not installed"
+            note += f" · {missing} to download"
         if mode == "skills":
             note = skill_practice.label(self.practice_skills) + " · " + note
         if not shown and not st.get("build_failed"):
             note += (" · looking for maps that fit your target…" if st["analyzed"] + st["failed"] < st["total"]
                      else " · no map fits your accuracy target at 0.70–1.50× (try another target or keymode)")
         if st["failed"]:
-            note += f" · {st['failed']} unavailable analyses"
+            note += f" · {st['failed']} unreadable"
         if st["error"]:
             note += " · " + st["error"]
         if st.get("restored") and not st.get("build_failed"):
@@ -2646,7 +2695,7 @@ class Worker(threading.Thread):
                 self._publish(mode)
 
     def t_configure(self, mode, keys_by_mode, action="auto", revision=0, practice_skills=None, nps_focus=None,
-                    acc_targets=None, web_bias=None):
+                    acc_targets=None, web_bias=None, pp_settings=None, pp_mix=None):
         # Fast clicks need one search for the final selection, not a full
         # catalogue pass for every intermediate checkbox state. Other queued
         # events (including scores and gameplay) keep their original ordering.
@@ -2675,6 +2724,16 @@ class Worker(threading.Thread):
                 self.acc_targets[m], retarget = value, True
                 self.playlists[m] = []
                 self._local_pool_cache.pop(m, None)
+        settings = settled(PP_DEFAULTS, pp_settings, self.pp_settings)
+        if settings != self.pp_settings:
+            self.pp_settings = settings
+            self.playlists['pp'] = []
+            if self.rec:
+                self.rec.pp_settings = settings
+        mix = settled(PP_MIX_DEFAULTS, pp_mix, self.pp_mix)
+        if mix != self.pp_mix:
+            self.pp_mix = mix
+            self.playlists['nps'] = []
         self._restore_local(mode)
         if retarget or old != (self.keys["nps"], self.keys["skills"], self.practice_skills) or old_mode != mode:
             self._request_nps()
@@ -2928,6 +2987,7 @@ class Worker(threading.Thread):
         result = result if performed else navigation.perform(c, "copy" if self.busy() else self.action)
         self._selection_id = max(self._selection_id, selection_id)
         key = event_key(c)
+        logged = "pp" if c.get("purpose") == "nps_mix" else mode       # a PP map in the NPS list is a PP offer
         self._playlist_consumed.append(key)
         for m in MODES:
             self.playlists[m] = [p for p in self.playlists[m] if event_key(p) != key]
@@ -2935,7 +2995,7 @@ class Worker(threading.Thread):
             self.emit({"type": "status", "text": result['msg']})
             return
         forecast = c.get('accuracy_forecast')
-        c["offer_id"] = recdata.log_event(self.db, "offer", key, t=selected_at, mode=mode, keys=c["keys"],
+        c["offer_id"] = recdata.log_event(self.db, "offer", key, t=selected_at, mode=logged, keys=c["keys"],
                                          group=c.get("group"), bid=c.get('bid'), rate=c["rate"], selection=selection,
                                          length=c.get("length"), accuracy=c.get("acc_mid"), title=c.get("title"),
                                          opening_accuracy=c.get("opening_acc"), activation_minutes=c.get("activation_minutes"),

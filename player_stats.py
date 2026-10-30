@@ -10,6 +10,7 @@ import math
 
 import numpy as np
 
+import dans
 import recdata
 import skill_practice
 import score_units
@@ -46,6 +47,73 @@ def _capacity(model, f, target_y):
     upper = model.predict(dict(f, overall=value*1.01), "profile:unseen", None, 1.)[0]
     slope = max(.25, (upper-lower)/math.log(1.01/.99))
     return value, slope
+
+
+CALIBRATION_HALF_LIFE = 6.   # months before the keymode's last play
+CALIBRATION_MIN = 20.        # effective recent plays for a skill's own calibration; fewer use the keymode's
+MIN_CHARTS = 10              # charts before a skill gets a number (4K LN from 3 charts read "Yume+", user 2026-10-30)
+
+
+def _fit_line(points):
+    """(c, d) of the weighted least-squares line y = c + d·x over (x, y, w), or None."""
+    w = np.array([p[2] for p in points])
+    if w.sum() < CALIBRATION_MIN:
+        return None
+    x, y = np.array([p[0] for p in points]), np.array([p[1] for p in points])
+    mx, my = np.average(x, weights=w), np.average(y, weights=w)
+    var = np.average((x-mx)**2, weights=w)
+    if var < 1e-6:
+        return None
+    d = np.average((x-mx)*(y-my), weights=w)/var
+    return (float(my-d*mx), float(d)) if d > .2 else None
+
+
+def _calibration(model, rows, groups):
+    """{group: (c, d)}: the player's recent completed lazer results against the unseen-chart baseline,
+    displayed y ≈ c + d·baseline. The baseline alone put 4K at 9.1 (≈ Delta) where the player's plays
+    reached 94 % around 7.5 (user 2026-10-30): it leaves out warm-up, fatigue and chart choice, and
+    its difficulty slope was twice the player's. Groups without enough plays use the keymode's line."""
+    own = [r for r in rows if r.get("y_lazer") is not None and r.get("src") != "public" and r.get("completed", True)]
+    if not own:
+        return {}
+    last = max(r["t"] for r in own)
+    points = collections.defaultdict(list)
+    for r in own:
+        w = .5**((last-r["t"])/CALIBRATION_HALF_LIFE)
+        if w < .02:
+            continue
+        point = (model.predict(r["f"], "profile:unseen", None, 1.)[0], r["y_lazer"], w)
+        points["overall"].append(point)
+        for g in skill_practice.demanded(r["f"]):
+            if g in groups:
+                points[g].append(point)
+    base = _fit_line(points["overall"])
+    return {g: _fit_line(points[g]) or base for g in groups} if base else {}
+
+
+def _dan_rating(model, series, line):
+    """Rating on the series' dan ladder where the player's calibrated predicted accuracy on its dan songs
+    crosses TARGET, or None. The level's own rating sat ~2 tiers high on the dans: it is a median over the
+    player's chart shapes, and 4K ones ranged from ≈ Beta (stable bests) to ≈ Delta (2026 lazer plays)."""
+    tiers, songs = dans._table().get(series), dans.songs(series)
+    if not tiers or not songs or not line:
+        return None
+    c, d = line
+    y = []
+    for tier, _value in tiers:
+        fs = songs.get(tier)
+        y.append(float(np.median([c + d*model.predict(f, "profile:unseen", None, 1.)[0] for f in fs])) if fs else None)
+    goal = math.log(1-TARGET)
+    known = [(j, v) for j, v in enumerate(y) if v is not None]
+    above = [j for j, v in known if v <= goal]            # at or above 94 %
+    if not above:
+        return dans.rating_at(series, known[0][0] - 1) if known else None
+    j = max(above)
+    nxt = next(((i, v) for i, v in known if i > j), None)
+    if nxt is None:
+        return dans.rating_at(series, j + 1)
+    i, v = nxt
+    return dans.rating_at(series, j + (i-j)*(goal-y[j])/(v-y[j]))
 
 
 HISTORY_BW = 1.0      # months: Gaussian smoothing of the monthly history (a peak month stays visible)
@@ -96,25 +164,28 @@ def build(rec):
         shown = {r["chart"]: score_units.displayed_feature(r["f"]) for r in representatives}
         groups = {}
         capacities = {}
-        for group in ("overall", *skill_practice.dimensions(keys)):
+        names = ("overall", *skill_practice.dimensions(keys))
+        calibration = _calibration(model, rows, names) if keys in model.keys else {}
+        for group in names:
             relevant = [r for r in representatives if group == "overall" or
                         group in skill_practice.demanded(r["f"])]
             newest = max((r.get("ts") or 0 for r in relevant), default=0)
             count = len(relevant)
-            if count < 3 or keys not in model.keys:
+            if count < MIN_CHARTS or keys not in model.keys:
                 groups[group] = {"value": None, "maps": count, "plays": 0, "newest": newest,
                                  "confidence": "Not enough evidence"}
                 continue
             # Quantile-spaced shapes, not the most retried/favourite charts.
             relevant.sort(key=lambda r: (r["f"]["overall"], r["chart"]))
             chosen = [relevant[i] for i in np.linspace(0, count-1, min(32, count)).astype(int)]
+            c, d = calibration.get(group) or (0., 1.)
             values, slopes, weights, display_factors = [], [], [], []
             for row in chosen:
-                identity=(row['chart'],row['rate'])
+                identity=(row['chart'],row['rate'],c,d)
                 if identity not in capacities:
-                    capacities[identity]=_capacity(model,row['f'],target_y)
+                    capacities[identity]=_capacity(model,row['f'],(target_y-c)/d)
                 value, slope = capacities[identity]
-                values.append(value); slopes.append(slope)
+                values.append(value); slopes.append(d*slope)   # per unit of the player's displayed y
                 # Ability has no single chart shape; use the same representative
                 # sample's median display correction, leaving its fitted value intact.
                 display_factors.append(factor[row['chart']])
@@ -148,8 +219,13 @@ def build(rec):
                 # player's limit. Do not present a huge extrapolated rating as
                 # a measured 5K/9K strength merely because the solver found it.
                 groups[group].update(value=None, confidence="Limit not measured", extrapolated=True)
+        dan_at = {}
+        for kind, anchor in (("rice", "overall"), ("ln", "ln")):
+            series = dans.SERIES.get((keys, kind))
+            if series and groups.get(anchor, {}).get("value") is not None:
+                dan_at[kind] = (anchor, _dan_rating(model, series, calibration.get(anchor)))
         history = _history(model, keys, groups.get("overall", {}))
-        result[keys] = {"keys": keys, "groups": groups, "history": history,
+        result[keys] = {"keys": keys, "groups": groups, "history": history, "now": model.now, "dan_at": dan_at,
                         "peak": max(history, key=lambda h: h[1]) if history else None, "maps": len(charts), "plays": len(rows),
                         "special": {"mash_maps": sum(r["f"].get("sk", {}).get("mash", 0.) >= .3 for r in charts.values())}}
     # Only frozen pre-play predictions can support a model-error diagnosis.
@@ -195,6 +271,9 @@ def current(profile, session):
             page["groups"][group] = row
         factor = old["groups"].get("overall", {}).get("display_factor", 1.)
         shown = lambda v: score_units.displayed_value(v, keys, factor=factor)
+        # A displayed level × scale = the dan rating it matches on the player's predicted dan-song accuracy.
+        page["dan_scale"] = {kind: rating/page["groups"][anchor]["value"] for kind, (anchor, rating) in
+                             old.get("dan_at", {}).items() if rating and page["groups"][anchor].get("value")}
         page["history"] = [(m, shown(v)) for m, v in old.get("history", ())]
         page["peak"] = (old["peak"][0], shown(old["peak"][1])) if old.get("peak") else None
         # Before a session is warm the session marker only shows the cold start, not the player's form.

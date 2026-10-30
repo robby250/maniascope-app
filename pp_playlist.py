@@ -54,12 +54,14 @@ def push_share(steps):
     return 1. - math.exp(-PUSH_STEP * steps)
 
 
-def readiness(session, keys, skill):
+def readiness(session, keys, skill, push=0.):
+    """push: the PP tab's Safe ↔ Push setting, added after the automatic readiness."""
     active = min(1., session.activation(keys, skill)/6.)
     # Warming up unlocks ordinary PP work; each beaten best moves further toward the
     # player's high-PP, lower-accuracy edge. A bad result pulls back at once.
     form = session.correction(keys, skill)
-    return active * (.45 + .5 * push_share(session.push(keys, skill))) * math.exp(-3. * max(0., form))
+    auto = active * (.45 + .5 * push_share(session.push(keys, skill))) * math.exp(-3. * max(0., form))
+    return min(1., max(0., auto + push)) if push else auto
 
 
 def comfort(rec, keys):
@@ -76,14 +78,15 @@ def preview(rows, count, seed, focus=0.):
 
 
 def prepare(rec, candidates, session):
-    from recommend import MIN_GAIN, event_key, reason
+    from recommend import event_key, reason
+    opt = rec.pp_settings
     rows = []
     k0 = session.current_keys() or rec.home_keys()
     ledger = getattr(rec, 'ledger', None)
     floor = float(ledger.P[99]) if ledger is not None and len(ledger.P)>=100 else 0.
     for source in candidates:
         c = dict(source)
-        if not c["ranked"] or c["gain"] < MIN_GAIN or c["sd_model"] >= 1. or c.get("p_up", 0.) < .12:
+        if not c["ranked"] or c["gain"] < opt["min_gain"] or c["sd_model"] >= 1. or c.get("p_up", 0.) < opt["min_chance"]:
             continue
         keys, skill = c["keys"], c.get("skill")
         acc = c.get("acc_mid", 1.)
@@ -91,7 +94,9 @@ def prepare(rec, candidates, session):
         if cold and acc < comfort(rec, keys):
             continue
         contender = c.get('best_rank',101)<=100 or c.get('pp_hi',c.get('pp_mid',float('inf')))>=floor
-        state = readiness(session, keys, skill)
+        if opt["top100"] and not contender:
+            continue
+        state = readiness(session, keys, skill, opt["push"])
         ref = getattr(rec, "pp_reference", {}).get(keys, {})
         target_acc = (1-state)*ref.get("comfort", .975) + state*ref.get("peak_acc", .93)
         # Not a hard accuracy floor for ordinary PP play: difficulty can increase
@@ -117,7 +122,7 @@ def prepare(rec, candidates, session):
     total = sum(c["weight"] for c in rows)
     pool = total ** 2 / max(1e-300, sum(c["weight"] ** 2 for c in rows)) if total > 0 else None
     for c in rows:
-        c["fresh"] = session.freshness(event_key(c), c["length"], mode="pp", pool=pool)
+        c["fresh"] = session.freshness(event_key(c), c["length"], mode="pp", pool=pool, window=opt["cooldown_days"] * 86400)
         c["weight"] *= c["fresh"]
     # Offer/skip never promises a repeat. Only relax when *all* credible choices
     # have been cycled; there is no utility-floor trap shrinking the pool first.

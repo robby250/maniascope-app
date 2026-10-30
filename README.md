@@ -17,7 +17,7 @@ to play next:
    population data for predictions (~175 MB).
 3. Optional: in ⋯ → **osu! profile…**, enter your username. Your public top-100 plays are then used as
    bests (no password or API key).
-4. Optional: in the NPS tab → Settings → **Website charts**, pick a ★ range and press Download. This
+4. Optional: in the playlist window, NPS tab → ⚙ → **Website charts**, pick a ★ range and press Download. This
    runs in the background at low priority and fetches only chart text, never audio.
 
 Your lazer scores are read locally from lazer's database (read-only copy).
@@ -53,7 +53,7 @@ cd maniascope-app
 - the application-menu entry.
 
 **3. Start it** from the application menu (ManiaScope), or with `./run.sh` in that folder. The first
-start downloads the population data for predictions (~175 MB, progress shown at the bottom of the Next
+start downloads the population data for predictions (~175 MB, progress shown at the bottom of the Playlist
 window) and analyses your maps once in the background (it shows how many and how long).
 
 osu!lazer is found automatically whether it is the AppImage (`~/.local/share/osu`) or the Flatpak. For

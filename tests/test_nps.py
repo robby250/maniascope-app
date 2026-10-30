@@ -259,12 +259,6 @@ def test_taste_requires_real_completion_and_is_idempotent():
     assert nps.taste(d) == {}
 
 
-if __name__ == "__main__":
-    for name in sorted(n for n in globals() if n.startswith("test_")):
-        globals()[name]()
-        print("ok", name)
-
-
 def test_prepared_playlist_preserves_order_and_logs_immediate_selection(tmp_path):
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -715,3 +709,35 @@ def test_feature_rows_round_trip_as_json_would_and_old_json_rows_stay_readable()
     assert recdata.feats_load(json.dumps({'a': 1})) == {'a': 1}             # rows written before the binary form
     with pytest.raises(ValueError):
         recdata.feats_load(data[:-1])
+
+
+def test_pp_maps_mix_into_the_nps_list_only_when_on(tmp_path):
+    from unittest.mock import Mock
+    messages = []
+    worker = R.Worker(messages.append)
+    worker.db = recdata.connect(str(tmp_path/'rec.db'))
+    pp = lambda b, gain, p_up, rate=1., ranked=True: dict(bid=b, md5=f'pp{b}', keys=7, rate=rate, var='NM', mode='pp',
+        ranked=ranked, gain=gain, p_up=p_up, best=100., length=120., title=f'pp{b}', purpose='pp', f={})
+    cands = [pp(1, 6., .5), pp(2, 6., .3), pp(3, 9., .6, .75), pp(4, 4., .8, .75), pp(5, 2., .9), pp(6, 9., .9, ranked=False)]
+    worker.rec = SimpleNamespace(score=Mock(return_value=(cands, None)), rows=[], feats=SimpleNamespace(calc='test'))
+    listed = [dict(sha=f'n{i}', keys=7, rate=1., var='NM', purpose='nps', f={}) for i in range(8)]
+    worker.mode = 'nps'
+    now = 5000.
+    offers = [dict(id=1, t=now-300, kind='offer', beatmap='md5:x', info={'mode': 'pp'}),
+              dict(id=2, t=now-200, kind='offer', beatmap='sha:n9', info={'mode': 'nps'})]
+    session = R.Session(offers, now)
+    keys = lambda rows: [c.get('sha') or c['md5'] for c in rows]
+    with patch.object(worker, '_session', return_value=session), patch.object(R, 'summary', return_value=''), \
+         patch.object(worker, '_pool', return_value=('build', list(listed), '')), \
+         patch.object(worker, '_prepared_playlist', side_effect=lambda mode, shown: shown):
+        worker._publish()
+        assert keys(messages[-1]['shown']) == keys(listed) and not worker.rec.score.called      # off: no PP scoring
+        worker.t_configure('nps', {'nps': [7]}, revision=1, pp_mix={'on': True, 'every': 4})
+        # One NPS pick since the last PP offer: the first PP map comes after two more, then every 4th.
+        assert keys(messages[-1]['shown']) == ['n0', 'n1', 'pp4', 'n2', 'n3', 'n4', 'pp1', 'n5', 'n6', 'n7']
+        mixed = messages[-1]['shown'][2]
+        assert mixed['purpose'] == 'nps_mix' and worker.rec.score.call_args.kwargs['keys'] == (7,)
+        worker._open(mixed, 'nps', result=dict(sent=False, msg='Copied', copy=None), selected_at=now)
+        info = json.loads(worker.db.execute("SELECT info FROM events WHERE kind='offer'").fetchone()['info'])
+        assert info['mode'] == 'pp' and info['purpose'] == 'nps_mix' and messages[-1]['mode'] == 'nps'
+    worker.db.close()

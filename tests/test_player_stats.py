@@ -58,3 +58,25 @@ def test_history_follows_the_monthly_level_and_marks_the_peak(tmp_path):
     page=P.current(profile,R.Session([],1000))['pages'][7]
     assert not page['session'] and page['peak'][1]>page['groups']['overall']['value']
     rec.db.close()
+
+
+def test_level_is_calibrated_on_the_players_recent_results(tmp_path):
+    # Played results run 0.3 worse in log(1-acc) than the unseen-chart baseline: the level is where they reach 94 %.
+    rec=fixture(tmp_path,count=30)
+    for r in rec.rows:
+        r['y_lazer']=rec.model.predict(r['f'])[0]+.3
+    value=P.build(rec)[7]['groups']['overall']['value']
+    assert abs(value-8.*math.exp(-.15))<1e-3
+    rec.db.close()
+
+
+def test_dan_is_where_the_predicted_dan_song_accuracy_crosses_94(tmp_path, monkeypatch):
+    import dans
+    tiers=[('A',math.log(6.)),('B',math.log(7.)),('C',math.log(9.))]
+    monkeypatch.setattr(dans,'_table',lambda:{'S':tiers})
+    # Model accuracy is 94 % at overall 8: the B songs (7.) are easier, the C songs (9.) harder.
+    monkeypatch.setattr(dans,'songs',lambda s:{t:[{'overall':math.exp(v)}] for t,v in tiers})
+    model=fixture(tmp_path).model
+    p=(0.-2*math.log(7/8))/(2*math.log(9/8)-2*math.log(7/8))   # B → C, linear in log(1-acc)
+    assert abs(P._dan_rating(model,'S',(0.,1.))-math.exp(math.log(7.)+p*(math.log(9.)-math.log(7.))))<1e-9
+    assert P._dan_rating(model,'S',(-1.,1.))==dans.rating_at('S',3)     # every tier above 94 %: beyond the top

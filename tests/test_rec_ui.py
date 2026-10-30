@@ -1,4 +1,4 @@
-"""One isolated GTK smoke test: xvfb-run -a python3 test_rec_ui.py.
+"""Isolated GTK smoke tests: xvfb-run -a python3 -m pytest tests/test_rec_ui.py.
 
 No running game, real score database, real clipboard, or user preferences touched.
 """
@@ -194,8 +194,44 @@ def test_tabs_keys_clipboard_and_persistence():
                 ui.recdata.set_tracking(w.tracking_db, False)
                 with patch.object(ui, 'DEBUG', False):
                     assert not ui.tracking_switch(w.tracking_db) and ui.recdata.tracking_enabled(w.tracking_db)
+                # ⚙ flips the current tab to its settings page; another tab or Stats closes it.
+                w._set_rec_mode('nps')
+                w.gear_btn.set_active(True)
+                assert w._rec_views['nps']['stack'].get_visible_child_name() == 'settings'
+                w._set_rec_mode('pp')
+                assert not w.gear_btn.get_active() and w._rec_views['nps']['stack'].get_visible_child_name() == 'list'
+                w._rec_notebook.set_current_page(3)
+                assert not w.gear_btn.get_visible()
+                w._set_rec_mode('nps')
+                assert w.gear_btn.get_visible()
+                def named(widget, name):
+                    if isinstance(widget, (Gtk.Switch, Gtk.Scale)) and widget.get_accessible().get_name() == name:
+                        return widget
+                    for child in (widget.get_children() if isinstance(widget, Gtk.Container) else ()):
+                        hit = named(child, name)
+                        if hit: return hit
+                stack = w._rec_views['nps']['stack']
+                mix = named(stack, 'Mix in likely PP gains')
+                revealer = mix.get_parent().get_parent().get_children()[-2]
+                assert isinstance(revealer, Gtk.Revealer) and not revealer.get_reveal_child()
+                mix.set_active(True)
+                assert revealer.get_reveal_child() and w.rec.tasks[-1][-1]['on'] is True
+                named(stack, 'One PP map every').set_value(6.)
+                assert w.rec.tasks[-1][-1]['every'] == 6
+                named(w._rec_views['pp']['stack'], 'DT').set_active(False)
+                assert w.rec.tasks[-1][-2]['dt'] is False
+                # The selected map: one line of the playlist-only facts, the full card on hover.
+                card = dict(c, rate=1.2, acc_mid=.941, acc_lo=.905, acc_hi=.963, ranked=True, pp_lo=380., pp_hi=430.,
+                            best=400., gain=3.1, p_up=.45, skill='chordstream', plays_like=(7.4, 1000))
+                w._on_rec(dict(type='card', c=card))
+                assert '~94.1%' in w.card_lbl.get_text() and '\n' not in w.card_lbl.get_text()
+                assert '+3.1pp' not in w.card_lbl.get_text() and 'Top-1000' in w.card_lbl.get_tooltip_text()
+                w._set_rec_mode('pp')
+                assert '+3.1pp · 45% to beat' in w.card_lbl.get_text()
+                w._set_rec_mode('skills')
                 w._save_ui()
                 geometry=json.load(open(prefs))
+                assert geometry['pp_mix']['on'] and geometry['pp_mix']['every'] == 6 and not geometry['pp_settings']['dt']
                 assert geometry['skills_acc_target'] == .925 and geometry['display']['skills'] == 1
                 assert geometry['h']>=370 and geometry['recs_h']>=850
                 assert geometry['details_h'] > geometry['h']
@@ -261,12 +297,6 @@ def test_skill_picker_native_cycle_and_separate_expansion():
         assert skills.state(picker.selected, 'jumptrill') == 0
     finally:
         window.destroy()
-
-
-if __name__ == "__main__":
-    test_tabs_keys_clipboard_and_persistence()
-    test_skill_picker_native_cycle_and_separate_expansion()
-    print("ok four tabs, Stats/practice navigation, multi-key/skill filters, clipboard, Next and geometry persistence")
 
 
 def test_unchosen_playlist_keymodes_follow_what_the_player_plays():
