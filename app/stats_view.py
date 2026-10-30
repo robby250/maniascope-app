@@ -4,6 +4,8 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib
 
 import dans
+import player_stats
+import recdata
 import skill_practice
 
 
@@ -252,13 +254,14 @@ class StatsView(Gtk.Box):
                              "number is shown until you have played a few.")
             if lines:
                 self.body.pack_start(self.label("\n".join(lines)), False, False, 0)
+            target = f"{100 * recdata.shown_acc(player_stats.TARGET):.3g}%"     # level is defined in lazer units
             if len(page.get("history", ())) >= 2:
                 self.body.pack_start(HistoryChart(keys, page["history"], peak or page["history"][-1],
                                                             self.dan_scale.get("rice", 1.)), False, False, 0)
             self.body.pack_start(self.label(
                 f"{page.get('maps', 0):,} charts · {page.get('plays', 0):,} plays. Level = the chart difficulty you "
-                "play at ~94%, from your own recent completed plays. ≈ dan: the dan whose songs you are predicted to "
-                "play at ~94% (one song, not passing the course).", True), False, False, 0)
+                f"play at ~{target}, from your own recent completed plays. ≈ dan: the dan whose songs you are predicted to "
+                f"play at ~{target} (one song, not passing the course).", True), False, False, 0)
             shown = [r for r in groups.values() if r.get("value") is not None]
             scale = Scale(min([r["low"] for r in shown] + ([peak[1]] if peak else []), default=1.) - .2,
                           max([r["high"] for r in shown] + ([peak[1]] if peak else []), default=10.) + .2,
@@ -312,7 +315,7 @@ class StatsView(Gtk.Box):
                 if high[1]["low"] > low[1]["high"]:
                     self.body.pack_start(self.label(f"Profile contrast: {skill_practice.NAMES[high[0]]} is better supported at higher difficulty than {skill_practice.NAMES[low[0]]}."), False, False, 0)
             diagnostic = Gtk.Expander(label="Prediction strengths & blind spots")
-            messages = [f"{skill_practice.NAMES[d['skill']]}: {abs(d['delta']):.1f} accuracy points "
+            messages = [f"{skill_practice.NAMES[d['skill']]}: {abs(recdata.shown_points(d['delta'])):.1f} accuracy points "
                         f"{'above' if d['delta'] > 0 else 'below'} the saved pre-play predictions across {d['maps']} charts."
                         for d in page.get("diagnostics", ())]
             messages.append("These are model diagnostics, not proof of a personal weakness. Mixed patterns, session form and older predictor versions may contribute.")

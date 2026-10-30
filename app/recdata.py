@@ -124,6 +124,16 @@ def model_acc(acc):
     return acc if _client != "stable" or acc is None else 1 - (1 - acc) / _miss_ratio
 
 
+def shown_play(stats, lazer_acc):
+    """A play's accuracy as the active client shows it: on stable, stable's formula on the same judgements."""
+    return acc_stable(stats) if _client == "stable" and stats else lazer_acc
+
+
+def shown_points(points):
+    """A lazer-unit accuracy difference (points) in the active client's units."""
+    return points * _miss_ratio if _client == "stable" else points
+
+
 def stable_store():
     """stable's .osu files under their SHA-256, in lazer's files/ layout (hard links): every sha → path lookup
     works for both clients, and an edited chart keeps its old revision's identity."""

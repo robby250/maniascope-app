@@ -800,7 +800,7 @@ def rank(state, prepared, session, keys, taste_profile=None, mode="nps", web=1.,
         headline = f"{c['nps']:.1f} raw NPS" if mode == "nps" else (
             c["practice_description"] or skill_practice.describe_match(c["f"], c.get("practice_skills")))
         c.update(value=value, weight=weight, category_share=share,
-                 why=f"{headline} · {c['description']} · expect ~{100*c['acc_mid']:.1f}%"
+                 why=f"{headline} · {c['description']} · expect ~{100*recdata.shown_acc(c['acc_mid']):.1f}%"
                      + (" · freshness relaxed" if relax else ""))
         out.append(c)
     return out

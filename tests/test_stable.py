@@ -91,6 +91,12 @@ def test_rates_search_and_shown_accuracy(stable):
     st = (900, 80, 10, 5, 2, 3)
     assert recdata.acc_stable(st) > recdata.acc_lazer(st)
     assert abs(recdata.model_acc(recdata.shown_acc(.95)) - .95) < 1e-12 and recdata.shown_acc(.95) > .95
+    import recommend                                # every shown accuracy in stable units, lazer plays included
+    row = dict(played="2026-10-31T01:00:00", rate=1.5, expected=.95, z=.5, title="T", actual=recdata.acc_lazer(st),
+               stats=list(st), recovered=True, pause_positions_ms=None)
+    shown = recommend.history_text([row])
+    assert f"{100 * recdata.acc_stable(st):.2f}%" in shown and f"expected {100 * recdata.shown_acc(.95):.2f}%" in shown
+    assert "from osu!stable" in shown and recdata.shown_points(1.) < 1.
     recdata.set_client("lazer")
     assert nps.snap(1.23) == 1.23 and nps.offerable(1.1) and recdata.shown_acc(.95) == .95
     assert json.loads(json.dumps(navigation.song_search(c))).startswith('artist="Art"')

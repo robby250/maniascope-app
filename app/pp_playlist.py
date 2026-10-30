@@ -114,7 +114,7 @@ def prepare(rec, candidates, session):
         # Likely improvements come far more often than long shots (user 2026-09-30).
         c["weight"] = (utility * (.2+.8*tier_fit) * accuracy_fit * continuity * (1+.3*min(2., headroom))
                        * c.get("p_up", 1.))
-        c["why"] = (reason(c) + f" · expected {100*acc:.1f}%"
+        c["why"] = (reason(c) + f" · expected {100*recdata.shown_acc(acc):.1f}%"
                     + (" · comfortable keymode probe" if cold else " · peak opportunity" if state > .8 else " · current-form fit")
                     + (f" · current top #{c['best_rank']}" if c.get("best_rank", 101) <= 100 else
                        " · new/top-100 contender" if contender else " · smaller PP improvement"))

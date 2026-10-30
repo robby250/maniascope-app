@@ -1265,13 +1265,13 @@ def history_text(rows):
     for r in rows:
         when = time.strftime("%m-%d %H:%M", time.localtime(_ts(r["played"]))) if _ts(r["played"]) else "unknown time"
         rate = f"{r['rate']:.2f}×" if r["rate"] else "unknown rate"
-        expected = f"expected {100 * r['expected']:.2f}%" if r["expected"] is not None else "expected % not recorded"
+        expected = f"expected {100 * recdata.shown_acc(r['expected']):.2f}%" if r["expected"] is not None else "expected % not recorded"
         z = f" · {r['z']:+.2f}σ ({'above' if r['z'] > 0 else 'below'} expected)" if r["z"] is not None else ""
         pauses = r.get("pause_positions_ms")
         pause_note = (f" · {len(pauses)} play pause{'s' if len(pauses) != 1 else ''} (duration unknown)"
                       if pauses else "")
-        lines.append(f"{when} · {r['title']} · {rate}\n  {100 * r['actual']:.2f}% · {expected}{z}"
-                     + (" · recovered from lazer" if r["recovered"] else "") + pause_note)
+        lines.append(f"{when} · {r['title']} · {rate}\n  {100 * recdata.shown_play(r['stats'], r['actual']):.2f}% · {expected}{z}"
+                     + (f" · recovered from {client_name()}" if r["recovered"] else "") + pause_note)
     return "\n\n".join(lines) or "No plays match this view yet."
 
 
@@ -2917,8 +2917,8 @@ class Worker(threading.Thread):
         row = self.db.execute("SELECT stats, client FROM scores WHERE key=?", (key,)).fetchone()
         st = json.loads(row[0])
         acc, _n = recdata.acc320(st)
-        # Shown as the game shows it; the verdict compares lazer units (stable: shown_acc of the forecast).
-        shown = recdata.acc_stable(st) if str(row[1]).startswith("stable") else recdata.acc_lazer(st)
+        # Shown as the connected game shows it; the verdict compares lazer units (stable: shown_acc of the forecast).
+        shown = recdata.shown_play(st, recdata.acc_lazer(st))
         out = [f"{100 * shown:.2f}%"]
         fields = {"acc": shown, "expected": recdata.shown_acc(info.get("expected")), "z": None, "rate": info.get("rate"),
                   "when": time.time(), "news": []}
@@ -3208,7 +3208,7 @@ class Worker(threading.Thread):
             if rows:
                 r = rows[0]
                 self.emit({"type": "result", "title": r["title"], "text": history_text(rows),
-                           "acc": recdata.acc_stable(r["stats"]) if recdata.client() == "stable" else r["actual"],
+                           "acc": recdata.shown_play(r["stats"], r["actual"]),
                            "expected": recdata.shown_acc(r["expected"]), "z": r["z"], "rate": r["rate"], "when": _ts(r["played"]),
                            "news": []})
         if result['new'] and self.rec:
