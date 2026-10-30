@@ -4,7 +4,6 @@ This is selection, not a second accuracy model. Ratings, central accuracy and
 the exact weighted-account PP gain all come from the shared recommender.
 """
 import collections
-import hashlib
 import json
 import math
 
@@ -68,14 +67,12 @@ def comfort(rec, keys):
 
 
 def preview(rows, count, seed, focus=0.):
-    """Stable weighted shuffle. Merely repainting/restarting does not consume it."""
-    def priority(c):
-        identity = c.get("md5") or c.get("sha") or c.get("bid") or c.get("title")
-        raw = hashlib.blake2b(f"{seed}:{identity}".encode(), digest_size=8).digest()
-        u = (int.from_bytes(raw, "big") + 1) / (2**64 + 1)
-        # Zero samples by weight; one keeps the highest weights in order.
-        return (1-focus)*math.log(max(1e-300, -math.log(u))) - math.log(max(1e-12, c["weight"]))
-    return sorted(rows, key=priority)[:count]
+    """Stable weighted shuffle. Merely repainting/restarting does not consume it. Zero samples by weight; one
+    keeps the highest weights in order (native, as the NPS pool's: Prepared.rank)."""
+    import native_backend
+    order = native_backend.load().preview_order(
+        [(str(c.get("md5") or c.get("sha") or c.get("bid") or c.get("title")), c["weight"]) for c in rows], str(seed), focus)
+    return [rows[i] for i in order[:count]]
 
 
 def prepare(rec, candidates, session):

@@ -19,7 +19,7 @@ def feature(sk, nps_value=20., acc=.94, length=160., rate=1.):
 class Predictor:
     model = SimpleNamespace(pop={"slope": {0: 2.}})
     md5_bid = {}
-    calc = "fixture"
+    calc = predictor_id = "fixture"
     pub = {"feats": {}}
 
     def predict(self, f, *args, accuracy_only=False):
@@ -67,8 +67,9 @@ def test_skills_any_does_not_reward_nps_and_checks_whole_map():
                 "ln-with-impossible-wall": {1.: feature({"ln": 1.}, acc=.78)}}
     session = R.Session([], 1000)
     session.warm_flag=True  # isolate normal density objective from cold readiness
-    skills, _ = nps.candidates_from(catalog, analyses, Predictor(), session, mode="skills")
-    highnps, _ = nps.candidates_from(catalog, analyses, Predictor(), session)
+    from test_nps import choice_dicts
+    skills = choice_dicts(nps.candidates_from(catalog, analyses, Predictor(), session, mode="skills")[0], catalog, analyses, 'skills')
+    highnps = choice_dicts(nps.candidates_from(catalog, analyses, Predictor(), session)[0], catalog, analyses)
     assert {c['sha'] for c in skills} == {'ordinary', 'dense'}
     assert skills[0]['base_value'] == skills[1]['base_value']
     assert highnps[1]['base_value'] > highnps[0]['base_value']
@@ -78,8 +79,10 @@ def test_skills_any_does_not_reward_nps_and_checks_whole_map():
 def test_best_skills_rate_is_exact_and_no_unanalysed_rate_is_offered():
     f = feature({'ln': 1.})
     fs = {r: dict(f, test_acc=a) for r,a in ((.69,.94),(.7,.96),(.85,.943),(1.,.92),(1.5,.84),(1.51,.94))}
+    from test_nps import choice_dicts
     cands, proposals = nps.candidates_from({'a': inst('a')}, {'a': fs}, Predictor(), R.Session([],1000),
                                           mode='skills', selected_skills=['ln'])
+    cands = choice_dicts(cands, {'a': inst('a')}, {'a': fs}, 'skills', ['ln'])
     assert len(cands) == 1 and cands[0]['rate'] == .85
     assert cands[0]['practice_skills'] == ('ln',) and cands[0]['purpose'] == 'skills'
     assert all(.7 <= r <= 1.5 for _score,_sha,r in proposals)
@@ -108,10 +111,10 @@ def test_builder_only_works_for_active_objective_and_reuses_catalogue(tmp_path, 
         assert messages and messages[-1][0]=='ready'
         data=messages[-1][1]
         assert data['revision']==12 and set(data['states'])=={'skills'}
-        assert data['states']['skills']['candidates'][0]['practice_skills']==('ln',)
+        assert nps.materialize(data['states']['skills'],0)['practice_skills']==('ln',)
         builder._build(db,(Predictor(),R.Session([],1000),(7,),13,3,(7,),('ln',),'nps'))
         assert set(messages[-1][1]['states'])=={'nps'}
-        assert messages[-1][1]['states']['nps']['candidates'][0]['mode']=='nps'
+        assert nps.materialize(messages[-1][1]['states']['nps'],0)['mode']=='nps'
         assert installed.call_count==1
         before=len(messages)
         builder._build(db,(Predictor(),R.Session([],1000),(7,),14,3,(7,),('ln',),'pp'))
@@ -138,7 +141,7 @@ def test_worker_rejects_stale_filters_and_routes_skills_next(tmp_path):
         assert opened.called
     w.generation=1;w._local_request_id=4
     w.t_nps_update('ready',{'generation':1,'revision':3}) # stale builder never replaces current state
-    assert w.skills_state['candidates']==[]
+    assert len(w.skills_state['candidates'])==0
     w.db.close()
 
 
@@ -152,8 +155,9 @@ def test_local_lists_reuse_builder_predictions_and_skip_warmup_asks_for_new_ones
     c=dict(inst('a'),sha='a',f=f,rate=1.,nps=20.,length=160.,family='a',group='ln',
            profile=[1.],description='LN',base_value=0.,practice_skills=('ln',),acc_mid=.94,sd_model=.1)
     w.practice_skills=('ln',)
-    w.skills_state=dict(w.skills_state,candidates=[c]);w.nps_state=dict(w.nps_state,candidates=[c])
-    with patch.object(nps, 'weighted_candidates', wraps=nps.weighted_candidates) as weighted, \
+    from test_nps import publication
+    w.skills_state=dict(w.skills_state,candidates=publication([c]),mode='skills');w.nps_state=dict(w.nps_state,candidates=publication([c]),mode='nps')
+    with patch.object(nps, 'rank', wraps=nps.rank) as weighted, \
             patch.object(nps, 'taste', wraps=nps.taste) as taste:
         w._pool('skills')
         assert not taste.called
@@ -200,7 +204,7 @@ def test_builder_retries_incomplete_catalogue(tmp_path, monkeypatch):
     with patch.object(nps, 'installed', return_value=({}, '')):
         builder.run()
     assert catalog.call_count == 2
-    assert messages[-1][1]['states']['skills']['candidates'][0]['sha'] == 'a'
+    assert nps.materialize(messages[-1][1]['states']['skills'], 0)['sha'] == 'a'
 
 
 def test_builder_failure_is_scoped_preserves_list_and_clears_on_ready(tmp_path):
@@ -208,15 +212,16 @@ def test_builder_failure_is_scoped_preserves_list_and_clears_on_ready(tmp_path):
     worker.db = recdata.connect(str(tmp_path/'rec.db'))
     worker.generation, worker._local_request_id, worker.mode = 3, 2, 'skills'
     candidate = dict(inst('a'), sha='a', f=feature({'ln': 1.}), rate=1., base_value=0.)
-    previous = dict(worker.skills_state, candidates=[candidate], total=2, analyzed=1, restored=True)
+    from test_nps import publication
+    previous = dict(worker.skills_state, candidates=publication([candidate]), mode='skills', total=2, analyzed=1, restored=True)
     worker.skills_state = previous
-    worker.rec = SimpleNamespace(feats=SimpleNamespace(cache={}, key=lambda s, r: s, calc='fixture'))
+    worker.rec = SimpleNamespace(feats=SimpleNamespace(cache={}, key=lambda s, r: s, calc='fixture'), local_shas=set())
     saved = {'version': 1, 'choices': [['a', 1.]], 'analyzed': 1}
     recdata.kv_set(worker.db, 'playlist_cache:skills', saved)
     error = dict(generation=3, revision=2, mode='skills', error='BrokenProcessPool: worker exited',
                  keys_by_mode=worker.keys, selected_skills=())
     try:
-        with patch.object(worker, '_publish') as publish, patch.object(worker, '_prepare_local', return_value=[]):
+        with patch.object(worker, '_publish') as publish:
             worker.t_nps_update('error', dict(error, revision=1))
             assert worker.skills_state is previous and not publish.called
             worker.t_nps_update('error', error)
@@ -305,7 +310,7 @@ def _cached_builder(tmp_path, monkeypatch, count):
 
     def done(*args, **kwargs):
         builder.stop()                 # no prediction/process work is needed for the cache check
-        return [], []
+        return nps.no_choices(), []
 
     monkeypatch.setattr(nps, 'candidates_from', done)
     request = (Predictor(), None, (7,), 1, 3, (7,), (), 'skills')
@@ -320,7 +325,7 @@ def test_builder_feature_decode_releases_read_lock_and_defers_new_rows(tmp_path,
     with writer:
         writer.execute('INSERT INTO feats VALUES (?,?)', ('old@1.000|old-calculator', '{}'))
     upper = writer.execute('SELECT MAX(rowid) FROM feats').fetchone()[0]
-    loads = json.loads
+    loads = nps.recdata.feats_load
     decoded = []
 
     def decode(raw):
@@ -336,7 +341,7 @@ def test_builder_feature_decode_releases_read_lock_and_defers_new_rows(tmp_path,
             decoded.append(value['cache_index'])
         return value
 
-    monkeypatch.setattr(nps.json, 'loads', decode)
+    monkeypatch.setattr(nps.recdata, 'feats_load', decode)
     try:
         builder._build(db, request)
         assert decoded == list(range(270))
@@ -359,7 +364,7 @@ def test_builder_feature_decode_releases_read_lock_and_defers_new_rows(tmp_path,
 def test_builder_interrupts_cache_scan_and_resumes_remaining_rows(tmp_path, monkeypatch, interrupt):
     import json
     db, builder, request = _cached_builder(tmp_path, monkeypatch, 300)
-    loads = json.loads
+    loads = nps.recdata.feats_load
     decoded = []
 
     def decode(raw):
@@ -373,7 +378,7 @@ def test_builder_interrupts_cache_scan_and_resumes_remaining_rows(tmp_path, monk
                     builder.configure(Predictor(), None, (7,), 2, 3, (7,), (), 'skills')
         return value
 
-    monkeypatch.setattr(nps.json, 'loads', decode)
+    monkeypatch.setattr(nps.recdata, 'feats_load', decode)
     try:
         builder._build(db, request)
         assert 0 < len(decoded) <= 256
@@ -399,7 +404,7 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
     playing, paused = threading.Event(), threading.Event()
     playing.set()
     decoded, errors = [], []
-    loads = json.loads
+    loads = nps.recdata.feats_load
 
     def decode(raw):
         value = loads(raw)
@@ -418,14 +423,15 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
     worker.keys['nps'] = worker.keys['skills'] = (7,)
     worker.practice_skills = ()
     worker.rec = SimpleNamespace(feats=SimpleNamespace(cache={}, calc='fixture', key=lambda s, r: (s, r)))
-    previous = dict(worker.skills_state, candidates=[{'sha': 'previous'}], restored=True)
+    from test_nps import publication
+    previous = dict(worker.skills_state, candidates=publication([{'sha': 'previous', 'keys': 7, 'rate': 1.}]), restored=True)
     worker.skills_state = previous
     worker.playlists['skills'] = [{'sha': 'previous'}]
     candidate = dict(inst('a'), sha='a', rate=1., f=feature({'ln': 1.}), base_value=1.)
 
     def ready(*args, **kwargs):
         builder.stop()
-        return [candidate], []
+        return publication([candidate]), []
 
     def build():
         try:
@@ -433,7 +439,7 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
         except Exception as exc:
             errors.append(exc)
 
-    monkeypatch.setattr(nps.json, 'loads', decode)
+    monkeypatch.setattr(nps.recdata, 'feats_load', decode)
     monkeypatch.setattr(nps, 'candidates_from', ready)
     builder.busy, builder.emit = busy, worker.t_nps_update
     thread = threading.Thread(target=build)
@@ -462,7 +468,7 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
                 builder.halt.clear()
                 builder._build(db, continuation)
             assert decoded == list(range(300)) and builder._loaded_rowid == 300
-            assert worker.skills_state['candidates'] == [candidate]
+            assert [nps.materialize(worker.skills_state, i) for i in range(len(worker.skills_state['candidates']))] == [candidate]
             assert worker.rec.feats.cache[('a', 1.)] is candidate['f']
             assert recdata.kv_get(db, 'playlist_cache:skills')['choices'] == [['a', 1.]]
             published.assert_called_with('skills')
@@ -471,3 +477,15 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
         playing.clear()
         thread.join(2)
         db.close()
+
+
+def test_builder_rewrites_json_feature_rows_in_binary_once(tmp_path, monkeypatch):
+    import json
+    db, builder, request = _cached_builder(tmp_path, monkeypatch, 300)
+    before = {k: json.loads(v) for k, v in db.execute('SELECT key,data FROM feats')}
+    rowids = db.execute('SELECT rowid FROM feats ORDER BY rowid').fetchall()
+    builder._build(db, request)
+    after = db.execute('SELECT key,data FROM feats').fetchall()
+    assert all(isinstance(v, bytes) for _k, v in after)
+    assert {k: recdata.feats_load(v) for k, v in after} == before
+    assert db.execute('SELECT rowid FROM feats ORDER BY rowid').fetchall() == rowids     # the scan cursor stays valid

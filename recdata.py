@@ -469,8 +469,9 @@ def add_live_score(db, score, path, fresh, play=None):
 # ANY further source/parameter/skill-schema edit misses this full-hash allowlist
 # and receives its own identity as before. Never alias a changed model by version.
 _EXACT_IMPLEMENTATIONS = {
-    # source digest → earlier calc ID, for refactors proven exact on the parity set (none yet for the
-    # Rust calculator).
+    # source digest → earlier calc ID, for refactors proven exact on the parity set.
+    # lib.rs left the identity (it only registers modules; fit.rs added): calculator sources unchanged.
+    "ee9cce9ecc7d8c5d4db94092ebd268d5d795b6c1797c53f2b244cf13956dbc84": "3c695ee7a23f",
 }
 
 
@@ -732,6 +733,70 @@ def _gap_share(s, part):
     return min(1., best)
 
 
+def feats_dump(f):
+    """A feature dict as rec.db `feats` stores it: the native binary form (codec.rs), half JSON's decode time."""
+    import native_backend
+    return native_backend.load().encode_feats(f)
+
+
+def feats_load(data):
+    """A rec.db `feats` row → its feature dict; rows written before the binary form are JSON text."""
+    if isinstance(data, bytes):
+        import native_backend
+        return native_backend.load().decode_feats(data)
+    return json.loads(data)
+
+
+def group_ids(*cols):
+    """(id per row, distinct value columns) of the rows' value tuples; np.unique(axis=0) sorts bytes, 5× slower."""
+    import numpy as np
+    order = np.lexsort(cols[::-1])
+    new = np.zeros(len(order), bool)
+    new[:1] = True
+    for c in cols:
+        new[1:] |= c[order][1:] != c[order][:-1]
+    ids = np.empty(len(order), np.int64)
+    ids[order] = np.cumsum(new) - 1
+    return ids, [c[order[new]] for c in cols]
+
+
+def _first_seen(ids):
+    """(distinct ids in order of first appearance, each one's first row)."""
+    import numpy as np
+    first = np.full(ids.max() + 1 if len(ids) else 0, len(ids))
+    np.minimum.at(first, ids, np.arange(len(ids)))
+    order = np.argsort(first, kind="stable")
+    return order, first[order]
+
+
+def _group_percentile(ids, values, q):
+    """np.percentile(values of each id, q) (linear method) for every id at once."""
+    import numpy as np
+    order = np.lexsort((values, ids))
+    v, count = values[order], np.bincount(ids)
+    start = np.concatenate([[0], np.cumsum(count)[:-1]])
+    pos = (count - 1) * (q / 100)
+    lo = np.floor(pos).astype(np.int64)
+    t = pos - lo
+    a, c = v[start + lo], v[start + np.minimum(lo + 1, count - 1)]
+    diff = c - a
+    return np.where(t >= .5, c - diff * (1 - t), a + diff * t)      # numpy's _lerp
+
+
+_SCORES = [None, None]
+
+
+def _score_columns(scores):
+    """(player, beatmap, rate, year, yyyymmdd, judgement counts) of the dump scores as arrays, once per list."""
+    import numpy as np
+    if _SCORES[0] is not scores:
+        _SCORES[:] = scores, (np.array([s[0] for s in scores]), np.array([s[1] for s in scores]),
+                              np.array([s[3] for s in scores], float), np.array([s[4] for s in scores]),
+                              np.array([s[6] for s in scores]),
+                              np.array([s[7][:6] for s in scores], np.int64).reshape(len(scores), 6))
+    return _SCORES[1]
+
+
 def gap_shares(f):
     """Share of each GAP_SHARE_PARTS part in a chart (strongest member skill / overall), the weights of its curves."""
     s = f.get("sk", {})
@@ -757,6 +822,15 @@ def gap_term(pop, f, level):
                      for p, cs in gap[k].items()))
 
 
+def box_cd(A, rhs, x0, lower, upper, sweeps, tol):
+    """Projected Gauss-Seidel for a bounded convex ridge fit (native: the Python sweeps were seconds per fit)."""
+    import native_backend
+    import numpy as np
+    return np.array(native_backend.load().box_cd(np.ascontiguousarray(A, float).tobytes(), [float(x) for x in rhs],
+                                                 [float(x) for x in x0], [float(x) for x in lower],
+                                                 [float(x) for x in upper], sweeps, tol))
+
+
 def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy='pp',
                    ceilings=False, specialization=False, spec=None):
     """y = log(1 − acc320): player level + monotone rating curve + hit window + map effect.
@@ -769,45 +843,52 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
     require native hold judgements for both displayed and PP-target accuracy.
     """
     import numpy as np
-    raw = collections.defaultdict(list)
-    shares_of = {}                       # per chart variant: 3M score rows share ~75k feature dicts
-    for s in scores:
-        u, b, _acc, rate, year, _sid, ymd, stats = s[:8]
-        if u == exclude_user or (date_cut and ymd >= date_cut):
-            continue
-        f = feats.get(b, {}).get(rate)
-        if not f or f["overall"] < 1.8 or f["notes"] < 300:
-            continue
-        a, n = acc320((stats[0], stats[1], stats[2], stats[3], stats[4], stats[5]))
-        if accuracy == 'lazer':a=acc_lazer(stats)
-        elif accuracy != 'pp':raise ValueError('Unknown accuracy target')
-        g = shares_of.get((b, rate))
-        if g is None:
-            g = shares_of[b, rate] = gap_shares(f)
-        raw[(u, f["keys"], year)].append((b, rate, f["overall"], f["od"], a, f["keys"], n, g))
-    rows = []
-    for g, lst in raw.items():
-        if len(lst) < 20:
-            continue
-        top = np.percentile([x[2] for x in lst], 90)
-        rows += [(g,) + x for x in lst if x[2] >= 0.7 * top and 0.75 <= x[4] <= (1. if ceilings else .998)]
-    K = np.array([r[6] for r in rows])
+    if accuracy not in ('pp', 'lazer'):
+        raise ValueError('Unknown accuracy target')
+    # Columns over the 3M dump scores; features, gap shares and skills are read once per chart variant.
+    u, b, rate, year, ymd, stats = _score_columns(scores)
+    keep = u != exclude_user
+    if date_cut:
+        keep &= ymd < date_cut
+    idx = np.flatnonzero(keep)
+    pid, (pb, pr) = group_ids(b[idx], rate[idx])
+    variants = [feats.get(x, {}).get(r) for x, r in zip(pb.tolist(), pr.tolist())]
+    usable = np.array([bool(f) and f["overall"] >= 1.8 and f["notes"] >= 300 for f in variants], bool)
+    idx, pid = idx[usable[pid]], pid[usable[pid]]
+    variant = lambda key, default=0.: np.array([f[key] if f else default for f in variants], float)[pid]
+    overall, od, keys = variant("overall"), variant("od"), variant("keys").astype(np.int64)
+    st = stats[idx]
+    n = st.sum(axis=1)
+    weights = (305, 300, 200, 100, 50) if accuracy == 'lazer' else (320, 300, 200, 100, 50)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        acc = np.where(n > 0, (st[:, :5] @ np.array(weights)) / (weights[0] * n), 0.)
+    # Competence zone per player × keymode × year (groups in order of first appearance, as the rows were).
+    gid, _ = group_ids(u[idx], keys, year[idx])
+    order, first = _first_seen(gid)
+    rank = np.empty(len(order), np.int64); rank[order] = np.arange(len(order))
+    count = np.bincount(gid)
+    top = _group_percentile(gid, overall, 90.)
+    ok = ((count[gid] >= 20) & (overall >= 0.7 * top[gid]) & (0.75 <= acc) & (acc <= (1. if ceilings else .998)))
+    rows = np.flatnonzero(ok)
+    rows = rows[np.lexsort((rows, rank[gid[rows]]))]
+    K = keys[rows]
     ks = sorted(k for k, n in collections.Counter(K.tolist()).items() if n >= 1000 and k in (4, 7))
     # 5K/6K/8K–10K share 7K's link: their own fits came out far too flat (5K slope .64, 9K .35 vs 7K
     # 1.41) and 7K's link cut DEV RMSE 5K .906→.756, 8K .773→.604, 9K .629→.490 (2026-10-01).
     shared = ks.index(GAP_SHARED) if GAP_SHARED in ks else len(ks)
-    kg = np.array([ks.index(k) if k in ks else shared for k in K])
-    losses=1.-np.array([r[5] for r in rows])
+    kg = np.full(len(K), shared)
+    for i, k in enumerate(ks):
+        kg[K == k] = i
+    losses=1.-acc[rows]
     if ceilings:
-        counts=np.array([r[7] for r in rows],float)
+        counts=n[rows].astype(float)
         smallest=5./305. if accuracy=='lazer' else 20./320.
         losses=(counts*losses+.5*smallest)/(counts+1.)
     y = np.log(losses)
-    lr = np.log(np.array([r[3] for r in rows]))
+    lr = np.log(overall[rows])
     bend = np.maximum(0., lr - math.log(4.)) ** 2
-    lw = np.log(np.maximum(10.0, 64 - 3 * np.array([r[4] for r in rows])))
-    gid = {}
-    ug = np.array([gid.setdefault(r[0], len(gid)) for r in rows])
+    lw = np.log(np.maximum(10.0, 64 - 3 * od[rows]))
+    ug = np.unique(rank[gid[rows]], return_inverse=True)[1].reshape(-1)
     n_u = np.bincount(ug)
     dm = lambda v: v - (np.bincount(ug, v, minlength=len(n_u)) / n_u)[ug]
     G = len(ks) + 1
@@ -815,7 +896,8 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
     hats = gap_basis(lr - level[ug])
     spec = GAP_SPEC if spec is None else spec
     gap_keys = [k for k in spec if k in ks]
-    shares = np.array([r[8] for r in rows])
+    shares = np.array([gap_shares(f) if usable[i] else (0.,) * len(GAP_SHARE_PARTS)
+                       for i, f in enumerate(variants)])[pid[rows]]
     ix = {p: i for i, p in enumerate(GAP_SHARE_PARTS)}
     share_mean = {k: {p: float(shares[K == k, ix[p]].mean()) if centred else 0. for p, centred in spec[k].items()}
                   for k in gap_keys}
@@ -831,37 +913,31 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
     nuisance=None
     if specialization:
         import population_response
-        skills_of={}
-        z=np.array([skills_of[r[1],r[2]] if (r[1],r[2]) in skills_of else
-                    skills_of.setdefault((r[1],r[2]),population_response.skills(feats[r[1]][r[2]])) for r in rows])
+        z=np.array([population_response.skills(f) if usable[i] else (0.,)*5
+                    for i,f in enumerate(variants)])[pid[rows]]
         gram,projected,nuisance=population_response.eliminate(X,dm(y),z,ug)
         A-=gram;rhs-=projected
     lower = np.concatenate([np.full(G, .2), np.full(G, -np.inf), np.zeros(G), np.full(len(gap_cols), -np.inf)])
     upper = np.concatenate([np.full(G, np.inf), np.zeros(G), np.full(G, np.inf), np.full(len(gap_cols), np.inf)])
-    coef = np.clip(np.linalg.solve(A, rhs), lower, upper)
-    for _ in range(1500):
-        previous = coef.copy()
-        for j in range(len(coef)):
-            coef[j] = np.clip(coef[j] + (rhs[j] - A[j] @ coef) / A[j,j], lower[j], upper[j])
-        if np.max(np.abs(coef-previous)) < 1e-9:
-            break
+    coef = box_cd(A, rhs, np.clip(np.linalg.solve(A, rhs), lower, upper), lower, upper, 1500, 1e-9)
     specialized,spread=nuisance(coef) if nuisance is not None else (np.zeros(len(rows)),[])
     a = np.bincount(ug, y - Xr @ coef-specialized, minlength=len(n_u)) / n_u
     e = y - Xr @ coef - a[ug]-specialized
     # map effects: residual mean per beatmap, then per rate; shrunk toward the map / zero
-    bb = np.array([r[1] for r in rows])
-    rr = np.array([r[2] for r in rows])
-    by_b, by_br = collections.defaultdict(list), collections.defaultdict(list)
-    for b, rt, x in zip(bb.tolist(), rr.tolist(), e.tolist()):
-        by_b[b].append(x)
-        by_br[(b, rt)].append(x)
+    bb = b[idx][rows]
+    rr = rate[idx][rows]
+    bid, (ub,) = group_ids(bb)
+    nb, sb = np.bincount(bid), np.bincount(bid, e)
     sig2 = float(np.var(e))
-    means = np.array([np.mean(v) for v in by_b.values()])
-    ns = np.array([len(v) for v in by_b.values()])
-    tau2 = max(1e-4, float(np.mean(means ** 2 - sig2 / ns)))
+    seen, _ = _first_seen(bid)
+    tau2 = max(1e-4, float(np.mean((sb / nb)[seen] ** 2 - sig2 / nb[seen])))
     kap = sig2 / tau2
-    mb = {b: (sum(v) / (len(v) + kap), len(v)) for b, v in by_b.items()}
-    mbr = {k: ((sum(v) + kap * mb[k[0]][0]) / (len(v) + kap), len(v)) for k, v in by_br.items()}
+    mbv = sb / (nb + kap)
+    mb = dict(zip(ub.tolist(), zip(mbv.tolist(), nb.tolist())))
+    brid, (ubb, urr) = group_ids(bb, rr)
+    nbr, sbr = np.bincount(brid), np.bincount(brid, e)
+    mbr = dict(zip(zip(ubb.tolist(), urr.tolist()),
+                   zip(((sbr + kap * mbv[np.searchsorted(ub, ubb)]) / (nbr + kap)).tolist(), nbr.tolist())))
     slope = {k: float(coef[i]) for i, k in enumerate(ks)}
     window = {k: float(coef[G + i]) for i, k in enumerate(ks)}
     curve = {k: float(coef[2*G + i]) for i, k in enumerate(ks)}
@@ -873,7 +949,7 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
     return {"version": POP_VERSION, "slope": slope, "window": window, "curve": curve, "curve_knee": 4., "gap": gap,
             "share_mean": share_mean,
             "mb": mb, "mbr": mbr, "sig2": sig2, "tau2": tau2, "kappa": kap,
-            "rows": len(rows), "players": len({r[0][0] for r in rows}),
+            "rows": len(rows), "players": len(np.unique(u[idx][rows])),
             "accuracy_target":'lazer305' if accuracy=='lazer' else 'pp320',
             "ceilings_retained":bool(ceilings),'specialization_sd':spread}
 

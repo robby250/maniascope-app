@@ -4,6 +4,7 @@ Session starts are inferred from timestamped local completions, never dated
 public bests. Chart/rate, month, pattern mix and session intercepts absorb
 familiarity, skill drift and good/bad days. Only earlier sessions select the
 decay curve; a late-session holdout is diagnostic, not a fitting target.
+The fit itself runs natively with recommend.Personal's (native/src/personal.rs).
 """
 import collections
 import functools
@@ -35,10 +36,16 @@ def family(skill):
 DESCRIPTIVE = ('stamina','technical','patterntech','rhythmtech','mash')
 
 
+@functools.cache
+def _families():
+    import native_backend, recdata
+    return native_backend.load().Families(list(recdata.SKILLS), list(FAMILIES),
+                                          [(k, list(v)) for k, v in MEMBERS.items()], list(DESCRIPTIVE))
+
+
 def dominant(f):
-    sk=f.get('sk', {})
-    names=[k for k in sk if k not in DESCRIPTIVE]
-    return family(max(names,key=lambda k:sk[k])) if names else 'rice'
+    """The family of the chart's strongest non-descriptive skill ('rice' without one)."""
+    return _families().dominant(f)
 
 
 def transfer(a,b):
@@ -48,12 +55,25 @@ def transfer(a,b):
     return .20
 
 
+_ELASTICITIES = [None, None]
+
+
 def rate_elasticities(features):
     """Rate response learned from the same chart at multiple analysed rates.
 
     These are chart derivatives, not player outcomes or SR targets. Sparse
     families borrow their keymode response instead of a universal accuracy tax.
     """
+    # The public features are fixed for a snapshot; every refit fits two models from them.
+    if features is not None and _ELASTICITIES[0] is features:
+        return dict(_ELASTICITIES[1])
+    out = _rate_elasticities(features)
+    if features is not None:
+        _ELASTICITIES[:] = features, out
+    return dict(out)
+
+
+def _rate_elasticities(features):
     by = collections.defaultdict(list)
     for fs in (features or {}).values():
         rates = sorted(r for r, f in fs.items() if isinstance(r, (int, float)) and r > 0
@@ -69,90 +89,61 @@ def rate_elasticities(features):
 
 
 def family_weights(f):
-    """Continuous execution mix; descriptive Technical is not extra work."""
-    # The mix depends only on chart skills, not session form or either score
-    # target. Value keys also invalidate correctly if a feature dict changes.
-    return _family_weights(tuple(f.get('sk', {}).items()))
+    """Continuous execution mix ((family, weight), ...) in MEMBERS order: each family's strongest member
+    squared, normalised; descriptive Technical is not extra work. Natively (~160k calls per fit)."""
+    return _families().weights(f)
 
 
-@functools.lru_cache(maxsize=32768)
-def _family_weights(items):
-    sk = dict(items)
-    values = []
-    for name, members in MEMBERS.items():
-        if name == 'technical':
-            continue  # description of the same work, not a second motor family
-        weight = max((max(0., sk.get(x, 0.)) for x in members), default=0.)**2
-        if weight:
-            values.append((name, weight))
-    total = sum(w for name,w in values)
-    return tuple((name,w/total) for name,w in values) if total else ((dominant({'sk':sk}),1.),)
+def _elasticity_of(elasticities):
+    """f, family_weights(f) → the chart's blended rate elasticity; the per-keymode family table built once."""
+    tables = {}
+    def of(f, weights):
+        k = f['keys']; table = tables.get(k)
+        if table is None:
+            default = elasticities.get(str(k), 1.)
+            table = tables[k] = {name: elasticities.get(f'{k}:{name}', default) for name in FAMILIES}
+        return sum(w*table[name] for name,w in weights)
+    return of
 
 
 def rate_elasticity(f, elasticities):
     """Blend measured chart-family responses without a winner-label cliff."""
-    k = f['keys']; default = elasticities.get(str(k), 1.)
-    return sum(w*elasticities.get(f'{k}:{name}', default) for name,w in family_weights(f))
+    return _elasticity_of(elasticities)(f, family_weights(f))
+
+
+def score_rate_slopes(fs, population, elasticities):
+    """Local log-error / log-rate response per chart; no map-specific score residuals."""
+    pop = population or {}; elasticity = _elasticity_of(elasticities); out = []
+    for f, weights in zip(fs, _families().weights_many(fs)):
+        k = f['keys']
+        slope = pop.get('slope', {}).get(k, pop.get('slope', {}).get(0, 2.))
+        curve = pop.get('curve', {}).get(k, pop.get('curve', {}).get(0, 0.))
+        slope += 2 * curve * max(0., math.log(max(.05, f['overall']) / pop.get('curve_knee', 4.)))
+        out.append(max(1., min(8., slope * elasticity(f, weights))))
+    return out
 
 
 def score_rate_slope(f, population, elasticities):
-    """Local log-error / log-rate response; no map-specific score residuals."""
-    k = f['keys']; pop = population or {}
-    slope = pop.get('slope', {}).get(k, pop.get('slope', {}).get(0, 2.))
-    curve = pop.get('curve', {}).get(k, pop.get('curve', {}).get(0, 0.))
-    slope += 2 * curve * max(0., math.log(max(.05, f['overall']) / pop.get('curve_knee', 4.)))
-    elasticity = rate_elasticity(f, elasticities)
-    return max(1., min(8., slope * elasticity))
+    return score_rate_slopes([f], population, elasticities)[0]
 
 
-def duration(row):
-    return max(0.,min(1800.,row['f'].get('length',0.)/1000/max(.01,row.get('rate',1.))))
-
-
-def completions(rows):
-    """Exact local timestamps only; public bests cannot establish session order."""
-    out=[];seen=set()
-    for r in sorted(rows,key=lambda r:r.get('ts') or 0):
-        if r.get('src') not in ('realm','live') or not r.get('ts') or r.get('rd') or not r.get('completed',True):
-            continue
-        # Imported/live copies of one completion are not two warmup maps.
-        key=(r['chart'],round(r['ts']),round(r['rate'],3))
-        if key in seen:continue
-        seen.add(key)
-        out.append(dict(r,seconds=duration(r),family=dominant(r['f'])))
-    return out
+def native_args(population, elasticities):
+    """What the native warm-up fit (native/src/personal.rs, run by recommend.Personal) reads: transfer between
+    FAMILIES, GAP, COOLING, TAUS, CAPACITY_PRIOR and the population's rate response (score_rate_slope)."""
+    pop = population or {}
+    return ([[transfer(target, played) for played in FAMILIES] for target in FAMILIES], float(GAP), float(COOLING),
+            list(TAUS), CAPACITY_PRIOR, {"slope": pop.get("slope", {}), "curve": pop.get("curve", {}),
+                                         "curve_knee": pop.get("curve_knee", 4.), "elasticities": elasticities})
 
 
 def timeline(rows):
-    """Session, readiness minutes and exposure length per completion; tau-free, shared by every tau."""
-    out=[];state={};last_end=None;session=-1
-    for r in completions(rows):
-        end=r['ts'];start=end-r['seconds']
-        if last_end is None or start-last_end>GAP:
-            state={};session+=1
-        else:
-            elapsed=max(0.,start-last_end)
-            decay=math.exp(-elapsed/COOLING)
-            state={k:v*decay for k,v in state.items()}
-        k=r['keys']; fam=r['family'];minutes=state.get((k,fam),0.)
-        seconds=r['seconds'] if last_end is None else min(r['seconds'],max(0.,end-last_end))
-        d=min(10.,seconds/60)
-        out.append((r,session,minutes,d))
-        decay=math.exp(-seconds/COOLING)
-        state={key:value*decay for key,value in state.items()}
-        for target in FAMILIES:
-            state[k,target]=state.get((k,target),0.)+d*transfer(target,fam)
-        last_end=end
-    return out
-
-
-def history_design(rows, tau, steps=None):
-    observations=[]
-    for r,session,minutes,d in (timeline(rows) if steps is None else steps):
-        # The completed score averages cold and warming portions of that map.
-        exposure=math.exp(-minutes/tau)*(-math.expm1(-d/tau))*tau/d if d>.001 else math.exp(-minutes/tau)
-        observations.append(dict(r,session=session,activation=minutes,exposure=exposure))
-    return observations
+    """(row, session, readiness minutes, exposure minutes, seconds, family) per completion in time order: exact
+    local completions only (public bests cannot establish session order), readiness per (keymode, family)
+    cooling with COOLING between and during maps, reset after a GAP (the native fit's own accounting)."""
+    import native_backend, recommend
+    transfer_, gap, cooling, *_ = native_args(None, {})
+    return [(rows[i], session, minutes, d, seconds, FAMILIES[family]) for i, session, minutes, d, seconds, family in
+            native_backend.load().warmup_steps(recommend._native_consts(), rows, transfer_, gap, cooling)]
 
 
 def activation(history, now, keys, skill=None):
@@ -177,84 +168,6 @@ def activation(history, now, keys, skill=None):
         last_end=a['end']
     if last_end is None or now-last_end>GAP:return 0.
     return state*math.exp(-max(0.,now-last_end)/COOLING)
-
-
-_NUISANCE={}
-
-
-def nuisance(row):
-    # Every refit evaluates the same feature dicts ~25 times (taus × splits): ~1/4 of startup.
-    f=row['f'];hit=_NUISANCE.get(id(f))
-    if hit is not None and hit[0] is f:return hit[1]
-    sk=f.get('sk',{})
-    lr=math.log(max(.1,f['overall']))
-    v=(1.,lr,lr*lr,f.get('ln',0.),f.get('stam',1.),f.get('endurance',{}).get('load',0.))+tuple(
-        max((sk.get(x,0.) for x in MEMBERS[k]),default=0.) for k in FAMILIES)
-    if len(_NUISANCE)>200000:_NUISANCE.clear()
-    _NUISANCE[id(f)]=(f,v)
-    return v
-
-
-def _fit(rows, tau, use_cold=True):
-    """Small mixed ridge model. Nuisance effects are never exposed as ability."""
-    n=len(rows);groups={kind:{} for kind in ('month','chart','session')}
-    group_keys={
-        'month':[int(r['t']) for r in rows],
-        'chart':[(r['chart'],round(r['rate'],2)) for r in rows],
-        'session':[r['session'] for r in rows],
-    }
-    indices={kind:np.array([groups[kind].setdefault(x,len(groups[kind])) for x in values]) for kind,values in group_keys.items()}
-    Z=np.array([nuisance(r) for r in rows]);W=np.zeros((n,len(FAMILIES)))
-    for i,r in enumerate(rows):
-        W[i,FAMILIES.index(r['family'])]=r['exposure']*r.get('speed_slope',1.) if use_cold else 0.
-    X=np.column_stack([Z,W]); y=np.array([r['y']-r['base'] for r in rows])
-    # Repeat/favourite maps cannot dominate; old sessions remain useful.
-    count=collections.Counter(group_keys['chart']);recent=max(r['t'] for r in rows)
-    weights=np.array([.5**(max(0,recent-r['t'])/18)/math.sqrt(count[c]) for r,c in zip(rows,group_keys['chart'])])
-    weights*=len(rows)/weights.sum()
-    penalty=np.eye(X.shape[1])*max(1.,.005*weights.sum());penalty[0,0]=1e-6
-    # Shrink rare families toward their keymode's curve, not toward perfect
-    # cold performance. No coefficient is chosen from the reported failed quit.
-    speed_units = 'speed_slope' in rows[0]
-    prior_precision = 12. if speed_units else 2.
-    g=len(FAMILIES);penalty[-g:,-g:]=12.*(np.eye(g)-np.ones((g,g))/g)+np.eye(g)*prior_precision
-    A=X.T@(weights[:,None]*X)+penalty
-    effects={kind:np.zeros(len(ids)) for kind,ids in groups.items()}
-    coeff=np.zeros(X.shape[1]);ridge={'month':4.,'chart':5.,'session':8.}
-    for _ in range(16):
-        offsets=sum(effects[k][idx] for k,idx in indices.items())
-        rhs=X.T@(weights*(y-offsets))
-        if speed_units and use_cold:
-            rhs[-g:] += prior_precision * CAPACITY_PRIOR
-        coeff=np.linalg.solve(A,rhs)
-        # Coordinate projection solves the same convex objective with the
-        # physically meaningful nonnegative cold-loss constraints.
-        for _sweep in range(40):
-            previous=coeff.copy()
-            for j in range(len(coeff)):
-                value=coeff[j]+(rhs[j]-A[j]@coeff)/A[j,j]
-                coeff[j]=max(0.,min(.4 if speed_units else 2.,value)) if j>=len(nuisance(rows[0])) else value
-            if np.max(abs(previous-coeff))<1e-7:break
-        for kind,idx in indices.items():
-            residual=y-X@coeff-sum(effects[k][ii] for k,ii in indices.items() if k!=kind)
-            effects[kind]=np.bincount(idx,weights*residual)/(np.bincount(idx,weights)+ridge[kind])
-    return {'tau':tau,'amplitudes':coeff[-g:].tolist(),'theta':coeff[:-g],
-            'effects':{k:dict(zip(groups[k],v)) for k,v in effects.items()}}
-
-
-def _evaluate(model, rows):
-    errors=[];cold=[]
-    months=model['effects']['month'];month_keys=sorted(months)
-    for r in rows:
-        month=float(np.interp(r['t'],month_keys,[months[k] for k in month_keys]))
-        chart=model['effects']['chart'].get((r['chart'],round(r['rate'],2)),0.)
-        predicted=float(np.array(nuisance(r))@model['theta'])+month+chart
-        predicted+=model['amplitudes'][FAMILIES.index(r['family'])]*r['exposure']*r.get('speed_slope',1.)
-        e=r['y']-r['base']-predicted;errors.append(e)
-        if r['activation']<1.:cold.append(e)
-    return {'rmse':float(np.sqrt(np.mean(np.square(errors)))),
-            'cold_rmse':float(np.sqrt(np.mean(np.square(cold)))) if cold else None,
-            'rows':len(errors),'cold_rows':len(cold)}
 
 
 class Model:
@@ -294,61 +207,11 @@ class Model:
         return amplitude*math.exp(-max(0.,minutes)/tau)*mean
 
 
-def fit(rows, population=None, features=None):
-    # Retain the established model as a chronological control. Sparse modes
-    # must not inherit a large rate deficit from a different keymode; a new
-    # response is enabled only when its own earlier-session DEV check wins.
-    baseline, baseline_adjust = fit(rows) if population is not None else (None, {})
-    elasticities=rate_elasticities(features) if population is not None else {}
-    if not rows:return Model(population=population,elasticities=elasticities),{}
-    if population is not None:
-        rows=[dict(r,speed_slope=score_rate_slope(r['f'],population,elasticities)) for r in rows]
-    steps=timeline(rows)
-    layouts={tau:history_design(rows,tau,steps) for tau in TAUS}
-    modes={};report={};adjust={}
-    for keys in sorted({r['keys'] for r in layouts[8.]}):
-        ds=[r for r in layouts[8.] if r['keys']==keys]
-        sessions=sorted({r['session'] for r in ds})
-        if len(ds)<100 or len(sessions)<25:continue
-        cut=sessions[max(1,int(len(sessions)*.7))]
-        trials=[]
-        for tau,obs in layouts.items():
-            train=[r for r in obs if r['keys']==keys and r['session']<cut]
-            dev=[r for r in obs if r['keys']==keys and r['session']>=cut]
-            candidate=_fit(train,tau);stats=_evaluate(candidate,dev)
-            score=stats['rmse']+(stats['cold_rmse'] or stats['rmse'])
-            trials.append((score,tau,stats))
-        _,tau,devstats=min(trials)
-        obs=[r for r in layouts[tau] if r['keys']==keys]
-        train=[r for r in obs if r['session']<cut];dev=[r for r in obs if r['session']>=cut]
-        null=_fit(train,tau,False);no_cold=_evaluate(null,dev)
-        final=_fit(obs,tau)
-        modes[keys]={'tau':tau,'amplitudes':final['amplitudes'],'support':'local completed sessions',
-                    'units':'log_rate' if population is not None else 'log_error'}
-        report[keys]={'sessions':len(sessions),'completed_rows':len(ds),'cold_rows':sum(r['activation']<1. for r in ds),
-                      'selected_tau':tau,'dev':devstats,'no_cold_dev':no_cold,
-                      'amplitudes':dict(zip(FAMILIES,final['amplitudes'])), 'units':modes[keys]['units']}
-        if population is not None:
-            report[keys]['cold_capacity']={k:math.exp(-v) for k,v in zip(FAMILIES,final['amplitudes'])}
-        for r in obs:
-            adjust[r['key']]=final['amplitudes'][FAMILIES.index(r['family'])]*r['exposure']*r.get('speed_slope',1.)
-        if baseline is not None and keys in baseline.report:
-            control=baseline.report[keys]['dev']
-            objective=lambda v: v['rmse']+(v['cold_rmse'] or v['rmse'])
-            accepted=objective(devstats)<objective(control) and all(
-                devstats[k]<=1.01*control[k] for k in ('rmse','cold_rmse') if control[k] is not None)
-            report[keys]['rate_response_accepted']=accepted
-            report[keys]['constant_response_dev']=control
-            if not accepted:
-                modes[keys]=baseline.modes[keys]
-                report[keys]['retained_units']='log_error'
-                for r in obs:adjust[r['key']]=baseline_adjust.get(r['key'],0.)
-    # Keep only compact recent completions to seed a live session after restart.
-    history=[{'end':r['ts'],'t':r['ts']-r['seconds'],'keys':r['keys'],'skill':r['family'],
-              'played_seconds':r['seconds'],'key':r['key'],'beatmap':'md5:'+r['chart'],
-              'kind':'finish','ability_evidence':True,'meaningful':True}
-             for r,*_ in steps[-64:]]
-    model=Model(modes,history,report,population,elasticities)
-    if baseline is not None:
-        model.fallback=baseline.fallback
-    return model,adjust
+def models(fitted, population, elasticities):
+    """warmup.Model of a native fit's ((control modes, report), (modes, report), history): completed-score
+    cold-to-warm learning; keymodes whose rate response lost its earlier-session DEV check keep the
+    constant-response control, and the fallback is the control's."""
+    (control_modes, control_report), (modes, report), history = fitted
+    model = Model(modes, history, report, population, elasticities)
+    model.fallback = Model(control_modes, history, control_report).fallback
+    return model

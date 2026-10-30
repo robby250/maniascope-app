@@ -220,7 +220,7 @@ def crawl_meta(db, keys, full=False):
 
 
 def reachable(row):
-    """The metadata density can reach the NPS range at 1.5× (nps.weighted_candidates' floor ≈ 20·k/7)."""
+    """The metadata density can reach the NPS range at 1.5× (the NPS ranking's density floor ≈ 20·k/7, native/src/choices.rs)."""
     return row["notes"] >= 100 and row["length"] >= 30 and \
         row["notes"] / row["length"] * 1.5 >= .6 * 20 * row["keys"] / 7
 

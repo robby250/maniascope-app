@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Focused behaviour checks for skill_calc. Run: python3 test_skill_calc.py"""
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from unittest.mock import patch
@@ -9,6 +11,7 @@ import skill_calc as S
 import difficulty_model as D
 
 _TMP = tempfile.mkdtemp(prefix="maniascope-test-")
+atexit.register(shutil.rmtree, _TMP, True)     # other test modules import chart(): one folder per run otherwise stays
 _N = [0]
 
 

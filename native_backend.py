@@ -27,9 +27,10 @@ def identity_files(root=None):
     """What calc_id hashes: crate sources, Python faces, fitted stages."""
     import recdata
     root = Path(root or ROOT)
-    # The bulk predictor and the thread pool share the crate, not the identity: neither changes a calculator
-    # result, and a change to them must not re-analyse every library.
-    return ([p for p in sources(root) if p.name not in ('predict.rs', 'background.rs')]
+    # The predictor, the personal fit, the fitting kernels, the feature codec and the thread pool share the crate, not the identity: none changes a
+    # calculator result, and a change to them must not re-analyse every library. lib.rs only declares and
+    # registers modules (every calculator module is hashed itself).
+    return ([p for p in sources(root) if p.name not in ('lib.rs', 'predict.rs', 'choices.rs', 'personal.rs', 'fit.rs', 'background.rs', 'codec.rs')]
             + [root/(name+'.py') for name in recdata.CALCULATOR_MODULES] + [root/'calib/difficulty.json'])
 
 

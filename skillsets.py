@@ -853,7 +853,7 @@ class ManiaScopeWindow(Gtk.Window):
             plays = self.tracking_db.execute(
                 "SELECT f.data FROM scores s JOIN feats f ON f.key = s.sha256 || '@' || printf('%.3f', s.rate) || '|' || ? "
                 "WHERE s.src != 'public' AND s.rate BETWEEN .9 AND 1.2 ORDER BY s.played DESC LIMIT 400", (calc,))
-            stars = sorted(f["stars"] for f in (json.loads(r[0]) for r in plays) if f.get("stars") and f.get("keys") in keys)
+            stars = sorted(f["stars"] for f in (recdata.feats_load(r[0]) for r in plays) if f.get("stars") and f.get("keys") in keys)
         if len(stars) < 30:
             return None
         lo, hi = stars[len(stars) // 10], stars[len(stars) * 9 // 10]

@@ -62,8 +62,9 @@ def test_prepared_candidates_persist_their_original_native_state_without_open_wo
     else:
         choices, _ = nps.candidates_from({SHA:inst}, {SHA:{1.:f}}, rec.predictor, session,
                                         mode=mode, selected_skills=('ln',) if mode=='skills' else ())
-        worker.practice_skills = ('ln',) if mode=='skills' else ()
-        candidate = worker._prepare_local(mode, dict(candidates=choices), session)[0]
+        state = dict(candidates=choices, catalog={SHA:inst}, analyses={SHA:{1.:f}}, mode=mode,
+                     selected_skills=('ln',) if mode=='skills' else ())
+        candidate = nps.prepared_choice(state, choices.prepare([7], {SHA}), 0)
     original = copy.deepcopy(candidate)
     state = candidate['accuracy_forecast']
     assert state['target'] == 'native_displayed_lazer' and state['kind'] == 'usual_range'

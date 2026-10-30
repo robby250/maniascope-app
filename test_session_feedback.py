@@ -58,24 +58,25 @@ def test_trills_are_independent_and_old_choices_migrate():
 
 
 def test_nps_lower_tail_is_rare_not_banned_and_twenty_stays_variety():
+    from test_nps import rank_rows
     rows = [dict(keys=7, family=str(i), md5=str(i), rate=1., nps=ns,
                  base_value=math.log(ns), length=180., profile=[1.],
                  description='Mixed', group='chords', acc_mid=.94)
             for i, ns in enumerate([16., 18., 20., 23., 27., 30., 32., 33., 34., 35.])]
-    result = nps.weighted_candidates(rows, R.Session([], 1000), [7])
+    result = rank_rows(rows, R.Session([], 1000), [7])
     by = {r['nps']: r['weight'] for r in result}
     assert 0 < by[16.] / by[20.] < .005
     assert 0 < by[18.] / by[20.] < .08
     assert .6 < by[20.] / by[32.] < .7
     assert len(result) == len(rows)
     sparse = [dict(r, nps=r['nps']/3, base_value=math.log(r['nps']/3)) for r in rows]
-    lower = nps.weighted_candidates(sparse, R.Session([],1000), [7])
+    lower = rank_rows(sparse, R.Session([],1000), [7])
     # Under 75 % of the density floor is never offered (09c854c): 5.3–6.7 NPS go, the rest stay.
     assert len(lower) == 7 and all(r['weight'] > 0 for r in lower)
     # An easier eligible pool lowers the reference; it does not reject every
     # chart or funnel all mass into its single densest map.
     assert max(r['weight'] for r in lower) / sum(r['weight'] for r in lower) < .25
-    skills = nps.weighted_candidates([dict(r, practice_description='Chords') for r in rows],
+    skills = rank_rows([dict(r, f={'keys': 7, 'sk': {'chordstream': 1.}}, practice_skills=()) for r in rows],
                                     R.Session([],1000), [7], mode='skills')
     sw = {r['nps']: r['weight'] for r in skills}
     assert abs(sw[16.] / sw[20.] - .8) < 1e-12
@@ -116,6 +117,7 @@ def test_rate_search_actually_moves_toward_an_eligible_cold_opening():
     class Predictor:
         model = SimpleNamespace(pop={'slope': {0: 3.}})
         md5_bid = {}
+        calc = predictor_id = 'fixture'
         def predict(self, f, chart, bid, rate, session, *, accuracy_only=False):
             return {'acc_mid': .94, 'opening_acc': .91, 'sd_model': .1}
 
@@ -137,6 +139,7 @@ def test_cold_refinement_does_not_stop_in_an_ineligible_rounding_cell():
     class Predictor:
         model = SimpleNamespace(pop={'slope': {0: 3.}})
         md5_bid = {}
+        calc = predictor_id = 'fixture'
         def predict(self, *args, accuracy_only=False):
             return {'acc_mid': .95, 'opening_acc': .9369, 'sd_model': .1}
 
@@ -233,8 +236,9 @@ def test_a_rate_whose_last_result_missed_is_not_offered_again():
         s = R.Session([], 1000)
         s._attempts_by_map['md5:a'].append({'kind': 'finish', 'rate': 1.11, 'end': 900., 'y_lazer': math.log(1 - acc)})
         return s
-    assert nps.candidates_from({'a': inst('a')}, {'a': fs}, Predictor(), session(.941))[0][0]['rate'] == 1.11
-    assert nps.candidates_from({'a': inst('a')}, {'a': fs}, Predictor(), session(.93))[0][0]['rate'] == 1.08
+    from test_nps import choice_dicts
+    assert choice_dicts(nps.candidates_from({'a': inst('a')}, {'a': fs}, Predictor(), session(.941))[0], {'a': inst('a')}, {'a': fs})[0]['rate'] == 1.11
+    assert choice_dicts(nps.candidates_from({'a': inst('a')}, {'a': fs}, Predictor(), session(.93))[0], {'a': inst('a')}, {'a': fs})[0]['rate'] == 1.08
     # only the missed rate analysed: the next rate follows your result (93 % -> slower, 96 % -> faster)
     for acc, slower in ((.93, True), (.96, False)):
         choices, proposals = nps.candidates_from({'a': inst('a')}, {'a': {1.11: fs[1.11]}}, Predictor(), session(acc))

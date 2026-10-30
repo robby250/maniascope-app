@@ -112,7 +112,7 @@ def test_newly_ranked_exact_revision_is_not_hidden_by_qualified_snapshot_status(
     f={'stars':6.,'notes':1000,'hits':1000,'keys':7,'sk':{'stream':1.}}
     rec.pub={'feats':{42:{1.:f}},'maps':{42:{'md5':'a'*32,'approved':3,'set':1,'file':'newly ranked'}}}
     rec.installed={'a'*32:{'status':1}}
-    rec.model=SimpleNamespace(predict=lambda *a:(-3.,.1,.2))
+    rec.model=SimpleNamespace(predict_many=lambda items:[(-3.,.1,.2)]*len(items))
     rec.newer_ranked=lambda:[]
     rec._candidates()
     assert len(rec.cands)==1 and rec.cands[0][4]['approved']==1
@@ -159,7 +159,7 @@ def test_ht_is_offered_only_as_a_likely_improvement():
     def offers(ht_miss):
         rec=R.Recommender.__new__(R.Recommender)
         rec.model=SimpleNamespace(retry=0,rate_response=lambda *_:3.,rate_loss=lambda *a:3.*a[-1],
-                                  predict=lambda f,md5,b,rate:(math.log(ht_miss) if rate<1 else -1.,.05,.1))
+                                  predict_many=lambda items:[(math.log(ht_miss) if i[3]<1 else -1.,.05,.1) for i in items])
         rec._shown=(0.,1.)
         rec.pub={'feats':{42:{.75:f,1.:f}},'maps':{42:{'md5':'chart','approved':1,'set':1,'file':'fixture'}}}
         rec.installed={};rec.newer_ranked=lambda:[]

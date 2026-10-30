@@ -95,12 +95,13 @@ def test_category_sampling_matches_eligible_families_not_slots():
            "profile": [0, 1] if i>=98 else [1, 0], "base_value": math.log(30), "length": 160.,
            "rate": 1., "nps": 30., "description": "SV" if i>=98 else "Stream", "acc_mid": .94} for i in range(100)]
     cs.append(dict(cs[99], sha="duplicate-baked-rate"))
-    rows = nps.weighted_candidates(cs, R.Session([], 1000), [7])
+    from test_nps import rank_rows
+    rows = rank_rows(cs, R.Session([], 1000), [7])
     assert len(rows) == 100
     share = sum(c["weight"] for c in rows if c["group"] == "sv") / sum(c["weight"] for c in rows)
     assert abs(share-.02) < 1e-10
     cs += [dict(cs[0], sha="too-fast", family="x", rate=1.51), dict(cs[0], sha="too-slow", family="y", rate=.69)]
-    assert all(.7 <= c["rate"] <= 1.5 for c in nps.select(cs, R.Session([], 1000), [7], n_show=None))
+    assert all(.7 <= c["rate"] <= 1.5 for c in rank_rows(cs, R.Session([], 1000), [7]))
     assert nps.central_target(R.Session([], 1000)) == .94
 
 

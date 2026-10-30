@@ -1,0 +1,606 @@
+//! The NPS/Skills choice list, held natively from the Builder's scoring to the shown list: one record per chart
+//! (its best exact rate), the worker's prepare → weighting → shuffle → web mix over all of them, and Python dicts
+//! built only for the ~60 ranked (nps.materialize). Building and re-walking ~25k Python dicts was most of a
+//! request after a play (docs/REPORT_2026-10-30_RUST.md). Outside the calculator identity, like predict.rs.
+use crate::predict::{err, HashMap, Prediction, MAX_RATE, MIN_RATE};
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+
+/// The scored prediction: the native one (its dict and accuracy_forecast are built on demand) or a Python-path
+/// choice dict (charts played in the session window).
+pub(crate) enum Pred {
+    Native { p: Prediction, generated_at: f64 },
+    Py(Py<PyDict>),
+}
+
+/// What the worker's ranking reads of one chart's choice.
+pub(crate) struct Choice {
+    pub(crate) sha: String,
+    pub(crate) md5: String, // "" when the chart has none
+    pub(crate) keys: i64,
+    pub(crate) rate: f64,
+    pub(crate) value: f64, // base_value
+    pub(crate) installed: bool,
+    pub(crate) playcount: f64,
+    pub(crate) family: String,
+    pub(crate) group: String, // nps.group
+    pub(crate) nps: f64,
+    pub(crate) length: f64, // play span at this rate, s
+    pub(crate) profile: Vec<f64>,
+    pub(crate) acc_mid: f64,
+    pub(crate) pred: Pred,
+    pub(crate) patch: Option<Py<PyDict>>, // refreshed metadata (Worker.t_nps_update) laid over the dict
+}
+
+impl Choice {
+    /// recommend.event_key
+    fn identity(&self) -> String {
+        if self.md5.is_empty() { format!("sha:{}", self.sha) } else { format!("md5:{}", self.md5) }
+    }
+
+    /// A Python-path choice dict (nps._choice); ranking fields it lacks read as neutral (sha's own family).
+    fn of_dict(d: &Bound<'_, PyDict>) -> PyResult<Choice> {
+        let get = |k: &str| d.get_item(k)?.ok_or_else(|| err(&format!("choice lacks {k}")));
+        let opt = |k: &str| -> PyResult<Option<Bound<'_, PyAny>>> { Ok(d.get_item(k)?.filter(|v| !v.is_none())) };
+        let num = |k: &str| -> PyResult<f64> { opt(k)?.map_or(Ok(0.), |v| v.extract()) };
+        let sha: String = get("sha")?.extract()?;
+        Ok(Choice {
+            md5: opt("md5")?.map(|v| v.extract()).transpose()?.unwrap_or_default(),
+            keys: get("keys")?.extract()?,
+            rate: get("rate")?.extract()?,
+            value: num("base_value")?,
+            installed: opt("installed")?.map(|v| v.is_truthy()).transpose()?.unwrap_or(true),
+            playcount: num("playcount")?,
+            family: opt("family")?.map_or(Ok(sha.clone()), |v| v.str().map(|s| s.to_string()))?,
+            group: opt("group")?.map_or(Ok(String::new()), |v| v.str().map(|s| s.to_string()))?,
+            nps: num("nps")?,
+            length: num("length")?,
+            profile: opt("profile")?.map(|v| v.extract()).transpose()?.unwrap_or_default(),
+            acc_mid: num("acc_mid")?,
+            sha,
+            pred: Pred::Py(d.clone().unbind()),
+            patch: None,
+        })
+    }
+}
+
+/// A rate proposal: (quality, rate, (keys, group)).
+#[derive(Clone)]
+pub(crate) struct Proposal {
+    pub(crate) quality: f64,
+    pub(crate) rate: f64,
+    pub(crate) keys: i64,
+    pub(crate) group: String,
+}
+
+/// One request's scored charts (the Builder's memo across its passes): per catalogue chart, unscored or
+/// (choice, proposal). The Builder drops a chart whose analyses change.
+#[pyclass(module = "maniascope_native")]
+pub struct Choices {
+    order: Vec<String>,
+    at: HashMap<String, usize>,
+    pub(crate) slots: Vec<Option<(Option<Arc<Choice>>, Option<Proposal>)>>,
+    forecast: Arc<Forecast>,
+}
+
+/// accuracy_forecast provenance of a request: calculator, predictor, BAND_Z.
+pub(crate) struct Forecast {
+    calc: Py<PyAny>,
+    predictor: Py<PyAny>,
+    band_z: f64,
+}
+
+impl Choices {
+    pub(crate) fn slot(&self, sha: &str) -> Option<usize> {
+        self.at.get(sha).copied()
+    }
+}
+
+#[pymethods]
+impl Choices {
+    /// The catalogue's charts in order, and the request's accuracy_forecast provenance.
+    #[new]
+    fn new(order: Vec<String>, calc: Py<PyAny>, predictor: Py<PyAny>, band_z: f64) -> Self {
+        let at = order.iter().enumerate().map(|(i, s)| (s.clone(), i)).collect();
+        let slots = vec![None; order.len()];
+        Choices { order, at, slots, forecast: Arc::new(Forecast { calc, predictor, band_z }) }
+    }
+
+    /// Charts not scored yet, in catalogue order.
+    fn unscored(&self) -> Vec<String> {
+        self.order.iter().zip(&self.slots).filter(|(_, s)| s.is_none()).map(|(o, _)| o.clone()).collect()
+    }
+
+    /// A chart whose analyses changed is scored again.
+    fn drop(&mut self, sha: &str) {
+        if let Some(i) = self.slot(sha) {
+            self.slots[i] = None;
+        }
+    }
+
+    /// A Python-path result: the choice dict (nps._choice) or None, and the proposal (quality, sha, rate,
+    /// (keys, group)) or None.
+    fn put(&mut self, sha: &str, choice: Option<&Bound<'_, PyDict>>, proposal: Option<(f64, String, f64, (i64, String))>) -> PyResult<()> {
+        let i = self.slot(sha).ok_or_else(|| err(&format!("{sha} is not in this catalogue")))?;
+        self.slots[i] = Some((choice.map(Choice::of_dict).transpose()?.map(Arc::new),
+                              proposal.map(|(quality, _, rate, (keys, group))| Proposal { quality, rate, keys, group })));
+        Ok(())
+    }
+
+    /// candidates_from's frontier: the proposals not refined or blocked, the best 24 overall and 4 of every
+    /// (keys, group) (retention, not quotas: the eligible population keeps its proportions) → [(quality, sha,
+    /// rate)], best first.
+    fn proposals(&self, refined: Vec<(String, f64)>, blocked: std::collections::HashSet<String>) -> PyResult<Vec<(f64, String, f64)>> {
+        let refined: std::collections::HashSet<(&str, u64)> = refined.iter().map(|(s, r)| (s.as_str(), r.to_bits())).collect();
+        let mut all: Vec<(f64, &str, f64, &Proposal)> = Vec::new();
+        for (sha, slot) in self.order.iter().zip(&self.slots) {
+            if let Some((_, Some(p))) = slot {
+                if !blocked.contains(sha) && !refined.contains(&(sha.as_str(), p.rate.to_bits())) {
+                    all.push((p.quality, sha, p.rate, p));
+                }
+            }
+        }
+        // heapq.nlargest's tuple order: quality, then sha, rate and group.
+        all.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(a.1)).then(b.2.total_cmp(&a.2))
+            .then((b.3.keys, &b.3.group).cmp(&(a.3.keys, &a.3.group))));
+        let mut kept: Vec<(f64, &str, f64)> = all.iter().take(24).map(|x| (x.0, x.1, x.2)).collect();
+        let mut per: HashMap<(i64, &str), usize> = HashMap::default();
+        for x in &all {
+            let n = per.entry((x.3.keys, x.3.group.as_str())).or_insert(0);
+            if *n < 4 {
+                *n += 1;
+                kept.push((x.0, x.1, x.2));
+            }
+        }
+        kept.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(a.1)).then(b.2.total_cmp(&a.2)));
+        kept.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2);
+        Ok(kept.into_iter().map(|(q, s, r)| (q, s.to_string(), r)).collect())
+    }
+
+    /// The choices as they stand, in catalogue order (what a publication carries; later passes don't touch it).
+    fn snapshot(&self) -> ChoiceList {
+        ChoiceList {
+            items: self.slots.iter().filter_map(|s| s.as_ref().and_then(|(c, _)| c.clone())).collect(),
+            forecast: self.forecast.clone(),
+        }
+    }
+}
+
+/// One publication's choices (immutable): what the worker prepares, ranks and materialises.
+#[pyclass(module = "maniascope_native")]
+pub struct ChoiceList {
+    items: Vec<Arc<Choice>>,
+    forecast: Arc<Forecast>,
+}
+
+/// nps.materialize's view of one choice: (sha, rate, base_value, the prediction dict with its
+/// accuracy_forecast, or the Python-path choice dict; refreshed metadata or None).
+type Entry<'py> = (String, f64, f64, Bound<'py, PyDict>, Option<Bound<'py, PyDict>>);
+
+impl ChoiceList {
+    fn entry<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Entry<'py>> {
+        let c = self.items.get(i).ok_or_else(|| err("no such choice"))?;
+        let d = match &c.pred {
+            Pred::Native { p, generated_at } => {
+                let chart = if c.md5.is_empty() { &c.sha } else { &c.md5 };
+                let f = &self.forecast;
+                p.forecast_dict(py, chart, c.rate, &(*generated_at, f.calc.bind(py).clone(), f.predictor.bind(py).clone(), f.band_z))?
+            }
+            Pred::Py(d) => d.bind(py).clone(),
+        };
+        Ok((c.sha.clone(), c.rate, c.value, d, c.patch.as_ref().map(|p| p.bind(py).clone())))
+    }
+}
+
+#[pymethods]
+impl ChoiceList {
+    /// An empty list (no publication yet).
+    #[new]
+    fn new(py: Python<'_>) -> Self {
+        ChoiceList { items: Vec::new(), forecast: Arc::new(Forecast { calc: py.None(), predictor: py.None(), band_z: 0. }) }
+    }
+
+    fn __len__(&self) -> usize {
+        self.items.len()
+    }
+
+    /// The `n` charts of the highest base_value: what the next request re-predicts first.
+    fn lead(&self, n: usize) -> Vec<String> {
+        let mut order: Vec<&Arc<Choice>> = self.items.iter().collect();
+        order.sort_by(|a, b| b.value.total_cmp(&a.value));
+        order.into_iter().take(n).map(|c| c.sha.clone()).collect()
+    }
+
+    /// (sha, rate) of every choice.
+    fn refs(&self) -> Vec<(String, f64)> {
+        self.items.iter().map(|c| (c.sha.clone(), c.rate)).collect()
+    }
+
+    /// The restart cache's references: the 512 best by base_value and 2048 spread by sha256(sha), sorted.
+    fn restart_refs(&self) -> Vec<(String, f64)> {
+        let mut best: Vec<&Arc<Choice>> = self.items.iter().collect();
+        best.sort_by(|a, b| b.value.total_cmp(&a.value));
+        let mut spread: Vec<(Vec<u8>, &Arc<Choice>)> = self.items.iter().map(|c| (Sha256::digest(c.sha.as_bytes()).to_vec(), c)).collect();
+        spread.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut refs: Vec<(String, f64)> = best.into_iter().take(512).chain(spread.into_iter().take(2048).map(|x| x.1))
+            .map(|c| (c.sha.clone(), c.rate)).collect();
+        refs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        refs.dedup();
+        refs
+    }
+
+    /// This list with refreshed metadata laid over the choices of {(event_key, rate): metadata}: newer exact
+    /// features than the Builder had (family, group, nps, length and profile follow them).
+    fn patched(&self, patches: &Bound<'_, PyDict>) -> PyResult<ChoiceList> {
+        let mut items = self.items.clone();
+        for c in items.iter_mut() {
+            let Some(m) = patches.get_item((c.identity(), c.rate))? else { continue };
+            let m = m.cast::<PyDict>()?;
+            let get = |k: &str| m.get_item(k)?.ok_or_else(|| err(&format!("metadata lacks {k}")));
+            *c = Arc::new(Choice {
+                sha: c.sha.clone(), md5: c.md5.clone(), keys: c.keys, rate: c.rate, value: c.value, installed: c.installed,
+                playcount: c.playcount, family: get("family")?.str()?.to_string(),
+                group: get("group")?.str()?.to_string(),
+                nps: get("nps")?.extract()?, length: get("length")?.extract()?, profile: get("profile")?.extract()?,
+                acc_mid: c.acc_mid,
+                pred: match &c.pred {
+                    Pred::Native { p, generated_at } => Pred::Native { p: p.clone(), generated_at: *generated_at },
+                    Pred::Py(d) => Pred::Py(d.clone_ref(m.py())),
+                },
+                patch: Some(m.clone().unbind()),
+            });
+        }
+        Ok(ChoiceList { items, forecast: self.forecast.clone() })
+    }
+
+    /// FeatureSource.cache[key(sha, rate)] = the choice's features (analyses[sha][rate], or a Python-path
+    /// choice's "f"): exact proposed features serve selected-map and start-event predictions at once.
+    fn fill_cache(&self, cache: &Bound<'_, PyDict>, key: &Bound<'_, PyAny>, analyses: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        for c in &self.items {
+            let f = match (&c.pred, analyses) {
+                (Pred::Py(d), _) => d.bind(cache.py()).get_item("f")?,
+                (Pred::Native { .. }, Some(a)) => a.get_item(&c.sha)?.get_item(c.rate).ok(),
+                (Pred::Native { .. }, None) => None,
+            };
+            if let Some(f) = f {
+                cache.set_item(key.call1((&c.sha, c.rate))?, f)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The worker's prepared pool: choices of `keys` at an offered rate whose chart is still here (a website
+    /// chart, or installed and in `local_shas`).
+    fn prepare(slf: &Bound<'_, Self>, keys: Vec<i64>, local_shas: &Bound<'_, PyAny>) -> PyResult<Prepared> {
+        let list = slf.borrow();
+        let mut kept = Vec::new();
+        for (i, c) in list.items.iter().enumerate() {
+            if (c.installed && !local_shas.contains(&c.sha)?) || !keys.contains(&c.keys) || !(MIN_RATE..=MAX_RATE).contains(&c.rate) {
+                continue;
+            }
+            kept.push(i);
+        }
+        let by_identity = kept.iter().map(|&i| (list.items[i].identity(), i)).collect();
+        Ok(Prepared { list: slf.clone().unbind(), kept, by_identity })
+    }
+
+    /// entry(i) for nps.materialize
+    #[pyo3(name = "entry")]
+    fn py_entry<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Entry<'py>> {
+        self.entry(py, i)
+    }
+}
+
+/// A ChoiceList prepared for one worker state (keymodes, local charts).
+#[pyclass(module = "maniascope_native")]
+pub struct Prepared {
+    list: Py<ChoiceList>,
+    kept: Vec<usize>,
+    by_identity: HashMap<String, usize>,
+}
+
+/// The worker's ranking inputs besides the pool (Worker._pool).
+#[derive(FromPyObject)]
+pub struct Ranking<'py> {
+    #[pyo3(item)]
+    keys: Vec<i64>,
+    #[pyo3(item)]
+    nps: bool, // NPS (density floor, shuffle) or Skills
+    #[pyo3(item)]
+    web: f64,
+    #[pyo3(item)]
+    taste: Bound<'py, PyDict>, // {(keys, group): preference}
+    #[pyo3(item)]
+    eventful: Bound<'py, PyAny>, // identities with session events: the others are fresh
+    #[pyo3(item)]
+    freshness: Bound<'py, PyAny>, // (identity, length, pool) → Session.freshness
+    #[pyo3(item)]
+    recent_families: Vec<String>,
+    #[pyo3(item)]
+    recent_profiles: Vec<Vec<f64>>,
+    #[pyo3(item)]
+    current_keys: Option<i64>,
+    #[pyo3(item)]
+    consumed: Bound<'py, PyAny>,
+    #[pyo3(item)]
+    shuffle: Option<(String, f64)>, // pp_playlist.preview's (str(seed), focus)
+    #[pyo3(item)]
+    count: Option<usize>,
+}
+
+#[pymethods]
+impl Prepared {
+    fn __len__(&self) -> usize {
+        self.kept.len()
+    }
+
+    /// The prepared choice of a chart revision (recommend.event_key), as an entry index.
+    fn find(&self, identity: &str) -> Option<usize> {
+        self.by_identity.get(identity).copied()
+    }
+
+    /// the old nps.weighted_candidates (family best, quality weights), the unconsumed filter, the NPS shuffle and the web mix (Worker._pool) →
+    /// ([(entry index, value, weight, category_share)], freshness relaxed), in shown order.
+    #[allow(clippy::type_complexity)]
+    fn rank(&self, py: Python<'_>, r: Ranking<'_>) -> PyResult<(Vec<(usize, f64, f64, f64)>, bool)> {
+        let list = self.list.borrow(py);
+        let items = &list.items;
+        // Each chart family's best rate; equally good maps then reproduce library proportions.
+        let mut best: Vec<usize> = Vec::new();
+        let mut family_at: HashMap<(i64, &str), usize> = HashMap::default();
+        for &i in &self.kept {
+            let c = &items[i];
+            if !r.keys.contains(&c.keys) || (r.web <= 0. && !c.installed) {
+                continue;
+            }
+            match family_at.get(&(c.keys, c.family.as_str())) {
+                Some(&at) => {
+                    if c.value > items[best[at]].value {
+                        best[at] = i;
+                    }
+                }
+                None => {
+                    family_at.insert((c.keys, c.family.as_str()), best.len());
+                    best.push(i);
+                }
+            }
+        }
+        let mut rows = best;
+        // Twenty NPS is ordinary 7K variety: follow the eligible pool down for lower ability or cold states,
+        // and far below that floor is not NPS practice at all (user 2026-10-22: a 6 NPS map "should never appear").
+        let mut floor: HashMap<i64, f64> = HashMap::default();
+        if r.nps {
+            for &k in &r.keys {
+                let mut ns: Vec<f64> = rows.iter().map(|&i| &items[i]).filter(|c| c.keys == k && c.nps > 0.).map(|c| c.nps).collect();
+                if !ns.is_empty() {
+                    floor.insert(k, (20. * k as f64 / 7.).min(0.85 * quantile(&mut ns, 0.70)));
+                }
+            }
+            rows.retain(|&i| {
+                let c = &items[i];
+                !(0. < c.nps && c.nps < 0.75 * floor.get(&c.keys).copied().unwrap_or(0.))
+            });
+        }
+        if rows.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        let mut counts: HashMap<(i64, &str), usize> = HashMap::default();
+        rows.iter().for_each(|&i| *counts.entry((items[i].keys, items[i].group.as_str())).or_insert(0) += 1);
+        let top = rows.iter().map(|&i| items[i].value).fold(f64::NEG_INFINITY, f64::max);
+        let w: Vec<f64> = rows.iter().map(|&i| (items[i].value - top).exp()).collect();
+        let pool = w.iter().sum::<f64>().powi(2) / w.iter().map(|x| x * x).sum::<f64>();
+        let mut fresh = Vec::with_capacity(rows.len());
+        for &i in &rows {
+            let identity = items[i].identity();
+            fresh.push(if r.eventful.contains(&identity)? { r.freshness.call1((identity, items[i].length, pool))?.extract()? } else { 1. });
+        }
+        let relax = fresh.iter().sum::<f64>() < 3.;
+        let several = r.keys.len() > 1 && r.current_keys.is_some_and(|k| r.keys.contains(&k));
+        let mut values = Vec::with_capacity(rows.len());
+        for (&i, fr) in rows.iter().zip(&fresh) {
+            let c = &items[i];
+            let mut value = c.value + 0.65 * fr.powf(if relax { 0.3 } else { 1. }).max(0.001).ln();
+            let f = floor.get(&c.keys).copied().unwrap_or(0.);
+            if f != 0. && c.nps > 0. {
+                value -= 24. * (f / c.nps).ln().max(0.);
+            }
+            if r.recent_families.contains(&c.family) {
+                value -= 1.2;
+            }
+            if !c.installed {
+                // Mild popularity prior for website charts only: ×0.7 near 10 plays → ×1 from 10k.
+                value += (0.6 + 0.1 * 4f64.min((1. + c.playcount).log10())).ln();
+            }
+            let similar = r.recent_profiles.iter().filter(|a| a.len() == c.profile.len())
+                .map(|a| a.iter().zip(&c.profile).map(|(x, y)| x * y).sum::<f64>()).fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
+            if let Some(s) = similar {
+                value -= 0.18 * s;
+            }
+            if several && Some(c.keys) != r.current_keys {
+                value -= 0.12;
+            }
+            values.push(value);
+        }
+        let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mut ranked: Vec<(usize, f64, f64, f64)> = Vec::with_capacity(rows.len());
+        for (&i, &value) in rows.iter().zip(&values) {
+            let c = &items[i];
+            let preference = match r.taste.get_item((c.keys, c.group.as_str()))? {
+                Some(v) => (0.65 * v.extract::<f64>()?).exp(),
+                None => 1.,
+            };
+            ranked.push((i, value, (value - maximum).max(-20.).exp() * preference, counts[&(c.keys, c.group.as_str())] as f64 / rows.len() as f64));
+        }
+        ranked.sort_by(|a, b| b.2.total_cmp(&a.2));
+        let mut available: Vec<(usize, f64, f64, f64)> = Vec::with_capacity(ranked.len());
+        for x in &ranked {
+            if !r.consumed.contains(items[x.0].identity())? {
+                available.push(*x);
+            }
+        }
+        if available.is_empty() {
+            available = ranked;
+        }
+        if let Some((seed, focus)) = &r.shuffle {
+            let ids: Vec<&str> = available.iter().map(|x| {
+                let c = &items[x.0];
+                if c.md5.is_empty() { c.sha.as_str() } else { c.md5.as_str() }
+            }).collect();
+            let order = shuffle_order(&ids, &available.iter().map(|x| x.2).collect::<Vec<_>>(), seed, *focus);
+            available = order.into_iter().map(|i| available[i]).collect();
+        }
+        let order = mix(&available.iter().map(|x| items[x.0].installed).collect::<Vec<_>>(), r.web);
+        let mut out: Vec<(usize, f64, f64, f64)> = order.into_iter().map(|i| available[i]).collect();
+        if let Some(n) = r.count {
+            out.truncate(n);
+        }
+        Ok((out, relax))
+    }
+
+    /// The list's entry(i)
+    fn entry<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Entry<'py>> {
+        self.list.borrow(py).entry(py, i)
+    }
+}
+
+/// np.quantile (linear)
+fn quantile(v: &mut [f64], q: f64) -> f64 {
+    v.sort_by(|a, b| a.total_cmp(b));
+    let pos = q * (v.len() - 1) as f64;
+    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+    let t = pos - lo as f64;
+    let d = v[hi] - v[lo];
+    if t >= 0.5 { v[hi] - d * (1. - t) } else { v[lo] + d * t }
+}
+
+/// pp_playlist.preview's order: a stable weighted shuffle keyed by `seed` and each identity (focus 0 samples by
+/// weight, 1 keeps the highest weights in order).
+fn shuffle_order(ids: &[&str], weights: &[f64], seed: &str, focus: f64) -> Vec<usize> {
+    let priority: Vec<f64> = ids.iter().zip(weights).map(|(id, &w)| {
+        let h = blake2b8(format!("{seed}:{id}").as_bytes());
+        let u = (u64::from_be_bytes(h) as f64 + 1.) / (2f64.powi(64) + 1.);
+        (1. - focus) * (-u.ln()).max(1e-300).ln() - w.max(1e-12).ln()
+    }).collect();
+    let mut order: Vec<usize> = (0..ids.len()).collect();
+    order.sort_by(|&a, &b| priority[a].total_cmp(&priority[b]));
+    order
+}
+
+/// nps.mix: installed and website charts interleaved, each side in its ranked order, website at web/(1+web)
+/// (sampling both from one weighted pool let whichever side had more mass fill the list, user 2026-10-25).
+fn mix(installed: &[bool], web: f64) -> Vec<usize> {
+    let mut pools: [std::collections::VecDeque<usize>; 2] = Default::default();
+    for (i, &inst) in installed.iter().enumerate() {
+        pools[usize::from(!inst)].push_back(i);
+    }
+    let share = web / (1. + web);
+    let mut taken = 0.;
+    (0..installed.len()).map(|i| {
+        // A website chart only once its share is due, so a list never opens with one.
+        let side = usize::from(!pools[1].is_empty() && (pools[0].is_empty() || taken + 1. <= share * (i + 1) as f64 + 1e-9));
+        taken += side as f64;
+        pools[side].pop_front().unwrap()
+    }).collect()
+}
+
+/// pp_playlist.preview for Python rows: the order of [(identity, weight)].
+#[pyfunction]
+pub fn preview_order(rows: Vec<(String, f64)>, seed: &str, focus: f64) -> Vec<usize> {
+    let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    shuffle_order(&ids, &rows.iter().map(|r| r.1).collect::<Vec<_>>(), seed, focus)
+}
+
+/// nps.mix for Python rows: the order of their installed flags.
+#[pyfunction]
+pub fn mix_order(installed: Vec<bool>, web: f64) -> Vec<usize> {
+    mix(&installed, web)
+}
+
+/// BLAKE2b (RFC 7693) with an 8-byte digest, unkeyed: hashlib.blake2b(data, digest_size=8).digest().
+fn blake2b8(data: &[u8]) -> [u8; 8] {
+    const IV: [u64; 8] = [0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+                          0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179];
+    const SIGMA: [[usize; 16]; 10] = [
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+        [11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4], [7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8],
+        [9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13], [2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9],
+        [12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11], [13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10],
+        [6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5], [10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0],
+    ];
+    let mut h = IV;
+    h[0] ^= 0x0101_0000 ^ 8;
+    let compress = |h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool| {
+        let m: Vec<u64> = block.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let mut v = [0u64; 16];
+        v[..8].copy_from_slice(h);
+        v[8..].copy_from_slice(&IV);
+        v[12] ^= t as u64;
+        v[13] ^= (t >> 64) as u64;
+        if last {
+            v[14] = !v[14];
+        }
+        let g = |v: &mut [u64; 16], a: usize, b: usize, c: usize, d: usize, x: u64, y: u64| {
+            v[a] = v[a].wrapping_add(v[b]).wrapping_add(x);
+            v[d] = (v[d] ^ v[a]).rotate_right(32);
+            v[c] = v[c].wrapping_add(v[d]);
+            v[b] = (v[b] ^ v[c]).rotate_right(24);
+            v[a] = v[a].wrapping_add(v[b]).wrapping_add(y);
+            v[d] = (v[d] ^ v[a]).rotate_right(16);
+            v[c] = v[c].wrapping_add(v[d]);
+            v[b] = (v[b] ^ v[c]).rotate_right(63);
+        };
+        for round in 0..12 {
+            let s = &SIGMA[round % 10];
+            g(&mut v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
+            g(&mut v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
+            g(&mut v, 2, 6, 10, 14, m[s[4]], m[s[5]]);
+            g(&mut v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
+            g(&mut v, 0, 5, 10, 15, m[s[8]], m[s[9]]);
+            g(&mut v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
+            g(&mut v, 2, 7, 8, 13, m[s[12]], m[s[13]]);
+            g(&mut v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+        }
+        for i in 0..8 {
+            h[i] ^= v[i] ^ v[i + 8];
+        }
+    };
+    let mut t: u128 = 0;
+    let mut chunks = data.chunks(128).peekable();
+    if data.is_empty() {
+        compress(&mut h, &[0; 128], 0, true);
+    }
+    while let Some(c) = chunks.next() {
+        let mut block = [0u8; 128];
+        block[..c.len()].copy_from_slice(c);
+        t += c.len() as u128;
+        compress(&mut h, &block, t, chunks.peek().is_none());
+    }
+    h[0].to_le_bytes()
+}
+
+/// Registers the choice types.
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<Choices>()?;
+    m.add_class::<ChoiceList>()?;
+    m.add_class::<Prepared>()?;
+    m.add_function(wrap_pyfunction!(preview_order, m)?)?;
+    m.add_function(wrap_pyfunction!(mix_order, m)?)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blake2b_matches_hashlib() {
+        // hashlib.blake2b(data, digest_size=8).hexdigest()
+        let hex = |b: [u8; 8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        assert_eq!(hex(blake2b8(b"9:abc")), "813f29f73b38f7d5");
+        assert_eq!(hex(blake2b8(b"")), "e4a6a0577479b2b4");
+        assert_eq!(hex(blake2b8(&[b'x'; 300])), "12b539c1cad94615");
+        assert_eq!(hex(blake2b8(b"123456789:0123456789abcdef0123456789abcdef")), "a9633b2b960a21fb");
+    }
+}

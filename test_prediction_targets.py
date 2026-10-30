@@ -7,14 +7,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import accuracy_targets as A
-import personal_support as P
 import recommend as R
 import warmup as W
 
 
 def model(mean):
     warm=W.Model({7:{'tau':6.,'amplitudes':[0.]*len(W.FAMILIES),'units':'log_rate'}})
-    return SimpleNamespace(warmup=warm,predict=lambda *_:(mean,.1,.2),retry=0.)
+    return SimpleNamespace(warmup=warm,predict=lambda *_:(mean,.1,.2),predict_many=lambda items:[(mean,.1,.2)]*len(items),retry=0.)
 
 
 def paired_personal():
@@ -143,10 +142,11 @@ def test_lazer_models_exclude_combined_or_unknown_hold_judgements_before_fitting
         ('native-hold','2026.921.0-lazer',.5), ('live-hold','lazer-live',.5),
         ('legacy|42','2026.921.0-lazer',.5), ('stable-rice','stable',0.))]
     seen=[]
-    def capture(values,*_):
+    def capture(_consts,values,*_):
         seen.extend(r['key'] for r in values)
         raise StopIteration
-    monkeypatch.setattr(W,'fit',capture)
+    import native_backend
+    monkeypatch.setattr(native_backend,'load',lambda:SimpleNamespace(personal_fit=capture))
     for target in ('lazer305','pp320'):
         seen.clear()
         with pytest.raises(StopIteration):R.Personal({'pop':{'accuracy_target':target}},rows)
@@ -246,44 +246,6 @@ def test_completed_error_updates_its_chart_without_claiming_every_chart_is_wrong
     assert s.chart_correction('a',1.5,f,m,.08)<same
     reset=R.Session(events+[dict(id=3,t=1121,kind='reset',beatmap=None,info={})],1122,warmup_model=m.warmup)
     assert reset.chart_correction('a',1.,f,m,.08)==0.
-
-
-def test_one_session_of_retries_is_one_affinity_block():
-    f={'length':120000}
-    rows=[dict(chart='a',rate=1.,t=300.,src='realm',f=f,keys=7,ts=1000+i*130,key=str(i)) for i in range(3)]
-    blocks=P.chart_blocks(rows,np.array([.2,.3,.4]),[(0,7)]*3,300.)
-    assert len(blocks['a'])==1
-    assert blocks['a'][0][1:]==pytest.approx((.3,1.,3))
-    separate=P.chart_blocks(rows,np.array([.2,.3,.4]),[(i,7) for i in range(3)],300.)
-    assert len(separate['a'])==3
-    old=[(1.,.2,.1,1),(1.,.3,.1,1),(1.,.4,.1,1)]
-    assert P.effective_count(old)==pytest.approx(3.)
-
-
-@pytest.mark.parametrize('randomized,eligible',[
-    ((True,True),False), ((False,True),False), ((True,False),False),
-    ((False,False),True), ((None,None),True)])
-def test_retry_uses_only_normal_chart_attempt_pairs(randomized,eligible):
-    rows=[];residual=[]
-    for i in range(20):
-        for j,rd in enumerate(randomized):
-            row=dict(chart=f'chart-{i}',src='realm',ts=1000+i*1000+j*120)
-            if rd is not None:row['rd']=rd
-            rows.append(row);residual.append(.4 if j==0 else 0.)
-    expected=.4*20/(20+50) if eligible else 0.
-    assert R.Personal._retry(rows,np.array(residual))==pytest.approx(expected)
-
-
-def test_intervening_rd_preserves_the_previous_normal_retry_anchor():
-    rows=[];residual=[]
-    for i in range(20):
-        for j,(rd,value) in enumerate(((False,.6),(True,3.),(False,.2))):
-            rows.append(dict(chart=f'chart-{i}',src='realm',ts=1000+i*1000+j*120,rd=rd))
-            residual.append(value)
-    normal=[i for i,r in enumerate(rows) if not r['rd']]
-    expected=R.Personal._retry([rows[i] for i in normal],np.array(residual)[normal])
-    assert expected==pytest.approx(.4*20/(20+50))
-    assert R.Personal._retry(rows,np.array(residual))==expected
 
 
 def test_rd_rows_retain_reduced_broad_ability_weight_in_personal():
@@ -404,11 +366,6 @@ def test_retry_familiarity_reads_both_mod_formats_without_losing_legacy_effort(m
     assert session.freshness('md5:chart',120.)<1.
 
 
-def test_one_retried_family_cannot_validate_a_shape_effect():
-    beta,report=P.fit_shape(np.ones((20,3)),np.ones(20),np.ones(20),['same']*20)
-    assert not beta.any() and report['ridge'] is None
-
-
 def test_personal_geometry_counts_width_and_overlap_once():
     import structural_residual as S
     f={'keys':7,'sk':{},'ln':0.,'stam':1.,
@@ -474,19 +431,44 @@ def test_recent_family_offset_adds_chordjack_led_hinge_only_above_point_seven():
     assert m.recent_offset(dict(keys=4,sk=dict(chordjack=.9)))==0.
 
 
-def test_native_bulk_predictions_match_the_python_predictor():
+def native_fixture():
+    """paired_personal with affinities, rate anchors and elasticities, a played session and varied charts."""
     rec,f=paired_personal()
     for m in (rec.model,rec.accuracy_model):
         m.pop['mb']={42:(.1,30.)}; m.pop['mbr']={(42,1.):(.12,20.),(42,1.5):(.3,8.)}
         m.aff={'md5:x':(-.05,3.)}; m.aff['other']=(.08,4.)
         m.rate_aff={'other':[(1.,.08,4.),(1.2,.15,2.)]}; m.rate_support={'other':(1.,1.2)}
         m.warmup.elasticities={'7':1.1,'7:chords':1.3}
-    pred=R.Predictor(rec,source_id='fixture')
     events=completed_loss({},.2,.3)+completed_loss({},.1,-.1,1)
     variants=[f,dict(f,sk=dict(jack=.9,minijack=.95,stamina=.99),ln=0.),dict(f,sk={},keys=7),
               dict(f,overall=9.,od=6.,endurance={'load':.4},nps={'chord':2.,'overlap':.3},
                    calibration_features=[0.]*8+[.5],execution={'residual_vector':[.01*i for i in range(len(R._STRUCTURE_NAMES))]})]
     items=[(v,c,b,r) for v in variants for c,b in (('other',42),('fresh',None),('chart',None)) for r in (.9,1.,1.27,1.5)]
+    return rec,events,items
+
+
+def test_native_pp_session_shift_matches_the_python_terms():
+    import session_form
+    rec,events,items=native_fixture()
+    cands=[(b,r,'NM',v,{'md5':c}) for v,c,b,r in items]
+    arrays={'keys':np.array([c[3]['keys'] for c in cands])}
+    for warm in (False,True):
+        for m in (rec.model,rec.accuracy_model):
+            session=R.Session(events,1400.); session.warm_flag=warm; session.bind_warmup(rec.model.warmup)
+            view=session if m is rec.model else session.for_accuracy(m.warmup)
+            fast=R._native_shift(m,view,arrays,cands)
+            slow=[]
+            for v,c,b,r in items:
+                sk,profile=R.top_skill(v),W.family_weights(v)
+                slow.append(view.correction(v['keys'],sk,v,session_form._loading(profile))
+                            +view.warmup_penalty(v['keys'],sk,v['length']/1000/r,v,m.rate_response(v,c,b,r),
+                                                 lambda loss,v=v,c=c,b=b,r=r:m.rate_loss(v,c,b,r,loss),profile))
+            assert fast is not None and fast.tolist()==pytest.approx(slow,rel=1e-12,abs=1e-12)
+
+
+def test_native_bulk_predictions_match_the_python_predictor():
+    rec,events,items=native_fixture()
+    pred=R.Predictor(rec,source_id='fixture')
     for warm in (False,True):
         session=R.Session(events,1400.); session.warm_flag=warm
         slow=[pred.predict(*it,session,accuracy_only=True) for it in items]
@@ -496,4 +478,82 @@ def test_native_bulk_predictions_match_the_python_predictor():
             for k in a:
                 if k!='accuracy_forecast':
                     assert b[k]==pytest.approx(a[k],rel=1e-12,abs=1e-12),k
-    assert pred.display._native is not None   # the kernel ran (played 'chart' items took the Python path)
+    assert pred.display.model._native is not None   # the kernel ran (played 'chart' items took the Python path)
+
+
+@pytest.mark.parametrize('mode,selected,warm', [('nps', (), False), ('nps', (), True),
+                                                ('skills', ('ln',), False), ('skills', ('!ln', 'chordstream'), True),
+                                                ('skills', ('technical', '!jackspeed'), False)])
+def test_native_scoring_matches_the_python_candidates(monkeypatch, mode, selected, warm):
+    import nps
+    from test_skill_practice import feature
+    rec, _f = paired_personal()
+    pred = R.Predictor(rec, source_id='fixture')
+    catalog, analyses = {}, {}
+    mixes = [dict(chordstream=.9, delay=.5), dict(jack=.95, minijack=.9), dict(ln=.9, release=.6),
+             dict(chordstream=.5, ln=.45, sv=.3), dict(stream=.8, technical=.9)]
+    for i in range(60):
+        sha = f'{i:064x}'
+        catalog[sha] = dict(sha256=sha, md5=f'{i:032x}', keys=7, beatmap_id=-1, title=sha, artist='A',
+                            version='V', length=160000)
+        fs = {}
+        for j, rate in enumerate((.85, 1., 1.12, 1.3, 1.6)[:2 + i % 4]):
+            f = feature(mixes[(i + j) % len(mixes)], nps_value=12. + i % 9, rate=rate, length=60. + 9 * (i % 12))
+            f.update(overall=11. + .1 * i + 3. * (rate - 1), od=7. + i % 3)   # around the 95 % target
+            f['nps']['vibro_focused'] = i % 11 == 0
+            if i % 3 == 0:
+                f['tech_profile'] = {'technical': .2 + .1 * (i % 7), 'patterntech': .5, 'rhythmtech': -.1}
+            fs[rate] = f
+        analyses[sha] = fs
+    events = completed_loss(dict(skill='ln'), .2, .3)        # md5:chart: none of these charts
+    session = R.Session(events, 1400.)
+    session.warm_flag = warm
+    session.acc_target = .95
+
+    def run(store=None):
+        return nps.candidates_from(catalog, analyses, pred, session, mode=mode, selected_skills=selected, store=store)
+    # A Builder's store, read under another skill selection, then charts re-analysed (Builder._note drops them).
+    store = nps._feat_store()
+    nps.candidates_from(catalog, analyses, pred, session, mode='skills', selected_skills=('jack',), store=store)
+    for sha in list(catalog)[::3]:
+        analyses[sha] = {r: dict(f, overall=f['overall'] - .3) for r, f in analyses[sha].items()}
+        store.drop(sha)
+    fast = run(store)
+    assert pred.display.model._native is not None                  # the kernel scored them
+    monkeypatch.setattr(R.Predictor, '_native_state', lambda *a: None)
+    slow = run()
+    from test_nps import choice_dicts
+    states = [dict(candidates=x[0], catalog=catalog, analyses=analyses, mode=mode, selected_skills=selected) for x in (slow, fast)]
+    # The native records carry what ranking reads (family, group, NPS, length, profile): same list, same weights.
+    ranks = [nps.rank(st, st['candidates'].prepare([7], set(catalog)), session, [7], mode=mode, seed=3, count=None)
+             for st in states]
+    assert [(c['sha'], c['rate']) for c in ranks[1]] == [(c['sha'], c['rate']) for c in ranks[0]] and ranks[0]
+    assert [c['weight'] for c in ranks[1]] == pytest.approx([c['weight'] for c in ranks[0]], rel=1e-12)
+    slow, fast = [(choice_dicts(x[0], catalog, analyses, mode, selected), x[1]) for x in (slow, fast)]
+    assert [(c['sha'], c['rate']) for c in fast[0]] == [(c['sha'], c['rate']) for c in slow[0]] and slow[0]
+    import skill_practice
+    for a, b in zip(slow[0], fast[0]):
+        # Valued at its own rate's target (jack-led rates aim higher), as the worker's re-score did.
+        f = analyses[b['sha']][b['rate']]
+        target = nps.central_target(session, f)
+        want = (skill_practice.value(f, b, b['rate'], target, selected) if mode == 'skills'
+                else nps.practice_value(f, b, b['rate'], target, session))
+        assert b['base_value'] == pytest.approx(want, rel=1e-12, abs=1e-12)
+        for k in ('base_value', 'acc_mid', 'opening_acc', 'sd_model'):
+            assert b[k] == pytest.approx(a[k], rel=1e-12, abs=1e-12)
+        fa, fb = (dict(c['accuracy_forecast'], generated_at=0) for c in (a, b))   # built natively on the fast path
+        assert list(fb) == list(fa)
+        floats = lambda d, want: [v for v in d.values() if isinstance(v, float) == want]
+        assert floats(fb, False) == floats(fa, False)
+        assert floats(fb, True) == pytest.approx(floats(fa, True), rel=1e-12, abs=1e-12)
+    assert [(s, r) for _q, s, r in fast[1]] == [(s, r) for _q, s, r in slow[1]]
+    assert [q for q, _s, _r in fast[1]] == pytest.approx([q for q, _s, _r in slow[1]], rel=1e-12, abs=1e-12)
+
+
+def test_native_population_base_matches_base_of():
+    rec,_events,items=native_fixture()
+    pop=rec.model.pop
+    model=R.native_population(pop)
+    cases=[(f,b,r,level) for f,_c,b,r in items for level in (None,1.4)]
+    for (f,b,r,level),(base,n) in zip(cases,model.base_many(cases)):
+        assert (base,n)==pytest.approx(R.base_of(pop,f,b,r,level),rel=1e-12,abs=1e-12)

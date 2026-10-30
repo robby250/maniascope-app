@@ -82,6 +82,11 @@ def dimensions(keys):
     return {node.key: node for parent in tree(keys) for node in (parent, *parent.children)}
 
 
+def native_tree():
+    """dimensions() of 4K and of wider keymodes as [(key, members)], for the native FeatStore's match."""
+    return [[(node.key, list(node.members)) for node in dimensions(k).values()] for k in (4, 7)]
+
+
 _ALL = {node.key: node for keys in (4, 7) for node in dimensions(keys).values()}
 NAMES = {key: node.name for key, node in _ALL.items()}
 MEMBERS = {key: node.members for key, node in _ALL.items()}
@@ -199,7 +204,7 @@ def strengths(f):
     return dict(_strengths(f.get('keys', 7), tuple(f.get('sk', {}).items())))
 
 
-@lru_cache(maxsize=32768)
+@lru_cache(maxsize=262144)
 def _strengths(keys, skills):
     sk = dict(skills)
     return tuple((key, max((max(0., sk.get(k, 0.)) for k in node.members), default=0.))
@@ -225,7 +230,9 @@ def match(f, selected=None):
                   tuple((f.get('tech_profile') or {}).items()), normalize(selected))
 
 
-@lru_cache(maxsize=32768)
+# Above a library's chart-rates: at 32,768 a large library evicted every entry before its next use, and a Skills
+# request recomputed every chart's strengths on each builder pass (15 s on the bench library).
+@lru_cache(maxsize=262144)
 def _match(keys, skills, profile, selected):
     f = {'keys': keys, 'sk': dict(skills), 'tech_profile': dict(profile)}
     values = strengths(f)

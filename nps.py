@@ -5,16 +5,14 @@ installed catalogue, recomputable structure and rate work, and the NPS objective
 """
 import collections
 import hashlib
-import heapq
-import json
 import math
 import os
-import random
 import threading
 import time
 
 import numpy as np
 
+import accuracy_targets
 import recdata
 import skill_practice
 
@@ -242,6 +240,7 @@ class Builder(threading.Thread):
         self._current = set()
         self._lead = {}
         self._loaded_rowid = 0
+        self._store = None                  # native FeatStore of _analyses (_native_scores)
 
     def configure(self, predictor, session, keys, revision, generation, skills_keys=(), selected_skills=(), active_mode="nps"):
         with self.cv:
@@ -252,6 +251,8 @@ class Builder(threading.Thread):
     def _note(self, sha):
         """Keep `current` (charts analysed with this STRUCTURE_VERSION) in step with an analyses change.
         Answering it from the features on every publish decoded every website chart each time."""
+        if self._store is not None:
+            self._store.drop(sha)
         if any(f.get("nps", {}).get("version") == STRUCTURE_VERSION for f in self._analyses[sha].values()):
             self._current.add(sha)
         else:
@@ -308,6 +309,7 @@ class Builder(threading.Thread):
             self._catalog = {s: i for s, i in full.items() if i["keys"] in allowed}
             self._catalog_key = catalog_key
             self._analyses = collections.defaultdict(dict)
+            self._store = _feat_store()
             self._current = set()
             self._loaded_rowid = 0
             # Website charts join NPS and Skills alike, marked not installed (Next offers the download).
@@ -351,15 +353,23 @@ class Builder(threading.Thread):
             if not rows:
                 self._loaded_rowid = upper      # skip an irrelevant calculator tail
                 break
+            legacy = []
             for row in rows:
                 self._loaded_rowid = row["rowid"]
                 try:
                     sha, rate = row["key"].split("@", 1)
                     if sha in catalog:
-                        analyses[sha][float(rate.split("|")[0])] = json.loads(row["data"])
+                        f = analyses[sha][float(rate.split("|")[0])] = recdata.feats_load(row["data"])
                         self._note(sha)
+                        if isinstance(row["data"], str):
+                            legacy.append((recdata.feats_dump(f), row["rowid"], row["data"]))
                 except (ValueError, TypeError):
                     continue                   # recompute a damaged derived entry
+            if legacy:
+                # JSON rows from before the binary form, rewritten once in place (same rowid, so this cursor
+                # stays valid); a row another connection replaced meanwhile keeps the newer data.
+                with db:
+                    db.executemany("UPDATE feats SET data=? WHERE rowid=? AND data=?", legacy)
         for sha, inst in catalog.items():
             b = pred.md5_bid.get(inst["md5"])
             pub = pred.pub["feats"].get(b, {})
@@ -374,10 +384,13 @@ class Builder(threading.Thread):
         # leading charts go first, so the shown list follows the new session within a second.
         lead = [s for s in self._lead.get(active_mode, ()) if s in catalog]
         if lead:
-            quick, _ = candidates_from({s: catalog[s] for s in lead}, analyses, pred, session, mode=active_mode,
-                                       selected_skills=selected_skills, predictions=predictions)
+            subset = {s: catalog[s] for s in lead}
+            quick, _ = candidates_from(subset, analyses, pred, session, mode=active_mode,
+                                       selected_skills=selected_skills, predictions=predictions, store=self._store)
             self.emit("ready", {"states": {active_mode: {
-                              "candidates": quick, "total": len(catalog), "analyzed": sum(s in current for s in catalog),
+                              "candidates": quick, "catalog": subset, "analyses": analyses,
+                              "mode": active_mode, "selected_skills": selected_skills,
+                              "total": len(catalog), "analyzed": sum(s in current for s in catalog),
                               "failed": 0, "error": error, "partial": True}},
                           "keys_by_mode": keys_by_mode, "selected_skills": selected_skills, "revision": revision,
                           "generation": generation})
@@ -415,12 +428,13 @@ class Builder(threading.Thread):
         refined = set()
         refined_counts = collections.Counter()
         refinement_groups = collections.Counter()
-        evaluated = {active_mode: {}}
+        evaluated = {mode: choices_for(subset, pred) for mode, subset in catalogs.items()}
         def publish(candidates):
             states = {}
             for mode, subset in catalogs.items():
-                self._lead[mode] = [c["sha"] for c in sorted(candidates[mode], key=lambda c: -c["base_value"])[:LEAD]]
-                states[mode] = {"candidates": candidates[mode], "total": len(subset),
+                self._lead[mode] = candidates[mode].lead(LEAD)
+                states[mode] = {"candidates": candidates[mode], "catalog": subset, "analyses": analyses, "mode": mode,
+                    "selected_skills": selected_skills, "total": len(subset),
                     "analyzed": sum(s in current for s in subset),
                     "failed": sum(s in bad for s in subset), "error": error}
             self.emit("ready", {"states": states, "keys_by_mode": keys_by_mode,
@@ -436,11 +450,12 @@ class Builder(threading.Thread):
                 continue
             pass_start = time.monotonic()
             candidates, fronts = {}, {}
+            blocked = {sha for sha, n in refined_counts.items() if n >= 6} | set(bad)
             for mode, subset in catalogs.items():
                 candidates[mode], fronts[mode] = candidates_from(
                     subset, analyses, pred, session, memo=evaluated[mode], mode=mode,
-                    selected_skills=selected_skills, predictions=predictions,
-                    skip_proposal=lambda sha, rate: (sha, rate) in refined or refined_counts[sha] >= 6 or sha in bad)
+                    selected_skills=selected_skills, predictions=predictions, store=self._store,
+                    skip=(refined, blocked))
             if time.monotonic() - last_publish > 10 or count == 0:
                 publish(candidates)
                 last_publish = time.monotonic()
@@ -465,7 +480,9 @@ class Builder(threading.Thread):
                     refined.add((sha, rate))
                     refined_counts[sha] += 1
                     refinement_groups[proposal_group((_score, sha, rate))] += 1
-                    if len(jobs) >= 2:
+                    # 32 a pass: every pass rescans the library, and at 2 a pass the 160 refinements of a
+                    # request took ~80 passes (~20 s on the bench library); 32 analyse in ~0.1 s.
+                    if len(jobs) >= 32:
                         break
             def take():
                 """The next queued maps: analysed ones at a new rate (enrich) and never-analysed ones."""
@@ -513,9 +530,9 @@ class Builder(threading.Thread):
                             analyses[sha][rate] = f
                             self._note(sha)
                             db.execute("INSERT OR REPLACE INTO feats VALUES (?,?)",
-                                       (f"{sha}@{rate:.3f}|{calc}", json.dumps(f)))
+                                       (f"{sha}@{rate:.3f}|{calc}", recdata.feats_dump(f)))
                     for memo in evaluated.values():
-                        memo.pop(sha, None)
+                        memo.drop(sha)
                     for rate in fs:
                         predictions.pop((sha, rate), None)
                     count += 1
@@ -570,119 +587,203 @@ def practice_value(f, expected, rate, target, session):
             -(.35+1.-ready)*expected['sd_model']-quality_penalty(length,st,rate))
 
 
-def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=lambda _s, _r: False,
-                    mode="nps", selected_skills=(), predictions=None):
-    """Return exact-rate choices and a diverse frontier of cheap rate proposals."""
+def choices_for(catalog, pred):
+    """The native choice set of one request over `catalog` (candidates_from's memo across the Builder's passes)."""
+    import native_backend, recommend
+    return native_backend.load().Choices(list(catalog), pred.calc, pred.predictor_id, recommend.BAND_Z)
+
+
+def candidates_from(catalog, analyses, pred, session, memo=None, skip=((), ()), mode="nps", selected_skills=(),
+                    predictions=None, store=None):
+    """Return the exact-rate choices (a native ChoiceList: one per chart, materialize() builds a shown one's
+    dict) and a diverse frontier of cheap rate proposals [(quality, sha, rate)].
+    memo: the request's Choices (choices_for); charts whose analysis changed are dropped from it, and only
+    unscored charts are scored again. skip: (refined (sha, rate) pairs, blocked shas) left off the frontier."""
     # The model/session are fixed for one Builder request. Re-evaluate only
     # charts whose analysis changed, rather than predict the whole library on
     # every small feature batch. No cached value crosses a model/session update.
-    memo = {} if memo is None else memo
+    memo = choices_for(catalog, pred) if memo is None else memo
     predictions = {} if predictions is None else predictions
-    choices, proposals = [], []
-    # Every missing prediction in one native batch (recommend.Predictor.predict_many).
-    rateable = {sha: list(_rateable(analyses[sha], mode, selected_skills)) for sha in catalog if sha not in memo}
+    todo = memo.unscored()
+    left = _native_scores(pred, catalog, analyses, session, todo, mode, selected_skills, memo, store)
+    # The rest (charts played in the session window, models the kernel doesn't cover): every missing
+    # prediction in one batch (recommend.Predictor.predict_many), then the Python scoring below.
+    rateable = {sha: list(_rateable(analyses[sha], mode, selected_skills)) for sha in left}
     _predict_all(pred, catalog, session, predictions,
                  [(sha, rate, f) for sha, rfs in rateable.items() for rate, f in rfs])
-    for sha, inst in catalog.items():
-        if sha in memo:
-            choice, proposal = memo[sha]
-            if choice is not None:
-                choices.append(choice)
-            if proposal is not None and not skip_proposal(sha, proposal[2]):
-                proposals.append(proposal)
-            continue
-        memo[sha] = [None, None]
-        fs = analyses[sha]
-        rated = [(rate, f, predictions[(sha, rate)]) for rate, f in rateable[sha]]
-        if not rated:
-            continue
-        target = central_target(session, rated[0][1])
-        missed = missed_rates(session, inst, target)
-        anchor = min(rated, key=lambda r: abs(rate_shift(r[2], session, r[1], target)))
-        r, f, e = anchor
-        # y=log(1-accuracy) is near-linear in log-rate locally. This is ONLY a
-        # proposal: the subprocess calculates the proposed rounded rate exactly.
-        slope = e.get('rate_slope') or rate_slope(pred, f)
-        if len(rated) > 1:
-            nearest = sorted((v for v in rated if abs(v[0] - r) > .015), key=lambda v: abs(v[0] - r))
-            if nearest:
-                rr, _ff, ee = nearest[0]
-                empirical = (math.log(max(1e-6, 1 - ee["acc_mid"])) - math.log(max(1e-6, 1 - e["acc_mid"]))) / math.log(rr / r)
-                if empirical > .2:
-                    slope = min(8., max(.5, empirical))
-        shift = rate_shift(e, session, f, target) / slope
+    for sha in left:
+        memo.put(sha, *_python_choice(sha, catalog[sha], analyses[sha], rateable[sha], pred, session, predictions,
+                                      mode, selected_skills))
+    refined, blocked = skip
+    return memo.snapshot(), memo.proposals(list(refined), set(blocked))
+
+
+def _python_choice(sha, inst, fs, rateable, pred, session, predictions, mode, selected_skills):
+    """(choice dict or None, proposal (quality, sha, rate, (keys, group)) or None) of a chart the native
+    scoring leaves out, by the same rules."""
+    rated = [(rate, f, predictions[(sha, rate)]) for rate, f in rateable]
+    if not rated:
+        return None, None
+    target = central_target(session, rated[0][1])
+    missed = missed_rates(session, inst, target)
+    anchor = min(rated, key=lambda r: abs(rate_shift(r[2], session, r[1], target)))
+    r, f, e = anchor
+    # y=log(1-accuracy) is near-linear in log-rate locally. This is ONLY a
+    # proposal: the subprocess calculates the proposed rounded rate exactly.
+    slope = e.get('rate_slope') or rate_slope(pred, f)
+    if len(rated) > 1:
+        nearest = sorted((v for v in rated if abs(v[0] - r) > .015), key=lambda v: abs(v[0] - r))
+        if nearest:
+            rr, _ff, ee = nearest[0]
+            empirical = (math.log(max(1e-6, 1 - ee["acc_mid"])) - math.log(max(1e-6, 1 - e["acc_mid"]))) / math.log(rr / r)
+            if empirical > .2:
+                slope = min(8., max(.5, empirical))
+    shift = rate_shift(e, session, f, target) / slope
+    proposal = round(min(MAX_RATE, max(MIN_RATE, r * math.exp(shift))), 2)
+    if not eligible(e, session, f) and proposal in fs and shift:
+        # A hundredth-rate rounding cell can straddle the opening guard.
+        # Do not stop at an ineligible 1.35 because the root rounds back to
+        # 1.35: inspect the next unanalysed grid point toward feasibility.
+        direction = -1 if shift < 0 else 1
+        step = math.floor(r*100-1e-8) if direction < 0 else math.ceil(r*100+1e-8)
+        while MIN_RATE <= step/100 <= MAX_RATE and step/100 in fs:
+            step += direction
+        if MIN_RATE <= step/100 <= MAX_RATE:
+            proposal = step/100
+    if round(r, 2) in missed:
+        # the anchor is a rate you just missed: move from your result, not the forecast
+        shift = (math.log(1. - target) - math.log(max(1e-6, 1. - missed[round(r, 2)]))) / slope
         proposal = round(min(MAX_RATE, max(MIN_RATE, r * math.exp(shift))), 2)
-        if not eligible(e, session, f) and proposal in fs and shift:
-            # A hundredth-rate rounding cell can straddle the opening guard.
-            # Do not stop at an ineligible 1.35 because the root rounds back to
-            # 1.35: inspect the next unanalysed grid point toward feasibility.
-            direction = -1 if shift < 0 else 1
-            step = math.floor(r*100-1e-8) if direction < 0 else math.ceil(r*100+1e-8)
-            while MIN_RATE <= step/100 <= MAX_RATE and step/100 in fs:
-                step += direction
-            if MIN_RATE <= step/100 <= MAX_RATE:
-                proposal = step/100
-        if round(r, 2) in missed:
-            # the anchor is a rate you just missed: move from your result, not the forecast
-            shift = (math.log(1. - target) - math.log(max(1e-6, 1. - missed[round(r, 2)]))) / slope
-            proposal = round(min(MAX_RATE, max(MIN_RATE, r * math.exp(shift))), 2)
-            if proposal == round(r, 2):
-                proposal = round(min(MAX_RATE, max(MIN_RATE, r + (.01 if shift > 0 else -.01))), 2)
+        if proposal == round(r, 2):
+            proposal = round(min(MAX_RATE, max(MIN_RATE, r + (.01 if shift > 0 else -.01))), 2)
+    st = f["nps"]
+    proposed=dict(f,nps=dict(st,nps=st['nps']*proposal/r))
+    quality = practice_value(proposed,dict(e,acc_mid=target),proposal,target,session)
+    if mode == "skills":
+        quality = skill_practice.value(f, dict(e, acc_mid=target), proposal, target, selected_skills)
+    # More than a few exact refinements per chart per request is not useful.
+    item = None
+    if quality is not None and proposal not in fs and (not eligible(e,session,f) or abs(e['acc_mid']-target) > .003
+                               or round(r, 2) in missed):
+        item = (quality, sha, proposal, (inst["keys"], group(f)))
+    best = None
+    for rate, f, e in rated:
         st = f["nps"]
-        proposed=dict(f,nps=dict(st,nps=st['nps']*proposal/r))
-        quality = practice_value(proposed,dict(e,acc_mid=target),proposal,target,session)
-        if mode == "skills":
-            quality = skill_practice.value(f, dict(e, acc_mid=target), proposal, target, selected_skills)
-        # More than a few exact refinements per chart per request is not useful.
-        if proposal not in fs and (not eligible(e,session,f) or abs(e['acc_mid']-target) > .003
-                                   or round(r, 2) in missed):
-            item = (quality, sha, proposal, (inst["keys"], group(f)))
-            memo[sha][1] = item
-            if not skip_proposal(sha, proposal):
-                proposals.append(item)
-        best = None
-        for rate, f, e in rated:
-            st = f["nps"]
-            if round(rate, 2) in missed or not eligible(e, session, f) or (st.get("vibro_focused")
-                    and not (mode == "skills" and skill_practice.wants_vibro(selected_skills))):
-                continue
-            value = practice_value(f,e,rate,target,session)
-            if mode == "skills":
-                value = skill_practice.value(f, e, rate, target, selected_skills)
-                if value is None:
-                    continue
-            if best is None or value > best[0]:
-                best = (value, rate, f, e)
-        if best is None:
+        if round(rate, 2) in missed or not eligible(e, session, f) or (st.get("vibro_focused")
+                and not (mode == "skills" and skill_practice.wants_vibro(selected_skills))):
             continue
-        value, rate, f, e = best
-        st = f["nps"]
-        bid = inst["beatmap_id"] if (inst["beatmap_id"] or 0) > 0 else None
-        online_match = bool(bid and inst.get("online_md5") and inst["online_md5"] == inst["md5"])
-        choices.append(dict(e, sha=sha, sha256=sha, md5=inst["md5"], bid=bid,
-                            title=f'{inst["artist"]} - {inst["title"]} [{inst["version"]}]',
-                            search_meta={"Artist": inst["artist"], "Title": inst["title"],
-                                         "Version": inst["version"], "Creator": inst.get("creator")},
-                            keys=inst["keys"], rate=rate, var=rate_label(rate), nps=st["nps"],
-                            length=st["play_span"] / rate, skill=description(f), description=description(f),
-                            family=st["family"], group=group(f), profile=profile(f).tolist(), f=f,
-                            installed=inst.get("installed", True), playcount=inst.get("playcount"),
-                            online_match=online_match, purpose=mode, base_value=value,
-                            why="Local map at a personally suitable rate", mode=mode,
-                            practice_skills=skill_practice.normalize(selected_skills) if mode == "skills" else (),
-                            matched_skills=skill_practice.match(f, selected_skills)[1] if mode == "skills" else ()))
-        memo[sha][0] = choices[-1]
-    # Keep patterns before imposing a global limit. This is retention, not quotas.
-    by = collections.defaultdict(list)
-    for item in proposals:
-        by[item[3]].append(item)
-    kept = heapq.nlargest(24, proposals)
-    for values in by.values():
-        kept += heapq.nlargest(4, values)
-    unique = {(s, r): (v, s, r) for v, s, r, _g in kept}
-    # Keep the actual eligible population: an equal per-category frontier would
-    # turn a rare SV category into the same sampling mass as thousands of rice maps.
-    return choices, sorted(unique.values(), reverse=True)
+        value = practice_value(f,e,rate,target,session)
+        if mode == "skills":
+            value = skill_practice.value(f, e, rate, target, selected_skills)
+            if value is None:
+                continue
+        if best is None or value > best[0]:
+            best = (value, rate, f, e)
+    if best is None:
+        return None, item
+    value, rate, f, e = best
+    # Picked with the first rate's target; valued with its own (jack-led rates aim higher).
+    value = (skill_practice.value(f, e, rate, central_target(session, f), selected_skills) if mode == "skills"
+             else practice_value(f, e, rate, central_target(session, f), session))
+    if value is None:
+        return None, item
+    return _choice(sha, inst, rate, fs, e, value, mode, selected_skills), item
+
+
+def _choice(sha, inst, rate, fs, e, value, mode, selected_skills):
+    """One exact-rate choice: the prediction, the chart's features and card fields, and this request's value.
+    fs: the chart's rate → features."""
+    f = fs[rate]
+    st = f["nps"]
+    bid = inst["beatmap_id"] if (inst["beatmap_id"] or 0) > 0 else None
+    return dict(e, sha=sha, sha256=sha, md5=inst["md5"], bid=bid,
+                title=f'{inst["artist"]} - {inst["title"]} [{inst["version"]}]',
+                search_meta={"Artist": inst["artist"], "Title": inst["title"],
+                             "Version": inst["version"], "Creator": inst.get("creator")},
+                keys=inst["keys"], rate=rate, var=rate_label(rate), nps=st["nps"],
+                length=st["play_span"] / rate, skill=description(f), description=description(f),
+                family=st["family"], group=group(f), profile=profile(f).tolist(),
+                installed=inst.get("installed", True), playcount=inst.get("playcount"),
+                online_match=bool(bid and inst.get("online_md5") and inst["online_md5"] == inst["md5"]),
+                why="Local map at a personally suitable rate", f=f,
+                purpose=mode, base_value=value, mode=mode,
+                practice_skills=skill_practice.normalize(selected_skills) if mode == "skills" else (),
+                matched_skills=skill_practice.match(f, selected_skills)[1] if mode == "skills" else ())
+
+
+def materialize(state, i, prepared=None):
+    """The choice dict (_choice) of entry i of a publication's choices (state["candidates"], or `prepared`
+    from its .prepare()), with any refreshed metadata laid over it."""
+    sha, rate, value, e, patch = (prepared or state["candidates"]).entry(i)
+    if "sha" in e:                          # a Python-path choice
+        c = dict(e)
+    else:
+        mode = state.get("mode", "nps")
+        c = _choice(sha, state["catalog"][sha], rate, state["analyses"][sha], e, value, mode,
+                    state.get("selected_skills", ()))
+    if patch:
+        c.update(patch)
+    return c
+
+
+def prepared_choice(state, prepared, i):
+    """A prepared choice's dict, with its Skills description and its chart-bound accuracy forecast."""
+    c = materialize(state, i, prepared)
+    skills = state.get("mode") == "skills"
+    c["practice_description"] = skill_practice.describe_match(c["f"], c["practice_skills"]) if skills else ""
+    c["accuracy_forecast"] = accuracy_targets.forecast_chart(c.get("accuracy_forecast"), c["sha"], c.get("md5"))
+    return c
+
+
+def rank(state, prepared, session, keys, taste_profile=None, mode="nps", web=1., consumed=(), seed=None, focus=0.,
+         count=60):
+    """The first `count` of a publication's prepared pool as choice dicts, in shown order: each chart family's
+    best, quality-weighted (freshness, density floor, recent families and profiles, taste), unconsumed first,
+    shuffled by `seed` (NPS) and mixed with website charts (native: Prepared.rank). Equally good maps reproduce
+    library proportions; no group receives a guaranteed slot or a protected mass of otherwise unsuitable maps."""
+    recent = [a for a in session.attempts[-6:] if a.get("profile") and a.get("meaningful", True)]
+    rows, relax = prepared.rank({
+        "keys": list(recdata.normalize_keys(keys)), "nps": mode == "nps", "web": web, "taste": taste_profile or {},
+        "eventful": set(session._events_by_map) | set(session._attempts_by_map),
+        "freshness": lambda key, length, pool: session.freshness(key, length, mode=mode, pool=pool),
+        "recent_families": [str(a["family"]) for a in recent[-4:] if a.get("family") is not None],
+        "recent_profiles": [[float(x) for x in a["profile"]] for a in recent],
+        "current_keys": session.current_keys(), "consumed": set(consumed),
+        "shuffle": (str(seed), focus) if seed is not None else None, "count": count})
+    out = []
+    for i, value, weight, share in rows:
+        c = prepared_choice(state, prepared, i)
+        headline = f"{c['nps']:.1f} raw NPS" if mode == "nps" else (
+            c["practice_description"] or skill_practice.describe_match(c["f"], c.get("practice_skills")))
+        c.update(value=value, weight=weight, category_share=share,
+                 why=f"{headline} · {c['description']} · expect ~{100*c['acc_mid']:.1f}%"
+                     + (" · freshness relaxed" if relax else ""))
+        out.append(c)
+    return out
+
+
+def _native_scores(pred, catalog, analyses, session, shas, mode, selected_skills, memo, store=None):
+    """Scores the charts the kernel covers (recommend.Predictor._native_state; no plays in the session
+    window) into `memo` (Choices) → the shas left to the Python path. The same rules as _python_choice.
+    `store` (native FeatStore) keeps the charts' features read across calls; its owner drops a chart
+    whenever analyses[sha] changes (Builder._note)."""
+    state = pred._native_state(session, {catalog[s]["keys"] for s in shas}) \
+        if shas and hasattr(pred, "_native_state") else None
+    if state is None:
+        return shas
+    model, tables, played = state
+    if store is None:
+        store = _feat_store()
+    return model.score_into(
+        memo, tables, store, analyses, catalog, list(shas), played, pred.md5_bid,
+        list(skill_practice.normalize(selected_skills)),
+        getattr(session, "acc_target", DEFAULT_TARGET), mode == "skills",
+        skill_practice.wants_vibro(selected_skills), bool(selected_skills), STRUCTURE_VERSION, time.time())
+
+
+def _feat_store():
+    import native_backend
+    return native_backend.load().FeatStore(skill_practice.native_tree(), list(PROFILE))
 
 
 def _rateable(fs, mode, selected_skills):
@@ -739,107 +840,14 @@ def taste(db, now=None):
     return {g: max(-.25, min(.25, score / max(1., count))) for g, (score, count) in result.items()}
 
 
-def weighted_candidates(candidates, session, keys, taste_profile=None, mode="nps", web=1.):
-    """Each eligible chart family contributes quality-weighted sampling mass.
-
-    Equally good maps naturally reproduce library proportions. Density, poor
-    structure and fatigue fit still matter across categories; no group receives
-    a guaranteed slot or a protected mass of otherwise unsuitable maps.
-    """
-    from recommend import event_key
-    allowed, taste_profile = set(recdata.normalize_keys(keys)), taste_profile or {}
-    families = {}
-    for c in candidates:
-        if c["keys"] not in allowed or not MIN_RATE <= c.get("rate", 1.) <= MAX_RATE:
-            continue
-        if web <= 0. and not c.get("installed", True):
-            continue
-        key = (c["keys"], c["family"])
-        if key not in families or c["base_value"] > families[key]["base_value"]:
-            families[key] = c
-    rows = [dict(c) for c in families.values()]
-    if not rows:
-        return []
-    # Twenty NPS is ordinary 7K variety at this ability. Follow the eligible
-    # pool down for lower ability/cold states; above the reference, keep the
-    # existing quality weights. Below it, use a steep but continuous soft tail.
-    density_floor = {}
-    if mode == "nps":
-        for k in allowed:
-            ns = [c["nps"] for c in rows if c["keys"] == k and c.get("nps", 0) > 0]
-            if ns:
-                density_floor[k] = min(20. * k / 7., .85 * float(np.quantile(ns, .70)))
-        # Far below the floor is not NPS practice at all (user 2026-10-22: a 6 NPS map "should never appear").
-        rows = [c for c in rows if not 0 < c.get("nps", 0) < .75 * density_floor.get(c["keys"], 0.)]
-        if not rows:
-            return []
-    counts = collections.Counter((c["keys"], c["group"]) for c in rows)
-    w = np.exp(np.array([c["base_value"] for c in rows]) - max(c["base_value"] for c in rows))
-    pool = float(w.sum() ** 2 / (w ** 2).sum())        # effective number of charts the playlist draws from
-    fresh = [session.freshness(event_key(c), c["length"], mode=mode, pool=pool) for c in rows]
-    relax = sum(fresh) < 3
-    recent = [a for a in session.attempts[-6:] if a.get("profile") and a.get("meaningful", True)]
-    recent_families = {a.get("family") for a in recent[-4:]}
-    recent_profiles = [np.array(a["profile"]) for a in recent]      # once, not once per chart
-    profile_key = session.model_key()
-    grouped = collections.defaultdict(list)
-    for c, fr in zip(rows, fresh):
-        value = c["base_value"] + .65 * math.log(max(.001, fr ** (.3 if relax else 1.)))
-        floor = density_floor.get(c["keys"], 0.)
-        if floor and c.get("nps", 0) > 0:
-            value -= 24. * max(0., math.log(floor / c["nps"]))
-        if c["family"] in recent_families:
-            value -= 1.2
-        if not c.get("installed", True):
-            # Mild popularity prior for website charts only: ×0.7 near 10 plays → ×1 from 10k.
-            value += math.log(.6 + .1 * min(4., math.log10(1 + (c.get("playcount") or 0))))
-        cached_penalty = c.get("_profile_penalty")
-        if cached_penalty and cached_penalty[0] == profile_key:
-            value -= cached_penalty[1]
-        elif recent:
-            v = np.array(c["profile"])
-            compatible = [a for a in recent_profiles if len(a) == len(v)]
-            if compatible:
-                value -= .18 * max(float(v @ a) for a in compatible)
-        if len(allowed) > 1 and session.current_keys() in allowed and c["keys"] != session.current_keys():
-            value -= .12
-        c["value"] = value
-        headline = f"{c['nps']:.1f} raw NPS" if mode == "nps" else (c.get("practice_description") or
-                                   skill_practice.describe_match(c["f"], c.get("practice_skills")))
-        c["why"] = (f"{headline} · {c['description']} · expect ~{100*c['acc_mid']:.1f}%"
-                    + (" · freshness relaxed" if relax else ""))
-        grouped[(c["keys"], c["group"])].append(c)
-    maximum = max(c["value"] for c in rows)
-    for group_, values in grouped.items():
-        preference = math.exp(.65 * taste_profile.get(group_, 0.))
-        for c in values:
-            c["weight"] = math.exp(max(-20., c["value"]-maximum)) * preference
-            c["category_share"] = counts[group_] / len(rows)
-    return sorted(rows, key=lambda c: -c["weight"])
-
-
 def mix(ranked, web):
-    """Interleaves installed and not-installed maps, each in its own ranked order, at share web/(1+web).
-    Sampling both from one weighted pool let whichever side had more mass fill the whole list (user 2026-10-25)."""
-    pools = [[c for c in ranked if c.get("installed", True)], [c for c in ranked if not c.get("installed", True)]]
-    share, out, taken = web / (1. + web), [], 0
-    for i in range(len(ranked)):
-        # A website chart only once its share is due, so a list never opens with one.
-        side = 1 if pools[1] and (not pools[0] or taken + 1 <= share * (i + 1) + 1e-9) else 0
-        taken += side
-        out.append(pools[side].pop(0))
-    return out
+    """Interleaves installed and not-installed maps, each in its own ranked order, at share web/(1+web)
+    (native, as the ranked pool's: Prepared.rank)."""
+    import native_backend
+    return [ranked[i] for i in native_backend.load().mix_order([bool(c.get("installed", True)) for c in ranked], web)]
 
 
-def select(candidates, session, keys, taste_profile=None, n_show=20, rng=None):
-    rows = weighted_candidates(candidates, session, keys, taste_profile)
-    if n_show is None:
-        return rows
-    # Slight anti-monotony in presentation, never an equal-category rotation.
-    shown, used = [], collections.Counter()
-    while rows and len(shown) < n_show:
-        c = max(rows, key=lambda c: c["weight"] / (1 + .12 * used[(c["keys"], c["group"])]))
-        rows.remove(c)
-        shown.append(c)
-        used[(c["keys"], c["group"])] += 1
-    return shown
+def no_choices():
+    """An empty publication's choices."""
+    import native_backend
+    return native_backend.load().ChoiceList()

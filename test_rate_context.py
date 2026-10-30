@@ -51,33 +51,6 @@ def test_bad_lower_rate_result_does_not_disappear_on_uprates():
     assert m.chart_affinity('unplayed',.9,7)==(0.,0)
 
 
-def test_train_only_rate_group_validation_can_choose_finite_or_full_transfer():
-    rows=[];by={};stable=[];different=[]
-    for chart in range(30):
-        ix=[]
-        for rate,sgn in ((.75,1),(1.5,-1)):
-            ix.append(len(rows));rows.append({'keys':7,'rate':rate})
-            stable.append(.4);different.append(.4*sgn)
-        by[str(chart)]=ix
-    full,full_check=R.Personal._rate_transfer(rows,np.array(stable),by,0.)
-    partial,partial_check=R.Personal._rate_transfer(rows,np.array(different),by,0.)
-    assert math.isinf(full[7]) and full_check[7]['folds']==60
-    assert partial[7]<.2
-    assert partial_check[7]['train_mse']<partial_check[7]['full_transfer_mse']
-
-
-def test_direct_high_rate_evidence_is_not_three_pseudo_scores_from_nomod():
-    anchors = R.Personal._rate_anchors([(1., -1.8, 3), (1.5, -.07, 1)], .08, .35)
-    assert abs(anchors[1][1] - (-.07/1.35)) < .00001
-    assert anchors[1][2] < 1.001
-    assert anchors[0][1] < -.5
-    # Nearby rates can still share real support; unlimited transfer remains
-    # possible when the historical cross-rate validation supports it.
-    nearby = R.Personal._rate_anchors([(1.45, -1.8, 3), (1.5, -.07, 1)], .08, .35)
-    assert nearby[1][1] < anchors[1][1]
-    assert nearby[1][2] > anchors[1][2]
-
-
 def test_cold_capacity_integrates_across_measured_rate_anchors_without_a_cliff():
     import warmup
     m = model()

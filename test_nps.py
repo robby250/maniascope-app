@@ -157,7 +157,7 @@ def test_filter_before_pp_limit_and_ledger_unchanged():
         fs[b+1] = {1.: f}
         maps[b+1] = {"approved": 1, "md5": f"{b:032x}", "set": b+1, "file": str(b), "keys": f["keys"]}
     r.pub = {"feats": fs, "maps": maps}
-    r.model = SimpleNamespace(retry=0, predict=lambda *_a: (-3., .1, .3),
+    r.model = SimpleNamespace(retry=0, predict=lambda *_a: (-3., .1, .3), predict_many=lambda items: [(-3., .1, .3)] * len(items),
                               rate_response=lambda *_a: 3.)
     r.installed = {}
     r.newer_ranked = lambda: []
@@ -204,7 +204,30 @@ def test_smooth_public_rate_effect():
     assert abs(a - R.base_of(pop, f, 1, 1.0001)[0]) < .001
 
 
-def test_variety_preserves_chordjack_and_family_identity():
+def publication(rows):
+    """A Builder publication's choices (ChoiceList) of Python choice dicts."""
+    import native_backend
+    memo = native_backend.load().Choices([c['sha'] for c in rows], None, None, 0.)
+    for c in rows:
+        memo.put(c['sha'], c, None)
+    return memo.snapshot()
+
+
+def choice_dicts(choices, catalog=None, analyses=None, mode='nps', selected_skills=()):
+    """candidates_from's choices as dicts (nps.materialize)."""
+    state = dict(candidates=choices, catalog=catalog, analyses=analyses, mode=mode, selected_skills=selected_skills)
+    return [nps.materialize(state, i) for i in range(len(choices))]
+
+
+def rank_rows(rows, session, keys, **kw):
+    """nps.rank of Python choice dicts, every one (as the worker ranks a publication of these choices)."""
+    rows = [{'rate': 1., 'sha': c.get('md5'), **c} for c in rows]
+    state = {'candidates': publication(rows), 'mode': kw.get('mode', 'nps')}
+    prepared = state['candidates'].prepare(list(keys), {c['sha'] for c in rows})
+    return nps.rank(state, prepared, session, keys, count=None, **kw)
+
+
+def test_ranking_keeps_one_choice_per_chart_family_and_keymode():
     cands = []
     for i in range(35):
         g = 0 if i < 25 else 1 if i < 30 else 2
@@ -213,11 +236,10 @@ def test_variety_preserves_chordjack_and_family_identity():
                       "keys":7, "group":str(g), "base_value":math.log(60 if g == 0 else 40),
                       "nps":60 if g == 0 else 40, "length":240, "description":("Chordjack","Chordstream","LN")[g],
                       "acc_mid":.95, "bid":None})
-    cands.append(dict(cands[30], sha="copy30"))
-    got = nps.select(cands, R.Session([]), [7])
-    assert len(got) == 20 and len({c["group"] for c in got}) == 3
-    assert len({c["family"] for c in got}) == len(got)
-    assert nps.select(cands, R.Session([]), [4]) == []
+    cands.append(dict(cands[30], sha="copy30", md5="c"*32))
+    got = rank_rows(cands, R.Session([]), [7])
+    assert len(got) == 35 and len({c["family"] for c in got}) == len(got)
+    assert rank_rows(cands, R.Session([]), [4]) == []
 
 
 def test_taste_requires_real_completion_and_is_idempotent():
@@ -322,7 +344,8 @@ def test_prepared_queue_updates_the_same_chart_rate_before_dropping_it():
     faster = row('mid', 1.2, .941, 26.4)
     worker.playlists['nps'] = [mid, high]
     # The suitable version may be outside the fresh 20-map preview.
-    worker._local_pool_cache['nps'] = (None, None, [high, faster])
+    state = {'candidates': publication([high, faster]), 'mode': 'nps'}
+    worker._local_pool_cache['nps'] = (None, state, state['candidates'].prepare([7], worker.rec.local_shas))
     with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
         shown = worker._prepared_playlist('nps', [high])
     assert [c['sha'] for c in shown] == ['mid', 'high']
@@ -416,7 +439,7 @@ def test_ready_refreshes_omitted_prepared_features_and_rechecks_technical_member
                     practice_skills=('technical',), accuracy_forecast={'calculator': 'old'})
                for bid, sha in enumerate(('a', 'b', 'legacy'), 1)]
     worker.playlists['skills'] = offered[:]
-    worker.skills_state = {'candidates': [], 'restored': False}
+    worker.skills_state = {'candidates': nps.no_choices(), 'restored': False}
     worker._playlist_consumed = ['md5:m-consumed']
     for c in offered:
         source.cache[source.key(c['sha'], 1.)] = old
@@ -426,10 +449,10 @@ def test_ready_refreshes_omitted_prepared_features_and_rechecks_technical_member
         source.cache[source.key('a', 1.)] = old     # an earlier legacy publication masked the row
     data = dict(generation=worker.generation, revision=worker._local_request_id,
                 keys_by_mode=worker.keys, selected_skills=worker.practice_skills,
-                states={'skills': dict(candidates=[], analyzed=1, total=20, failed=0, error='')})
+                states={'skills': dict(candidates=nps.no_choices(), mode='skills', analyzed=1, total=20, failed=0, error='')})
     if authority == 'queued':
         source._store('a', {1.: removed})
-        data['states']['skills']['candidates'] = [dict(offered[0], base_value=1.)]
+        data['states']['skills']['candidates'] = publication([dict(offered[0], base_value=1.)])
     queries = []
     db.set_trace_callback(queries.append)
     try:
@@ -437,8 +460,9 @@ def test_ready_refreshes_omitted_prepared_features_and_rechecks_technical_member
             worker.t_nps_update('ready', data)
             predict.assert_not_called()
             if authority == 'queued':
-                worker._local_pool_cache['skills'] = (None, None, worker.skills_state['candidates'])
-                assert worker.skills_state['candidates'][0]['f'] == removed
+                st = worker.skills_state
+                worker._local_pool_cache['skills'] = (None, st, st['candidates'].prepare([7], set()))
+                assert nps.materialize(st, 0)['f'] == removed
             consumed = dict(offered[0], sha='consumed', md5='m-consumed')
             shown = worker._prepared_playlist('skills', [consumed])
         assert [c['sha'] for c in shown] == (['b', 'legacy'] if authority in ('public', 'queued') else ['a', 'b', 'legacy'])
@@ -461,7 +485,7 @@ def test_nps_never_offers_a_chart_far_below_the_density_floor():
     rows = [dict(keys=7, sha=str(i), md5=str(i), family=str(i), rate=1., nps=ns, base_value=0.,
                  length=180., profile=[1.], description='Mixed', group='sv' if ns < 10 else 'chords', acc_mid=.94)
             for i, ns in enumerate([6.2] + [25.]*20)]
-    weighted = nps.weighted_candidates(rows, R.Session([], 1000), [7])
+    weighted = rank_rows(rows, R.Session([], 1000), [7])
     assert len(weighted) == 20 and all(c['nps'] == 25. for c in weighted)
 
 
@@ -472,7 +496,7 @@ def test_nps_focus_changes_selection_without_refitting_or_changing_rate_targets(
                  description='Mixed', group='chords', acc_mid=.94)
             for i, ns in enumerate([22.]*80 + [34.]*20)]
     session = R.Session([], 1000)
-    weighted = nps.weighted_candidates(rows, session, [7])
+    weighted = rank_rows(rows, session, [7])
     high = pp_playlist.preview(weighted, 20, 9, focus=1.)
     assert all(c['nps'] == 34. for c in high)
     variety = pp_playlist.preview(weighted, 20, 9, focus=0.)
@@ -543,10 +567,10 @@ def test_website_charts_join_nps_as_downloads_with_a_mild_popularity_prior(tmp_p
     rows = [dict(keys=7, sha=s, md5=s, family=s, rate=1., nps=30., base_value=0., length=180., profile=[1.],
                  description='Mixed', group='chords', acc_mid=.94, installed=inst, playcount=pc)
             for s, inst, pc in (('local', True, None), ('rare', False, 10), ('popular', False, 20000))]
-    w = {c['sha']: c['weight'] for c in nps.weighted_candidates(rows, R.Session([], 1000), [7])}
+    w = {c['sha']: c['weight'] for c in rank_rows(rows, R.Session([], 1000), [7])}
     assert w['popular'] == pytest.approx(w['local']) and .65 < w['rare']/w['local'] < .75
     # Settings slider: left end drops maps you don't have; otherwise both kinds share the list at web/(1+web).
-    assert {c['sha'] for c in nps.weighted_candidates(rows, R.Session([], 1000), [7], web=nps.web_factor(0.))} == {'local'}
+    assert {c['sha'] for c in rank_rows(rows, R.Session([], 1000), [7], web=nps.web_factor(0.))} == {'local'}
     ranked = [dict(sha=f'w{i}', installed=False) for i in range(30)] + [dict(sha=f'l{i}') for i in range(10)]
     half = nps.mix(ranked, nps.web_factor(.5))
     assert [c.get('installed', True) for c in half[:20]] == [True, False] * 10 and len(half) == 40
@@ -581,7 +605,7 @@ def test_builder_prefers_exact_current_public_web_packets_below_current_sqlite(t
                                  1.: f, 1.5: f}
     with open(tmp_path/'web'/'web.pkl', 'wb') as fh:
         pickle.dump({'format': 3, 'calc': 'old', 'maps': maps, 'feats': feats}, fh)
-    predictor = SimpleNamespace(calc='current', pub={'maps': public_maps, 'feats': public_feats},
+    predictor = SimpleNamespace(calc='current', predictor_id='p', pub={'maps': public_maps, 'feats': public_feats},
                                 md5_bid={sha: bid for bid, sha in enumerate(names, 1)}, predict=Mock())
     db = recdata.connect(str(tmp_path/'rec.db'))
     sqlite_feature = dict(current, description='Current SQLite')
@@ -593,7 +617,7 @@ def test_builder_prefers_exact_current_public_web_packets_below_current_sqlite(t
         captured.update({sha: dict(fs.items()) for sha, fs in analyses.items()})
         assert set(catalog) == set(names) and all(not inst['installed'] for inst in catalog.values())
         builder.stop()
-        return [], []
+        return nps.no_choices(), []
     monkeypatch.setattr(nps, 'candidates_from', inspect)
     monkeypatch.setattr(nps, 'installed', lambda _db: ({}, ''))
     monkeypatch.setattr(nps, 'reach', lambda *args: None)
@@ -664,11 +688,11 @@ def test_first_real_build_replaces_the_installed_only_restart_list(tmp_path):
     w = R.Worker(lambda m: None)
     w.db = recdata.connect(str(tmp_path / "rec.db"))
     w.rec = SimpleNamespace(feats=R.FeatureSource(w.db, {"maps": {}, "feats": {}}))
-    w.nps_state = {"candidates": [], "restored": True}
+    w.nps_state = {"candidates": nps.no_choices(), "restored": True}
     w.playlists["nps"] = [{"sha": "old"}]
     data = {"generation": w.generation, "revision": w._local_request_id, "selected_skills": w.practice_skills,
             "keys_by_mode": {m: w.keys[m] for m in R.LOCAL_MODES},
-            "states": {"nps": {"candidates": [], "total": 0, "analyzed": 0, "failed": 0, "error": ""}}}
+            "states": {"nps": {"candidates": nps.no_choices(), "total": 0, "analyzed": 0, "failed": 0, "error": ""}}}
     with patch.object(w, "_publish"):
         w.t_nps_update("ready", data)
         assert w.playlists["nps"] == []
@@ -677,3 +701,17 @@ def test_first_real_build_replaces_the_installed_only_restart_list(tmp_path):
         w.t_nps_update("ready", data)          # later builds keep the displayed order
         assert w.playlists["nps"] == [kept]
     w.db.close()
+
+
+def test_feature_rows_round_trip_as_json_would_and_old_json_rows_stay_readable():
+    import json
+    import recdata
+    f = {'keys': 7, 'overall': 4.25, 'big': 2**40, 'neg': -3, 'flag': True, 'off': False, 'none': None,
+         'sk': {'ln': .1, 'é': 1e-300}, 'list': [1, 2.5, 'x', [], {}], 'pair': (1, 2), 'nan': float('nan'),
+         1: 'int key', 2.5: 'float key', 'text': 'ünïcode ✓'}
+    data = recdata.feats_dump(f)
+    assert isinstance(data, bytes) and len(data) < len(json.dumps(f))
+    assert json.dumps(recdata.feats_load(data)) == json.dumps(json.loads(json.dumps(f)))
+    assert recdata.feats_load(json.dumps({'a': 1})) == {'a': 1}             # rows written before the binary form
+    with pytest.raises(ValueError):
+        recdata.feats_load(data[:-1])

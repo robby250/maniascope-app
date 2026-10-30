@@ -44,17 +44,19 @@ def test_completed_history_seeds_restart_once_and_transfers_only_partly():
 
 
 def test_cold_and_history_exposure_match_without_future_knowledge():
-    f={'keys':7,'length':120000,'overall':6.,'sk':{'chordjack':1},'ln':0.,'stam':1.}
+    f={'keys':7,'length':120000,'overall':6.,'sk':{'chordjack':1},'ln':0.,'stam':1.,'od':8.}
     rows=[dict(key=str(i),chart=str(i),ts=1120+150*i,t=300.,rate=1.,f=f,keys=7,src='realm',y=-3.,base=0.) for i in range(4)]
-    designed=W.history_design(rows,6.)
     history=[]
-    for r in designed:
-        active=W.activation(history,r['ts']-r['seconds'],7,'chordjack')
-        assert active==pytest.approx(r['activation'],abs=1e-12)
-        assert cold_model().penalty(7,'chordjack',active,120)==pytest.approx(.9*r['exposure'])
+    steps=W.timeline(rows)
+    assert len(steps)==4
+    for r,_session,minutes,d,seconds,_family in steps:
+        active=W.activation(history,r['ts']-seconds,7,'chordjack')
+        assert active==pytest.approx(minutes,abs=1e-12)
+        exposure=math.exp(-minutes/6.)*(-math.expm1(-d/6.))*6./d     # the fit's mean exposure over the map
+        assert cold_model().penalty(7,'chordjack',active,120)==pytest.approx(.9*exposure)
         history.append({'key':r['key'],'t':r['ts']-120,'end':r['ts'],'keys':7,'skill':'chordjack','played_seconds':120,'kind':'finish'})
-    assert not W.completions([dict(rows[0],src='public')])
-    assert not W.completions([dict(rows[0],completed=False)])
+    assert not W.timeline([dict(rows[0],src='public')])
+    assert not W.timeline([dict(rows[0],completed=False)])
 
 
 def test_normal_completed_cold_loss_is_not_double_counted_as_bad_form():
@@ -119,3 +121,49 @@ def test_tracked_openings_that_play_warm_shrink_the_cold_curve():
     assert warm.warmup_penalty(7,'chordjack')==pytest.approx(
         warm._historical_cold(7,'chordjack')*warm.cold_scale(7))
     assert R.Session([],1200,warmup_model=cold_model()).cold_scale(7)==1.
+
+
+def test_native_family_weights_and_dominant_match_the_python_definition():
+    def weights(f):
+        sk=f.get('sk',{});values=[]
+        for name,members in W.MEMBERS.items():
+            if name=='technical':continue
+            w=max((max(0.,sk.get(x,0.)) for x in members),default=0.)**2
+            if w:values.append((name,w))
+        total=sum(w for _n,w in values)
+        return tuple((n,w/total) for n,w in values) if total else ((dominant(f),1.),)
+    def dominant(f):
+        sk=f.get('sk',{});names=[k for k in sk if k not in W.DESCRIPTIVE]
+        return W.family(max(names,key=lambda k:sk[k])) if names else 'rice'
+    fs=[dict(sk=dict(chordstream=.9,delay=.5,technical=2.)),dict(sk=dict(jack=.95,minijack=.9,ln=-.2)),
+        dict(sk=dict(stamina=.8,technical=.5,ln=0.)),dict(sk={}),{},dict(sk=dict(sv=.3,release=.3,stream=.3)),
+        dict(sk=dict(stamina=.9,trill1h=.2,jumptrill=.7,vibro=.6,shield=1e-200))]
+    assert [W.family_weights(f) for f in fs]==[weights(f) for f in fs]
+    assert [W.dominant(f) for f in fs]==[dominant(f) for f in fs]
+    assert W._families().weights_many(fs)==[weights(f) for f in fs]
+
+
+
+def test_native_warmup_ridge_matches_the_numpy_alternation():
+    import native_backend
+    import recdata
+    rng=np.random.default_rng(3);n,p,g=400,9,4
+    X=rng.normal(size=(n,p));X[:,-g:]=np.abs(X[:,-g:]);y=rng.normal(size=n);w=rng.uniform(.2,1.,n)
+    A=X.T@(w[:,None]*X)+np.eye(p)*2.
+    lower=np.full(p,-np.inf);upper=np.full(p,np.inf);lower[-g:],upper[-g:]=0.,.4
+    prior=np.zeros(p);prior[-g:]=.3
+    groups=[(rng.integers(0,k,n),k,r) for k,r in ((12,4.),(30,5.),(50,8.))]
+    effects=[np.zeros(k) for _i,k,_r in groups]
+    for _ in range(16):         # the Python loop warmup._fit ran before
+        rhs=X.T@(w*(y-sum(e[i] for e,(i,_k,_r) in zip(effects,groups))))+prior
+        coeff=recdata.box_cd(A,rhs,np.linalg.solve(A,rhs),lower,upper,40,1e-7)
+        for j,(i,k,r) in enumerate(groups):
+            residual=y-X@coeff-sum(effects[h][groups[h][0]] for h in range(len(groups)) if h!=j)
+            effects[j]=np.bincount(i,w*residual,k)/(np.bincount(i,w,k)+r)
+    native,native_effects=native_backend.load().warmup_ridge(
+        X.tobytes(),y.tobytes(),w.tobytes(),A.tobytes(),lower.tolist(),upper.tolist(),prior.tolist(),
+        [(i.astype(np.int64).tobytes(),k,r) for i,k,r in groups],16)
+    assert (coeff[-g:]==0).any() and (coeff[-g:]>0).any()      # both sides of the bound are exercised
+    assert np.allclose(native,coeff,rtol=0,atol=1e-12)
+    for a,b in zip(native_effects,effects):
+        assert np.allclose(a,b,rtol=0,atol=1e-12)

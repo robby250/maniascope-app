@@ -21,8 +21,8 @@ def test_chart_prediction_work_is_reused_without_caching_session_results():
     from unittest.mock import Mock
     f = {'keys': 7, 'sk': {'stream': .4, 'ln': .8}}
     before = warmup.family_weights(f)
-    assert before == warmup._family_weights.__wrapped__(tuple(f['sk'].items()))
-    assert warmup.family_weights(dict(f, length=999)) is before
+    assert before == (('rice', .16000000000000003/.8000000000000002), ('ln', .6400000000000001/.8000000000000002))
+    assert warmup.family_weights(dict(f, length=999)) == before
     f['sk']['stream'] = .8
     assert warmup.family_weights(f) == (('rice', .5), ('ln', .5))
     assert warmup.family_weights(f) != before

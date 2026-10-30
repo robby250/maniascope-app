@@ -304,11 +304,11 @@ def zvec(f, names, mu=-3.):
     structure = f.get("nps", {})
     features = f.get("calibration_features", [])
     width = features[8] if len(features) > 8 else 0.
+    vector=f.get('execution',{}).get('residual_vector')
+    geometry = [vector[i] for i in _GEOMETRY_INDICES] if vector else [0.]*len(PERSONAL_GEOMETRY)
     # Near-limit fatigue is a performance interaction, not a 94%-specific
     # intrinsic chart rating. It is small when comfortable and grows near capacity.
     near_limit = 1. / (1. + math.exp(max(-20., min(20., -2. * (mu + 3.2)))))
-    vector=f.get('execution',{}).get('residual_vector')
-    geometry = [vector[i] for i in _GEOMETRY_INDICES] if vector else [0.]*len(PERSONAL_GEOMETRY)
     return np.array([f["sk"].get(k, 0.0) for k in names] + [f["ln"], f["stam"], load,
                      structure.get("chord", 1.) / max(1, f.get("keys", 7)),
                      structure.get("overlap", 0.), math.sqrt(max(0., width)) * load] + geometry + [load * near_limit])
@@ -326,228 +326,30 @@ class Personal:
         rows = [r for r in rows if not r['f'].get('ln') or
                 (not r.get('key', '').startswith('legacy|') and
                  (str(r.get('client', '')).endswith('-lazer') or r.get('client') == 'lazer-live'))]
-        import warmup
-        self.warmup, cold = warmup.fit(rows, pub['pop'], pub.get('feats'))
-        # Estimate a typical warmed baseline, not a mixture that counts the
-        # historical cold deficit once here and again at next-session startup.
-        rows = [dict(r, y=r['y']-cold.get(r.get('key'),0.)) for r in rows]
-        pop = pub["pop"]
-        self.pop, self.now = pop, now if now is not None else now_months()
+        import native_backend, warmup
+        self.pop, self.now = pub["pop"], now if now is not None else now_months()
         self.levels = levels or {}
         self.names = recdata.SKILLS
-        K = np.array([r["keys"] for r in rows])
-        y = np.array([r["y"] for r in rows])
-        base = np.array([r["base"] for r in rows])
-        t = np.array([r["t"] for r in rows])
-        src = np.array([r["src"] == "public" for r in rows])
-        randomized = np.array([bool(r.get("rd")) for r in rows])
-        # RD permutes columns, hence hand assignments/pattern character. Retain
-        # its broad ability evidence at reduced weight, but never let shuffled
-        # performances become exact-normal-chart familiarity or retry evidence.
-        chart = [r["chart"] + ("|RD" if r.get("rd") else "") for r in rows]
-        e = y - base
-        lr_all = np.array([math.log(max(.05, r["f"]["overall"])) for r in rows])
-        # stable high scores are bests: shift them by the best-of-several gap measured on lazer attempts
-        by = collections.defaultdict(list)
-        for i, c in enumerate(chart):
-            if not src[i]:
-                by[c].append(e[i])
-        gaps = [min(v) - np.mean(v) for v in by.values() if len(v) >= 3]
-        self.best_gap = float(np.mean(gaps)) if gaps else -0.15
-        e = np.where(src, e - self.best_gap, e)
-        w_rec = 0.5 ** (np.maximum(0, self.now - t) / HALF_LIFE_MONTHS)
-        cnt = collections.Counter(chart)
-        lev = np.array([1 / math.sqrt(cnt[c]) for c in chart])      # one heavily retried chart can't dominate
-        w = np.where(src, 0.5, 1.0) * lev * np.where(randomized, .35, 1.)
-        self.keys = sorted(k for k, n in collections.Counter(K.tolist()).items() if n >= 30)
-        self.level, self.level_var, self.curve, self.sd, self.beta, self.zmean, self.zscale = {}, {}, {}, {}, {}, {}, {}
-        self.recent = {}
-        self.monthly = {}                  # keymode → (first month, Σw·e, Σw) of every-play rows (Stats history)
-        self.shape_validation = {}
-        glob = float(np.average(e, weights=w * w_rec)) if len(e) else 0.0
-        self.glob = glob
-        L_at = np.zeros_like(e)
-        for k in self.keys:
-            s = K == k
-            mb = np.floor(t[s]).astype(int)
-            grid = np.arange(mb.min(), max(mb.max(), int(self.now)) + 1)
-            sw = np.bincount(mb - grid[0], w[s], minlength=len(grid))
-            se = np.bincount(mb - grid[0], w[s] * e[s], minlength=len(grid))
-            d = grid[:, None] - grid[None, :]
-            ker = np.exp(-0.5 * (d / LEVEL_BW) ** 2)
-            num, den = ker @ se, ker @ sw
-            prior = float(np.average(e[s], weights=w[s]))
-            curve = (num + 3 * prior) / (den + 3)
-            self.curve[k] = (grid[0], curve)
-            # Stats history: every recorded play, month by month. Website/stable bests survive only when
-            # they were good (a 2020 "Azimuth" peak from top-100s), and this curve's 4-month kernel with
-            # stable bests flattened a May peak into a steady rise (user 2026-10-01).
-            own = w[s] * ~src[s]
-            if k in self.levels:
-                # Only maps near the player's limit say where the limit is: 97 % on maps 30 % below it
-                # made an easy month look like the peak (user 2026-10-01).
-                own = own * (lr_all[s] >= self.levels[k] - HISTORY_ZONE)
-            self.monthly[k] = (grid[0], np.bincount(mb - grid[0], own * e[s], minlength=len(grid)),
-                               np.bincount(mb - grid[0], own, minlength=len(grid)))
-            L_at[s] = curve[mb - grid[0]]
-            self.level[k] = float(curve[-1])
-            resid = e[s] - L_at[s]
-            self.sd[k] = float(np.sqrt(np.average(resid ** 2, weights=w[s])))
-            self.level_var[k] = self.sd[k] ** 2 / max(1.0, den[-1])
-        # skill mix: ridge on what the level leaves, per keymode with enough rows
-        Z = np.array([zvec(r["f"], self.names, base[i] + L_at[i]) for i, r in enumerate(rows)]) \
-            if rows else np.zeros((0, len(self.names) + 7 + len(PERSONAL_GEOMETRY)))
-        u = e - L_at
-        for k in self.keys:
-            s = K == k
-            if s.sum() < 200:
-                continue
-            ww = w[s] * w_rec[s]
-            zm = np.average(Z[s], axis=0, weights=ww)
-            scale=np.maximum(.05,np.sqrt(np.average((Z[s]-zm)**2,axis=0,weights=ww)))
-            Zc = (Z[s] - zm)/scale
-            import personal_support
-            families = [r['f'].get('nps',{}).get('family') or r['chart'] for r,keep in zip(rows,s) if keep]
-            self.beta[k], self.shape_validation[k] = personal_support.fit_shape(Zc,u[s],ww,families)
-            self.zmean[k] = zm
-            self.zscale[k] = scale
-            u[s] = u[s] - Zc @ self.beta[k]
-        # The shape is a year of history; what it leaves on the last RECENT_MONTHS of own plays is current
-        # per-family form (walk-forward 2026-09-26..10-27: every 9-day window better, log RMSE .2492 → .2455).
-        for k in self.keys:
-            s = (K == k) & ~src & (self.now - t <= RECENT_MONTHS)
-            if s.sum() < 100:
-                continue
-            idx = np.where(K == k)[0]
-            R = np.array([recent_vec(rows[i]['f']) for i in idx])
-            sel = s[idx]
-            rm = np.average(R[sel], axis=0, weights=w[s])
-            rs = np.maximum(.05, np.sqrt(np.average((R[sel]-rm)**2, axis=0, weights=w[s])))
-            import personal_support
-            families = [rows[i]['f'].get('nps',{}).get('family') or rows[i]['chart'] for i in np.where(s)[0]]
-            beta, _ = personal_support.fit_shape((R[sel]-rm)/rs, u[s], w[s], families)
-            self.recent[k] = (rm, rs, beta)
-            u[idx] = u[idx] - ((R-rm)/rs) @ beta
-        # Historical session condition is not a permanent property of a chart.
-        # Exclude the target chart when estimating that context, and count
-        # retries in one session as one block of affinity evidence.
-        import personal_support
-        context, session_ids, self.session_validation = personal_support.session_context(rows,u)
-        u = u-context
-        blocks = personal_support.chart_blocks(rows,u,session_ids,self.now)
-        # chart affinity (pooled over rates), and attempt-to-attempt spread from charts played repeatedly
-        by = collections.defaultdict(list)
-        for i, c in enumerate(chart):
-            by[c].append(i)
-        within = [u[ix] - u[ix].mean() for ix in by.values() if len(ix) >= 2]
-        sd_att = float(np.sqrt(np.mean(np.concatenate(within) ** 2) * ATT_SD)) if within else 0.35
-        means = np.array([np.average([v for r,v,w,n in values],weights=[w for r,v,w,n in values]) for values in blocks.values()])
-        ns = np.array([personal_support.effective_count(values) for values in blocks.values()])
-        self.tau2_c = max(0.005, float(np.mean(means ** 2 - sd_att ** 2 / ns))) if len(ns) else 0.05
-        self.kap_c = sd_att ** 2 / self.tau2_c
-        self.aff = {c: (sum(v*w for r,v,w,n in values)/(sum(w for r,v,w,n in values)+self.kap_c),
-                        sum(w for r,v,w,n in values)) for c,values in blocks.items()}
-        self.rate_aff = {}
-        self.rate_support = {}
-        self.rate_bandwidth, self.rate_validation = self._rate_transfer(rows,u,by,self.kap_c)
-        for c, ix in by.items():
-            rates = collections.defaultdict(list)
-            for i in ix:
-                rates[round(rows[i]["rate"], 3)].append(i)
-            self.rate_support[c] = (min(rates),max(rates))
-            if len(rates) > 1:
-                # A directly observed DT must not inherit three pseudo-scores
-                # from comfortable NM. Borrow only rate-nearby evidence using
-                # the same TRAIN-learned transfer as extrapolation. The prior
-                # precision is the measured between-chart shrinkage, not 3.
-                stats = [(rate, sum(v*w for r,v,w,n in blocks[c] if r==rate),
-                          sum(w for r,v,w,n in blocks[c] if r==rate)) for rate in rates]
-                bandwidth = self.rate_bandwidth.get(K[ix[0]], self.rate_bandwidth[0])
-                self.rate_aff[c] = self._rate_anchors(stats, bandwidth, self.kap_c)
-        self.sd_att = {k: float(np.sqrt(np.mean(np.concatenate([u[ix] - u[ix].mean() for ix in by.values()
-                                                               if len(ix) >= 2 and K[ix[0]] == k] or [np.zeros(1)]) ** 2) * ATT_SD))
-                       for k in self.keys}
-        self.sd_att = {k: (v if v > 0.05 else sd_att) for k, v in self.sd_att.items()}
-        self.sd_all = sd_att
+        # The warm-up models, level curves, shape and recent-form ridges, session context, chart/rate affinities
+        # and retry (native/src/personal.rs; ~0.8 s a model in Python).
+        elasticities = warmup.rate_elasticities(pub.get('feats'))
+        fit = native_backend.load().personal_fit(
+            _native_consts(self.names), rows, self.now, self.levels,
+            (HALF_LIFE_MONTHS, LEVEL_BW, HISTORY_ZONE, RECENT_MONTHS, ATT_SD, SESSION_GAP),
+            warmup.native_args(pub['pop'], elasticities))
+        self.warmup = warmup.models(fit.pop("warmup"), pub['pop'], elasticities)
+        for name in ("beta", "zmean", "zscale"):
+            fit[name] = {k: np.array(v) for k, v in fit[name].items()}
+        fit["recent"] = {k: tuple(map(np.array, v)) for k, v in fit["recent"].items()}
+        fit["curve"] = {k: (g, np.array(v)) for k, (g, v) in fit["curve"].items()}
+        fit["monthly"] = {k: (g, np.array(se), np.array(sw)) for k, (g, se, sw) in fit["monthly"].items()}
+        self.__dict__.update(fit)
+        context = self.session_validation
         self.warmup.form_prior={
-            'global_variance':max(1e-4,self.session_validation['condition_variance']),
-            'skill_variance':max(1e-4,self.session_validation['skill_condition_variance']),
-            'by_key':self.session_validation['by_key'],
-            'noise_variance':max(1e-4,sd_att**2)}
-        self.retry = self._retry(rows, e - L_at)
-        self.n_rows = len(rows)
-
-    @staticmethod
-    def _rate_anchors(stats, bandwidth, shrinkage):
-        anchors = []
-        for rate, total, count in stats:
-            prior_sum, prior_n = 0., 0.
-            for other, value, n in stats:
-                if other == rate:
-                    continue
-                transfer = math.exp(-.5 * (math.log(other/rate) / bandwidth)**2)
-                prior_sum += transfer * value
-                prior_n += transfer * n
-            prior = prior_sum / max(1e-9, prior_n + shrinkage)
-            value = (total + shrinkage * prior) / max(1e-9, count + shrinkage)
-            anchors.append((rate, value, count + min(shrinkage, prior_n)))
-        return sorted(anchors)
-
-    @staticmethod
-    def _rate_transfer(rows, residual, by_chart, shrinkage):
-        """Choose extrapolation transfer from TRAIN history, leaving out one
-        chart-rate group at a time. Exact-rate evidence is never discounted.
-
-        An easy NM's affinity is not automatically an easy DT's affinity; a
-        difficult NM result is not a permanent penalty at an easier HT rate.
-        Underprediction at a lower rate remains evidence at faster rates.
-        Retain an infinite-bandwidth option when the history supports transfer.
-        """
-        folds=collections.defaultdict(list)
-        for chart,indices in by_chart.items():
-            rates=collections.defaultdict(list)
-            for i in indices:
-                rates[round(rows[i]['rate'],3)].append(i)
-            if len(rates)<2:continue
-            total=float(residual[indices].sum());count=len(indices)
-            for rate,ix in rates.items():
-                others=[r for r in rates if r!=rate]
-                distance=max(0.,math.log(min(others)/rate),math.log(rate/max(others)))
-                if distance < .02:continue
-                estimate=(total-float(residual[ix].sum()))/(count-len(ix)+shrinkage)
-                if estimate>0 and rate>max(others):distance=0.
-                target=float(residual[ix].mean())
-                folds[rows[ix[0]]['keys']].append((distance,estimate,target,min(3,len(ix))/len(rates)))
-        bands=np.array([.08,.12,.18,.27,.40,.60,1.,float('inf')])
-        def select(examples):
-            data=np.array(examples,float)
-            prediction=data[:,1,None]*np.exp(-.5*(data[:,0,None]/bands[None,:])**2)
-            error=np.average((prediction-data[:,2,None])**2,axis=0,weights=data[:,3])
-            at=int(np.argmin(error))
-            return float(bands[at]), {'folds':len(examples),'train_mse':float(error[at]),'full_transfer_mse':float(error[-1])}
-        pooled=[x for examples in folds.values() for x in examples]
-        default,meta=select(pooled) if len(pooled)>=25 else (.27,{'folds':len(pooled)})
-        chosen={0:default};reports={0:meta}
-        for key,examples in folds.items():
-            chosen[key],reports[key]=select(examples) if len(examples)>=40 else (default,{'folds':len(examples),'pooled':True})
-        return chosen,reports
-
-    @staticmethod
-    def _retry(rows, u):
-        """Bounded familiarity effect: the 2nd attempt of a chart within a session vs the 1st."""
-        seq = sorted(range(len(rows)), key=lambda i: rows[i]["ts"] or 0)
-        last, diffs = {}, []
-        for i in seq:
-            r = rows[i]
-            if r["src"] == "public" or not r["ts"] or r.get("rd"):
-                continue
-            p = last.get(r["chart"])
-            if p is not None and 0 < r["ts"] - rows[p]["ts"] < SESSION_GAP:
-                diffs.append(u[p] - u[i])
-            last[r["chart"]] = i
-        if len(diffs) < 20:
-            return 0.0
-        return float(np.clip(np.mean(diffs) * len(diffs) / (len(diffs) + 50), 0.0, 0.15))
+            'global_variance':max(1e-4,context['condition_variance']),
+            'skill_variance':max(1e-4,context['skill_condition_variance']),
+            'by_key':context['by_key'],
+            'noise_variance':max(1e-4,self.sd_all**2)}
 
     def level_of(self, k):
         if k in self.level:
@@ -568,6 +370,10 @@ class Personal:
         mu += a
         var = lv + self.pop["tau2"] * self.pop["kappa"] / (n_mb + self.pop["kappa"]) + self.tau2_c * self.kap_c / (n_c + self.kap_c)
         return mu, math.sqrt(var), sd
+
+    def predict_many(self, items):
+        """predict for [(f, chart, b, rate)], natively (1.8 s in Python for a 20k-variant PP list × 2 models)."""
+        return _native_personal(self, (0., 1.)).personal_many(items)
 
     def recent_offset(self, f):
         if f['keys'] not in self.recent:
@@ -657,13 +463,17 @@ class Personal:
         return max(0., shift)
 
 
-def evidence_rows(db, pub, feats_of, since=None, until=None):
+def evidence_rows(db, pub, feats_of, since=None, until=None, installed=None):
     """Personal rows with features: → list of dicts (y, base, keys, t, chart, f, src, ts)."""
     out, skipped = [], collections.Counter()
-    installed = installed_by_md5(db)
+    installed = installed if installed is not None else installed_by_md5(db)
     # Feature lookup/decoding can take seconds. Exhaust the small score table
     # first so its read cursor cannot block live event commits on other connections.
-    for r in db.execute("SELECT * FROM scores").fetchall():
+    scores = db.execute("SELECT * FROM scores").fetchall()
+    if hasattr(feats_of, "prefetch"):
+        feats_of.prefetch(feats_of.key(r["sha256"], round(r["rate"] or 1.0, 3)) for r in scores
+                          if r["sha256"] and r["rate"] is not None)
+    for r in scores:
         if until and (r["played"] or "") >= until:
             continue
         mods = json.loads(r["mods"] or "[]")
@@ -721,13 +531,25 @@ class FeatureSource:
             row = self.db.execute("SELECT data FROM feats WHERE key=?", (key,)).fetchone()
             if row:
                 try:
-                    f = self.cache[key] = json.loads(row[0])
+                    f = self.cache[key] = recdata.feats_load(row[0])
                 except (ValueError, TypeError):
                     return None
         return f
 
     def key(self, sha, rate):
         return f"{sha}@{rate:.3f}|{self.calc}"
+
+    def prefetch(self, keys):
+        """Read the uncached of `keys` in one query per 900 (start, cold disk cache: 6.8k single reads 0.4 s, batched 0.05 s)."""
+        need = [k for k in dict.fromkeys(keys) if k not in self.cache]
+        for i in range(0, len(need), 900):
+            chunk = need[i:i + 900]
+            for key, data in self.db.execute(
+                    f"SELECT key, data FROM feats WHERE key IN ({','.join('?' * len(chunk))})", chunk).fetchall():
+                try:
+                    self.cache[key] = recdata.feats_load(data)
+                except (ValueError, TypeError):
+                    pass                                   # lookup() reads it again and returns None
 
     def __call__(self, r, installed=None, *, refresh=False):
         if r["rate"] is None:
@@ -796,7 +618,7 @@ class FeatureSource:
             for rate, f in res.items():
                 k = self.key(sha, rate)
                 self.cache[k] = f
-                self.db.execute("INSERT OR REPLACE INTO feats VALUES (?, ?)", (k, json.dumps(f)))
+                self.db.execute("INSERT OR REPLACE INTO feats VALUES (?, ?)", (k, recdata.feats_dump(f)))
         return 1
 
     def ensure(self, sha, md5, bid, rate):
@@ -1488,21 +1310,20 @@ class Recommender:
             feats.cache = self.feats.cache
         st["installed"] = installed_by_md5(db)
         st["local_shas"] = {r[0] for r in db.execute("SELECT sha256 FROM installed")}
-        rows, st["skipped"] = evidence_rows(db, self.pub, feats)
+        rows, st["skipped"] = evidence_rows(db, self.pub, feats, installed=st["installed"])
         st["rows"] = rows
         session = Session(load_events(db))
         begin = min((e["t"] for e in session.events if e["kind"] == "start"), default=float("inf"))
         historical = [r for r in rows if not r["ts"] or r["ts"] < begin]
         levels = play_levels(historical)
-        st["model"] = Personal(self.pub, [dict(r, base=base_of(self.pub["pop"], r["f"], r["b"], round(r["rate"], 3),
-                                                               levels.get(r["keys"]))[0])
-                                          for r in historical], levels=levels)
+        plays = [(r["f"], r["b"], round(r["rate"], 3), levels.get(r["keys"])) for r in historical]
+        bases = native_population(self.pub["pop"]).base_many(plays)     # base_of natively
+        st["model"] = Personal(self.pub, [dict(r, base=x) for r, (x, _n) in zip(historical, bases)], levels=levels)
         st["accuracy_model"] = None
         if self.pub.get('pop_lazer'):
             display_pub=dict(self.pub,pop=self.pub['pop_lazer'])
-            display_rows=[dict(r,y=r['y_lazer'],base=base_of(display_pub['pop'],r['f'],r['b'],round(r['rate'],3),
-                                                             levels.get(r['keys']))[0])
-                          for r in historical]
+            bases=native_population(display_pub['pop']).base_many(plays)
+            display_rows=[dict(r,y=r['y_lazer'],base=x) for r,(x,_n) in zip(historical,bases)]
             st["accuracy_model"]=Personal(display_pub,display_rows,levels=levels)
         st["_baseline_begin"] = begin
         st["ledger"], st["ledger_missing"] = build_ledger(db, self.pub, st["installed"])
@@ -1579,7 +1400,38 @@ class Recommender:
     def _candidates(self):
         """Every ranked/loved difficulty × NM/HT/DT with features, predicted once (before session form)."""
         self._candidate_keys = recdata.normalize_keys(getattr(self, '_candidate_keys', None))
-        m, C = self.model, []
+        newer = []                                     # ranked after the snapshot: chart features only
+        for inst in self.newer_ranked():
+            meta = {"approved": inst["status"], "md5": inst["md5"], "set": inst["set_id"],
+                    "file": f'{inst["artist"]} - {inst["title"]} [{inst["version"]}]'}
+            for rate, var in recdata.VARIANTS:
+                f = self.feats.lookup(self.feats.key(inst["sha256"], rate))
+                if f and f['keys'] in self._candidate_keys and "stars" in f and f["notes"] >= 100:
+                    newer.append(((inst["beatmap_id"], rate, var, f, meta), self.feats.md5_bid.get(inst["md5"])))
+        # The candidate set and its chart arrays depend on the snapshot, live statuses and keymodes, not on
+        # the fit: a refit only re-predicts (it rebuilt all of this, 1.2 s for 20k variants).
+        key = (self._candidate_keys, frozenset((md5, i.get("status")) for md5, i in self.installed.items()),
+               tuple((c[0], c[1], id(c[3])) for c, _b in newer))
+        cached = getattr(self, "_candidate_set", None)
+        if cached is None or cached[0] is not self.pub or cached[1] != key:
+            cached = self._candidate_set = (self.pub, key) + self._candidate_static(newer)
+        C, bids, static = cached[2:]
+        m = self.model
+        # Personal.predict natively for every variant (1.8 s in Python for 20k variants × 2 models).
+        C = [c + p for c, p in zip(C, m.predict_many([(c[3], c[4]["md5"], b, c[1]) for c, b in zip(C, bids)]))]
+        self.cands = C
+        self.A = dict(static, mu=np.array([c[5] for c in C]), sdm=np.array([c[6] for c in C]),
+                      sda=np.array([c[7] for c in C]))
+        display=getattr(self,'accuracy_model',None)
+        if display is not None:
+            predictions=display.predict_many([(c[3],c[4]['md5'],c[0],c[1]) for c in C])
+            for i,name in enumerate(('display_mu','display_sdm','display_sda')):
+                self.A[name]=np.array([p[i] for p in predictions])
+        self._score_cache = {}
+
+    def _candidate_static(self, newer):
+        """(variants (bid, rate, var, f, meta), the bid each prediction reads, their chart arrays)."""
+        C, bids = [], []
         for b, fs in self.pub["feats"].items():
             meta = self.pub["maps"].get(b)
             if meta:
@@ -1594,34 +1446,23 @@ class Recommender:
             for rate, var in recdata.VARIANTS:
                 f = fs.get(rate)
                 if f and f['keys'] in self._candidate_keys and "stars" in f and f["notes"] >= 100:
-                    C.append((b, rate, var, f, meta) + m.predict(f, meta["md5"], b, rate))
-        for inst in self.newer_ranked():               # ranked after the snapshot: chart features only
-            meta = {"approved": inst["status"], "md5": inst["md5"], "set": inst["set_id"],
-                    "file": f'{inst["artist"]} - {inst["title"]} [{inst["version"]}]'}
-            for rate, var in recdata.VARIANTS:
-                f = self.feats.lookup(self.feats.key(inst["sha256"], rate))
-                if f and f['keys'] in self._candidate_keys and "stars" in f and f["notes"] >= 100:
-                    C.append((inst["beatmap_id"], rate, var, f, meta)
-                             + m.predict(f, inst["md5"], self.feats.md5_bid.get(inst["md5"]), rate))
-        self.cands = C
-        self.A = {k: np.array(v) for k, v in {
+                    C.append((b, rate, var, f, meta))
+                    bids.append(b)
+        for c, b in newer:
+            C.append(c)
+            bids.append(b)
+        A = {k: np.array(v) for k, v in {
             "bid": [c[0] for c in C], "rate": [c[1] for c in C], "keys": [c[3]["keys"] for c in C],
-            "mu": [c[5] for c in C], "sdm": [c[6] for c in C], "sda": [c[7] for c in C],
             "scale": [pp_scale(c[3]["stars"], c[3]["hits"]) for c in C],
             "ranked": [c[4]["approved"] in recdata.RANKED_STATUS for c in C]}.items()}
-        self.A["skill"] = [top_skill(c[3]) for c in C]
-        # Per-chart family mix, once per candidate set: score() needs it 4× per chart and
-        # 153k charts thrash the 32k LRU caches (18–25 s PP rebuild on 2026-10-10).
+        A["skill"] = [top_skill(c[3]) for c in C]
+        # Per-chart family mix (warmup.family_weights), once per candidate set: score() needs it 4× per
+        # chart and 153k charts thrash the 32k LRU caches (18–25 s PP rebuild on 2026-10-10).
         import session_form, warmup
-        self.A["profile"] = [warmup.family_weights(c[3]) for c in C]
-        self.A["loading"] = [session_form._loading(p) for p in self.A["profile"]]
-        self.A["identity"] = np.array([event_key({"md5": c[4]["md5"], "bid": c[0]}) for c in C])
-        display=getattr(self,'accuracy_model',None)
-        if display is not None:
-            predictions=[display.predict(c[3],c[4]['md5'],c[0],c[1]) for c in C]
-            for i,name in enumerate(('display_mu','display_sdm','display_sda')):
-                self.A[name]=np.array([p[i] for p in predictions])
-        self._score_cache = {}
+        A["profile"] = warmup._families().weights_many([c[3] for c in C])
+        A["loading"] = [session_form._loading(p) for p in A["profile"]]
+        A["identity"] = np.array([event_key({"md5": c[4]["md5"], "bid": c[0]}) for c in C])
+        return C, bids, A
 
     def newer_ranked(self):
         """Installed ranked/approved maps without snapshot features: ranked since, or their chart was not in
@@ -1648,7 +1489,8 @@ class Recommender:
             return [], session
         A, cands, L = self.A, self.cands, self.ledger
         pause = getattr(self, 'pause', None)     # the Worker answers a waiting map selection meanwhile
-        F = np.array([(pause() if pause and i % 4096 == 4095 else 0.)
+        F = _native_shift(self.model, session, A, cands)
+        F = F if F is not None else np.array([(pause() if pause and i % 4096 == 4095 else 0.)
                       + session.correction(k,sk,c[3],ld)+session.warmup_penalty(k,sk,c[3]['length']/1000/c[1],c[3],
                           self.model.rate_response(c[3],c[4]['md5'],c[0],c[1]),
                           lambda loss, c=c: self.model.rate_loss(c[3],c[4]['md5'],c[0],c[1],loss),pr)
@@ -1682,7 +1524,8 @@ class Recommender:
         display=getattr(self,'accuracy_model',None)
         if display is not None:
             view=session.for_accuracy(display.warmup)
-            shift=np.array([view.correction(k,sk,c[3],ld)+view.warmup_penalty(k,sk,c[3]['length']/1000/c[1],c[3],
+            shift=_native_shift(display,view,A,cands)
+            shift=shift if shift is not None else np.array([view.correction(k,sk,c[3],ld)+view.warmup_penalty(k,sk,c[3]['length']/1000/c[1],c[3],
                             display.rate_response(c[3],c[4]['md5'],c[0],c[1]),
                             lambda loss,c=c:display.rate_loss(c[3],c[4]['md5'],c[0],c[1],loss),pr)
                             for k,sk,c,pr,ld in zip(A['keys'].tolist(),A['skill'],cands,A['profile'],A['loading'])])
@@ -2014,40 +1857,62 @@ def legacy_key(value):
 def predictor_id():
     """The existing source fingerprint identifies code, not a fitted snapshot."""
     import hashlib
-    import warmup, personal_support, session_form
+    import warmup, session_form
     digest = hashlib.sha256()
-    for path in (__file__, warmup.__file__, personal_support.__file__, accuracy_targets.__file__, session_form.__file__):
+    for path in (__file__, warmup.__file__, accuracy_targets.__file__, session_form.__file__,
+                 os.path.join(os.path.dirname(__file__), 'native', 'src', 'personal.rs')):
         with open(path, 'rb') as fh:
             digest.update(fh.read())
     return digest.hexdigest()[:12]
 
 
-def _native_model(model, shown):
-    """A fitted Personal (and its warmup model) as the native bulk predictor (native/src/predict.rs)."""
-    import native_backend
+def _native_consts(names=recdata.SKILLS):
+    """The Python constants the native predictor reads (skill names, warmup families, gap parts, knots)."""
     import warmup
     if not recdata._GAP_MEMBERS:
         recdata._gap_members()
-    pop, wpop = model.pop, model.warmup.population or {}
+    return {"names": list(names), "families": list(warmup.FAMILIES),
+            "members": [(k, list(v)) for k, v in warmup.MEMBERS.items()],
+            "gap_parts": [[] if p == "all" else list(recdata._GAP_MEMBERS[p]) for p in recdata.GAP_SHARE_PARTS],
+            "gap_knots": list(recdata.GAP_KNOTS), "gap_shared": recdata.GAP_SHARED,
+            "gap_borrow": list(recdata.GAP_BORROW), "recent_families": list(RECENT_FAMILIES),
+            "geometry": list(_GEOMETRY_INDICES), "dominant_skip": list(warmup.DESCRIPTIVE)}
+
+
+def _native_pop(pop):
+    """recdata.fit_population's model as the native predictor reads it (base_of)."""
     parts = recdata.GAP_SHARE_PARTS
     mbr = collections.defaultdict(list)
     for r, _v in recdata.VARIANTS:              # VARIANTS order: rising rates, as base_of's anchors
         for (b, rr), v in pop["mbr"].items():
             if rr == r:
                 mbr[b].append((math.log(r), float(v[0]), float(v[1])))
+    return {"slope": pop["slope"], "window": pop["window"], "curve": pop.get("curve", {}),
+            "curve_knee": pop.get("curve_knee", 4.), "tau2": pop["tau2"], "kappa": pop["kappa"],
+            "mb": {b: (float(v[0]), float(v[1])) for b, v in pop["mb"].items()}, "mbr": dict(mbr),
+            "gap": {k: [(parts.index(p), [float(c) for c in cs]) for p, cs in g.items()]
+                    for k, g in pop.get("gap", {}).items()},
+            "share_mean": {k: [float(m.get(p, 0.)) for p in parts] for k, m in pop.get("share_mean", {}).items()}}
+
+
+def native_population(pop):
+    """A native model of the population alone (no player): `base_many` = base_of for many plays."""
+    import native_backend
     return native_backend.load().PredModel({
-        "consts": {"names": list(model.names), "families": list(warmup.FAMILIES),
-                   "members": [(k, list(v)) for k, v in warmup.MEMBERS.items()],
-                   "gap_parts": [[] if p == "all" else list(recdata._GAP_MEMBERS[p]) for p in parts],
-                   "gap_knots": list(recdata.GAP_KNOTS), "gap_shared": recdata.GAP_SHARED,
-                   "gap_borrow": list(recdata.GAP_BORROW), "recent_families": list(RECENT_FAMILIES),
-                   "geometry": list(_GEOMETRY_INDICES), "dominant_skip": list(warmup.DESCRIPTIVE)},
-        "pop": {"slope": pop["slope"], "window": pop["window"], "curve": pop.get("curve", {}),
-                "curve_knee": pop.get("curve_knee", 4.), "tau2": pop["tau2"], "kappa": pop["kappa"],
-                "mb": {b: (float(v[0]), float(v[1])) for b, v in pop["mb"].items()}, "mbr": dict(mbr),
-                "gap": {k: [(parts.index(p), [float(c) for c in cs]) for p, cs in g.items()]
-                        for k, g in pop.get("gap", {}).items()},
-                "share_mean": {k: [float(m.get(p, 0.)) for p in parts] for k, m in pop.get("share_mean", {}).items()}},
+        "consts": _native_consts(), "pop": _native_pop(pop), "levels": {}, "level": {}, "glob": 0., "sd_all": 0.,
+        "shape": {}, "recent": {}, "aff": {}, "rate_aff": {}, "rate_support": {}, "rate_bandwidth": {0: 1.},
+        "tau2_c": 0., "kap_c": 1., "shown": (0., 1.),
+        "warmup": {"slope": {}, "curve": {}, "curve_knee": 4., "elasticities": {}, "modes": {},
+                   "fallback": {"tau": 8.}}})
+
+
+def _native_model(model, shown):
+    """A fitted Personal (and its warmup model) as the native bulk predictor (native/src/predict.rs)."""
+    import native_backend
+    wpop = model.warmup.population or {}
+    return native_backend.load().PredModel({
+        "consts": _native_consts(model.names),
+        "pop": _native_pop(model.pop),
         "levels": dict(model.levels),
         "level": {k: model.level_of(k) for k in model.level}, "glob": model.glob, "sd_all": model.sd_all,
         "shape": {k: ([float(x) for x in model.zmean[k]], [float(x) for x in model.zscale[k]],
@@ -2061,6 +1926,14 @@ def _native_model(model, shown):
         "warmup": {"slope": wpop.get("slope", {}), "curve": wpop.get("curve", {}),
                    "curve_knee": wpop.get("curve_knee", 4.), "elasticities": model.warmup.elasticities,
                    "modes": model.warmup.modes, "fallback": model.warmup.fallback}})
+
+
+def _native_personal(model, shown):
+    """_native_model of a fitted Personal, built once per model."""
+    cached = model.__dict__.get("_native")
+    if cached is None or cached[0] != shown:
+        cached = model._native = (shown, _native_model(model, shown))
+    return cached[1]
 
 
 _NO_LOADING = np.zeros(1 + 8)
@@ -2078,6 +1951,27 @@ def _native_session(view, keys):
                      "penalty": [model.penalty(k, fam, view.activation(k, fam), 0., 1.) for fam in warmup.FAMILIES],
                      "activation": [view.activation(k, fam) for fam in warmup.FAMILIES]}
     return native_backend.load().PredSession({"warm": bool(view.warm_flag), "keys": tables})
+
+
+def _native_tables(view, model, keys):
+    """_native_session of a frozen Session view bound to `model`'s warmup, cached on the view and widened as
+    keymodes are asked."""
+    cached = view.__dict__.get("_native")
+    if cached is None or cached[0] is not model or not set(keys) <= cached[1]:
+        known = set(keys) | (cached[1] if cached and cached[0] is model else set())
+        cached = view._native = (model, known, _native_session(view, known))
+    return cached[2]
+
+
+def _native_shift(model, view, A, cands):
+    """Session.correction + warmup_penalty of every PP variant natively, or None for models the kernel
+    doesn't cover (no fitted form prior: legacy fits, test stubs). Played charts need nothing more here:
+    score() adds their rate penalty, chart correction and retry itself."""
+    if getattr(getattr(model, "warmup", None), "form_prior", None) is None:
+        return None
+    tables = _native_tables(view, model, set(A["keys"].tolist()))
+    return np.array(_native_personal(model, (0., 1.)).session_shift_many(
+        tables, [(c[3], c[4]["md5"], c[0], c[1]) for c in cands]))
 
 
 class Predictor:
@@ -2112,34 +2006,40 @@ class Predictor:
             md5=chart if isinstance(chart,str) and len(chart)==32 else None)
         return out
 
+    def _native_state(self, session, keys):
+        """(native model, frozen session tables, charts with plays in the session window) for the display
+        target, or None when the kernel doesn't apply: it implements the fitted form-prior correction, so
+        models without one (legacy fits, test stubs) keep the Python path."""
+        if getattr(self, "display", None) is None or getattr(self.display.model.warmup, "form_prior", None) is None:
+            return None
+        session.bind_warmup(getattr(self.model, "warmup", None))
+        view = session.for_accuracy(self.display.model.warmup)
+        played = view.__dict__.get("_native_played")
+        if played is None:
+            played = view._native_played = {b[4:] for b in (*view._attempts_by_map, *view.retry_played)
+                                            if b[:4] in ("md5:", "sha:")}
+        return (_native_personal(self.display.model, self.display.shown),
+                _native_tables(view, self.display.model, keys), played)
+
+    def forecast(self, e, chart, rate, now):
+        """The prediction's accuracy_forecast, as predict() attaches it."""
+        e["accuracy_forecast"] = accuracy_targets.forecast_state(e, generated_at=now,
+            calculator=self.calc, predictor=self.predictor_id, rate=rate, band_z=BAND_Z,
+            sha256=chart if isinstance(chart,str) and len(chart)==64 else None,
+            md5=chart if isinstance(chart,str) and len(chart)==32 else None)
+        return e
+
     def predict_many(self, items, session):
         """predict(..., accuracy_only=True) for [(f, chart, bid, rate)], natively in bulk. Charts with plays
         in the session window keep the Python path: their rate penalty, chart correction and retry."""
-        # The kernel implements the fitted form-prior correction; models without one (legacy fits, test
-        # stubs) keep the Python path.
-        if getattr(self, "display", None) is None or getattr(self.display.model.warmup, "form_prior", None) is None:
-            return [self.predict(f, chart, bid, rate, session, accuracy_only=True) for f, chart, bid, rate in items]
-        session.bind_warmup(getattr(self.model, "warmup", None))
-        view = session.for_accuracy(self.display.model.warmup)
-        played = {b[4:] for b in (*view._attempts_by_map, *view.retry_played) if b[:4] in ("md5:", "sha:")}
-        native = [i for i, it in enumerate(items) if it[1] not in played]
+        state = self._native_state(session, {it[0]["keys"] for it in items})
         out = [None] * len(items)
-        if native:
-            keys = {items[i][0]["keys"] for i in native}
-            cached = view.__dict__.get("_native")
-            if cached is None or cached[0] is not self.display or not keys <= cached[1]:
-                cached = view._native = (self.display, keys | (cached[1] if cached else set()),
-                                         _native_session(view, keys | (cached[1] if cached else set())))
-            if self.display.__dict__.get("_native") is None:
-                self.display._native = _native_model(self.display.model, self.display.shown)
+        if state is not None:
+            model, tables, played = state
+            native = [i for i, it in enumerate(items) if it[1] not in played]
             now = time.time()
-            for i, e in zip(native, self.display._native.predict_accuracy(cached[2], [items[i] for i in native])):
-                chart, rate = items[i][1], items[i][3]
-                e["accuracy_forecast"] = accuracy_targets.forecast_state(e, generated_at=now,
-                    calculator=self.calc, predictor=self.predictor_id, rate=rate, band_z=BAND_Z,
-                    sha256=chart if isinstance(chart,str) and len(chart)==64 else None,
-                    md5=chart if isinstance(chart,str) and len(chart)==32 else None)
-                out[i] = e
+            for i, e in zip(native, model.predict_accuracy(tables, [items[i] for i in native])):
+                out[i] = self.forecast(e, items[i][1], items[i][3], now)
         for i, it in enumerate(items):
             if out[i] is None:
                 out[i] = self.predict(*it, session, accuracy_only=True)
@@ -2225,7 +2125,8 @@ class Worker(threading.Thread):
         self.acc_targets = {"nps": .94, "skills": .94}
         self._selection_id = 0
         self.practice_skills = ()
-        self.nps_state = {"candidates": [], "total": 0, "analyzed": 0, "failed": 0, "error": ""}
+        import nps
+        self.nps_state = {"candidates": nps.no_choices(), "total": 0, "analyzed": 0, "failed": 0, "error": ""}
         self.skills_state = dict(self.nps_state)
         self._local_request_id = 0
         self.builder, self.generation = None, 0
@@ -2246,7 +2147,6 @@ class Worker(threading.Thread):
         self._local_pool_cache = {}
         self._local_weights = {}
         self._credible = {}
-        self._local_prepared = {}
         self._restored_modes = set()
         self._session_cache = (None, None)
         self._last_refit = time.time()
@@ -2480,10 +2380,14 @@ class Worker(threading.Thread):
         """Keep the displayed order; update predictions, then append new maps."""
         import nps
         session = self._session()
-        ready = {}
-        if mode in LOCAL_MODES:
-            cached = self._local_pool_cache.get(mode)
-            ready = {event_key(c): c for c in (cached[2] if cached else fresh)}
+        cached = self._local_pool_cache.get(mode) if mode in LOCAL_MODES else None
+        fresh_by = {event_key(c): c for c in fresh} if mode in LOCAL_MODES and cached is None else {}
+        def ready(key):
+            """The current prepared choice of a queued chart revision."""
+            if cached is None:
+                return fresh_by.get(key)
+            i = cached[2].find(key)
+            return None if i is None else nps.prepared_choice(cached[1], cached[2], i)
         shown = []
         credible = self._credible.get(mode) if mode in LOCAL_MODES and fresh else None
         for c in self.playlists[mode]:
@@ -2495,7 +2399,7 @@ class Worker(threading.Thread):
             sha = c.get('sha') or c.get('sha256')
             if c.get('installed') and sha not in self.rec.local_shas:
                 continue
-            alternative = ready.get(event_key(c))
+            alternative = ready(event_key(c))
             if alternative and alternative['rate'] == c['rate'] and (c.get('md5') or sha):
                 c = alternative             # refresh exact features without changing queue order
             f = c['f']
@@ -2579,10 +2483,10 @@ class Worker(threading.Thread):
                         self.practice_skills if mode == "skills" else (), self.acc_targets.get(mode))
         cached = self._local_pool_cache.get(mode)
         if cached is None or cached[0] != prepared_key or cached[1] is not st:
-            candidates = self._prepare_local(mode, st, session)
-            self._local_pool_cache[mode] = (prepared_key, st, candidates)
+            prepared = st["candidates"].prepare(list(self.keys[mode]), self.rec.local_shas)
+            self._local_pool_cache[mode] = (prepared_key, st, prepared)
         else:
-            candidates = cached[2]
+            prepared = cached[2]
         # Explicit skill preferences must not be erased by unrelated NPS taste.
         taste = None
         if mode == 'nps':
@@ -2591,22 +2495,17 @@ class Worker(threading.Thread):
                 self._taste_cache = (event_id, nps.taste(self.db))
             taste = self._taste_cache[1]
         self._yield_urgent()        # a selected map's card goes before the library-wide weighting
-        weighted = self._local_weights.get(mode)
         web = nps.web_factor(self.web_bias[mode])
-        if weighted is None or weighted[0] is not session or weighted[1] is not candidates or weighted[2] is not taste \
-                or weighted[3] != web:
-            choices = nps.weighted_candidates(candidates, session, self.keys[mode], taste, mode=mode, web=web)
-            self._local_weights[mode] = (session, candidates, taste, web, choices)
+        consumed = tuple(self._playlist_consumed)
+        seed = max((e.get('id', e['t']) for e in session.all
+                    if e['kind'] in ('offer', 'finish', 'abort', 'reset')), default=0) if mode == 'nps' else None
+        key = (session, prepared, taste, web, consumed, seed, self.nps_focus)
+        cached = self._local_weights.get(mode)
+        if cached is None or len(cached[0]) != len(key) or any(a is not b and a != b for a, b in zip(cached[0], key)):
+            ranked = nps.rank(st, prepared, session, self.keys[mode], taste, mode, web, consumed, seed, self.nps_focus)
+            self._local_weights[mode] = (key, ranked)
         else:
-            choices = weighted[4]
-        consumed = set(self._playlist_consumed)
-        available = [c for c in choices if event_key(c) not in consumed] or choices
-        if mode == 'nps':
-            import pp_playlist
-            seed = max((e.get('id', e['t']) for e in session.all
-                        if e['kind'] in ('offer', 'finish', 'abort', 'reset')), default=0)
-            available = pp_playlist.preview(available, len(available), seed, focus=self.nps_focus)
-        ranked = nps.mix(available, web)[:60]
+            ranked = cached[1]
         shown = ranked[:20]
         # A queued map outside the current top 60 was queued under another state (cold start, restart
         # list): G835LX 2026-10-22 offered dEKA, 6 NPS, ranked 2242 of 2245, after seven such maps.
@@ -2637,53 +2536,6 @@ class Worker(threading.Thread):
             note += " · showing the last list while it updates"
         return session.phase(), shown, note
 
-    def _prepare_local(self, mode, st, session):
-        """Only form/features/filter changes revisit whole-map predictions and
-        skill membership. A Next click just updates cheap exposure weights."""
-        import nps
-        candidates = []
-        recent = [a for a in session.attempts[-6:] if a.get("profile") and a.get("meaningful", True)]
-        recent_profiles = [np.array(a['profile']) for a in recent]
-        profile_key = session.model_key()
-        # One preparation per Builder request (plays, refits and filters make a new one; the clock at most
-        # every NPS_CLOCK s). Re-predicting the library here every 30 s clock bucket held the selected
-        # card behind 10–30 s publishes (G835LX run.log 2026-10).
-        key=(self.generation,self._local_request_id,self.keys[mode],self.practice_skills if mode=='skills' else ())
-        previous=self._local_prepared.get(mode)
-        memo=previous[1] if previous and previous[0]==key else {}
-        self._local_prepared[mode]=(key,memo)
-        for i, old in enumerate(st["candidates"]):
-            if i % 256 == 255:
-                self._yield_urgent()
-            f, sha = old["f"], old["sha"]
-            item_key=(sha,old['rate'])
-            prepared=memo.get(item_key)
-            if prepared and prepared[0] is recdata.identity(f):
-                if prepared[1] is not None:candidates.append(prepared[1])
-                continue
-            memo[item_key]=(recdata.identity(f),None)
-            if (old.get("installed", True) and sha not in self.rec.local_shas) or old["keys"] not in self.keys[mode] or not nps.MIN_RATE <= old["rate"] <= nps.MAX_RATE:
-                continue
-            if mode == "skills" and not skill_practice.match(f, self.practice_skills)[0]:
-                continue
-            e = old                     # the Builder's prediction for this request's session
-            target = nps.central_target(session, f)
-            if not nps.eligible(e, session, f):
-                continue
-            value = nps.practice_value(f,e,old['rate'],target,session)
-            if mode == "skills":
-                value = skill_practice.value(f, e, old["rate"], target, self.practice_skills)
-            v = np.array(old["profile"])
-            similar = max((float(v @ a) for a in recent_profiles if len(a) == len(v)), default=0.)
-            candidates.append(dict(old, base_value=value, mode=mode, purpose=mode,
-                                   practice_skills=self.practice_skills if mode == "skills" else (),
-                                   practice_description=skill_practice.describe_match(f,self.practice_skills) if mode == "skills" else "",
-                                   _profile_penalty=(profile_key, .18*similar)))
-            candidates[-1]['accuracy_forecast'] = accuracy_targets.forecast_chart(
-                e.get('accuracy_forecast'), sha, old.get('md5'))
-            memo[item_key]=(recdata.identity(f),candidates[-1])
-        return candidates
-
     def _restore_local(self, mode):
         if not self.rec or mode not in LOCAL_MODES or mode in self._restored_modes:
             return
@@ -2707,7 +2559,8 @@ class Worker(threading.Thread):
                 analyses[sha][rate] = f
         choices, _ = nps.candidates_from(catalog, analyses, self.rec.predictor, self._session(),
                                        mode=mode, selected_skills=self.practice_skills)
-        state = dict(candidates=choices, total=len(by_sha), analyzed=min(len(by_sha), saved.get("analyzed", 0)),
+        state = dict(candidates=choices, catalog=catalog, analyses=analyses, mode=mode,
+                     selected_skills=self.practice_skills, total=len(by_sha), analyzed=min(len(by_sha), saved.get("analyzed", 0)),
                      failed=0, error="", restored=True)
         setattr(self, mode+"_state", state)
 
@@ -2759,8 +2612,7 @@ class Worker(threading.Thread):
             # that placeholder list instead of keeping it, or website charts never show up.
             if getattr(self, mode+"_state", {}).get("restored"):
                 self.playlists[mode] = []
-            for c in state["candidates"]:
-                self.rec.feats.cache[self.rec.feats.key(c["sha"], c["rate"])] = c["f"]
+            state["candidates"].fill_cache(self.rec.feats.cache, self.rec.feats.key, state.get("analyses"))
             # A filtered-out chart has no fresh candidate. Refresh only the
             # retained queue at this publication; Next keeps its cheap cache reads.
             import nps
@@ -2781,21 +2633,13 @@ class Worker(threading.Thread):
             if refreshed:
                 # SQLite may advance after the Builder queued this publication.
                 # Its same-rate alternative must not undo the authoritative refresh.
-                choices = []
-                for c in state['candidates']:
-                    metadata = refreshed.get((event_key(c), c['rate']))
-                    choices.append(dict(c, **metadata) if metadata else c)
-                state = dict(state, candidates=choices)
+                state = dict(state, candidates=state['candidates'].patched(refreshed))
             setattr(self, mode+"_state", state)
             # Small restart cache of references, never frozen predictions or a
             # duplicate copy of the feature database. Preserve broad coverage.
             # A quick partial list (the previous leaders only) would shrink it.
             if not state.get("partial"):
-                import hashlib
-                rows = state["candidates"]
-                kept = sorted(rows, key=lambda c: -c["base_value"])[:512]
-                kept += sorted(rows, key=lambda c: hashlib.sha256(c["sha"].encode()).digest())[:2048]
-                refs = sorted({(c["sha"], c["rate"]) for c in kept})
+                refs = state["candidates"].restart_refs()      # 512 best, 2048 spread by sha256
                 recdata.kv_set(self.db, "playlist_cache:"+mode, {"version": 1, "calc": self.rec.feats.calc,
                                 "choices": refs, "analyzed": state["analyzed"]})
             if mode == self.mode:
