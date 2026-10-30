@@ -1877,10 +1877,10 @@ def legacy_key(value):
 def predictor_id():
     """The existing source fingerprint identifies code, not a fitted snapshot."""
     import hashlib
-    import warmup, session_form
+    import native_backend, warmup, session_form
     digest = hashlib.sha256()
     for path in (__file__, warmup.__file__, accuracy_targets.__file__, session_form.__file__,
-                 os.path.join(os.path.dirname(__file__), 'native', 'src', 'personal.rs')):
+                 os.path.join(native_backend.ROOT, 'native', 'src', 'personal.rs')):
         with open(path, 'rb') as fh:
             digest.update(fh.read())
     return digest.hexdigest()[:12]

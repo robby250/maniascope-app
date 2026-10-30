@@ -275,7 +275,7 @@ def test_compatible_source_identity_does_not_hide_a_changed_model(tmp_path):
     import native_backend as N
     identity=recdata.calc_id.__wrapped__()
     for path in N.identity_files():
-        copy=tmp_path/path.relative_to(N.ROOT)
+        copy=tmp_path/(path.name if path.parent==N.APP else path.relative_to(N.ROOT))   # flat, as a runtime snapshot
         copy.parent.mkdir(parents=True,exist_ok=True)
         shutil.copy2(path,copy)
     copied=lambda:recdata._calculator_identity(N.identity_files(tmp_path))

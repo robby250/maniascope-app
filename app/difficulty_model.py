@@ -10,7 +10,7 @@ from functools import lru_cache
 import native_backend
 N = native_backend.load()
 
-PARAMETERS = os.path.join(os.path.dirname(__file__), "calib", "difficulty.json")
+PARAMETERS = os.path.join(native_backend.ROOT, "calib", "difficulty.json")
 FEATURES = ("ln", "chordjack", "delay", "minijack", "technical", "sv",
             "endurance", "cj_endurance", "wide_jacks", "od_rice", "od_ln", "od_jack")
 EXTRA_FEATURES = ("mash", "pseudo_mash", "ln_flow", "smooth_switch", "peak_pressure", "transition_pressure")

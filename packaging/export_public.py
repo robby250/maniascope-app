@@ -46,7 +46,7 @@ def main(dest):
     if os.path.exists(workflow):
         shutil.copy2(os.path.join(ROOT, "packaging", "windows-workflow.yml"), workflow)
     # CI checks the frozen identity against the one whose public-<calc>.pkl this machine publishes.
-    sys.path.insert(0, ROOT)
+    sys.path.insert(0, os.path.join(ROOT, "app"))
     import recdata
     with open(os.path.join(dest, "packaging", "calc_id.expected"), "w") as fh:
         fh.write(recdata.calc_id() + "\n")

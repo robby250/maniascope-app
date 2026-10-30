@@ -18,4 +18,4 @@ mkdir -p "$LOGDIR"
 exec >>"$LOGDIR/run.log" 2>&1
 echo "=== launch $(date '+%F %T') ==="
 
-exec python3 "$HERE/skillsets.py"
+exec python3 "$HERE/app/skillsets.py"

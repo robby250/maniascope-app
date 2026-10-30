@@ -33,7 +33,8 @@ def preserve_runtime(directory=None):
     import shutil
     import tempfile
     import recdata
-    source = Path(__file__).resolve().parent
+    import native_backend
+    source, root = native_backend.APP, native_backend.ROOT
     base = Path(directory) if directory is not None else Path(recdata.REC_DIR)/'runtime'
     calculator = recdata.calc_id()
     if previous_helper(calculator, base):
@@ -42,11 +43,11 @@ def preserve_runtime(directory=None):
     with tempfile.TemporaryDirectory(prefix='.snapshot-', dir=base) as temp:
         target = Path(temp)/calculator
         target.mkdir()
-        files = [p for p in source.glob('*.py') if not p.name.startswith('test_')]
-        import native_backend
-        files += native_backend.sources(source) + [source/'calib/difficulty.json']
-        for path in files:
-            dest = target/path.relative_to(source)
+        # The snapshot is flat (modules beside native/ and calib/), as a packaged build.
+        files = [(p, p.name) for p in source.glob('*.py') if not p.name.startswith('test_')]
+        files += [(p, p.relative_to(root)) for p in native_backend.sources(root) + [root/'calib/difficulty.json']]
+        for path, rel in files:
+            dest = target/rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, dest)
         copied = recdata._calculator_identity(native_backend.identity_files(target))

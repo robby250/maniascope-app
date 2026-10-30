@@ -25,7 +25,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "app"))
 import dans  # noqa: E402
 import recdata  # noqa: E402
 import skill_calc  # noqa: E402

@@ -32,7 +32,7 @@ if ! python3 -c "import rosu_pp_py" 2>/dev/null; then
 fi
 
 echo "== 2/5 osu!lazer"
-LAZER="$(cd "$HERE" && python3 -c 'import paths; print(paths.lazer_data())')"
+LAZER="$(cd "$HERE/app" && python3 -c 'import paths; print(paths.lazer_data())')"
 if [ -f "$LAZER/client.realm" ]; then
   echo "Found osu!lazer data at $LAZER"
 else
@@ -61,12 +61,12 @@ if [ ! -d "$DATA/realmjs/node_modules/realm" ]; then
 fi
 
 echo "== 4/5 Calculator (native, required)"
-SO="$(cd "$HERE" && python3 -c 'import native_backend as N; print(N.location()/N.ARTIFACT)')"
+SO="$(cd "$HERE/app" && python3 -c 'import native_backend as N; print(N.location()/N.ARTIFACT)')"
 if [ -f "$SO" ]; then
   echo "Ready."
 elif command -v cargo >/dev/null || [ -x "$HOME/.cargo/bin/cargo" ]; then
   echo "Building it with Rust (~1 min)…"
-  (cd "$HERE" && nice python3 native_backend.py)
+  (cd "$HERE/app" && nice python3 native_backend.py)
 else
   # A release ships the calculator for its own sources (asset named by their hash); newer sources need Rust.
   name="maniascope_native-$(basename "$(dirname "$SO")").abi3.so"

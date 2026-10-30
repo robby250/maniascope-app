@@ -19,9 +19,10 @@ import json
 import math
 import os
 
+import native_backend
 import recdata
 
-TABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calib", "dans.json")
+TABLE = os.path.join(native_backend.ROOT, "calib", "dans.json")
 SERIES = {(4, "rice"): "4K REFORM", (4, "ln"): "4K LN",
           (6, "rice"): "6K Regular", (6, "ln"): "6K LN", (7, "rice"): "7K Regular", (7, "ln"): "7K LN",
           (10, "rice"): "10K Regular"}

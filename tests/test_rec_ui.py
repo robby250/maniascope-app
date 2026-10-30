@@ -194,16 +194,17 @@ def test_tabs_keys_clipboard_and_persistence():
                 ui.recdata.set_tracking(w.tracking_db, False)
                 with patch.object(ui, 'DEBUG', False):
                     assert not ui.tracking_switch(w.tracking_db) and ui.recdata.tracking_enabled(w.tracking_db)
-                # ⚙ flips the current tab to its settings page; another tab or Stats closes it.
+                assert w.recs.get_child().get_visible() and w.card_lbl.get_visible()
+                # ⚙ sits in the current tab's label and flips it to its settings page; another tab or Stats closes it.
                 w._set_rec_mode('nps')
                 w.gear_btn.set_active(True)
                 assert w._rec_views['nps']['stack'].get_visible_child_name() == 'settings'
                 w._set_rec_mode('pp')
                 assert not w.gear_btn.get_active() and w._rec_views['nps']['stack'].get_visible_child_name() == 'list'
                 w._rec_notebook.set_current_page(3)
-                assert not w.gear_btn.get_visible()
+                assert w.gear_btn.get_parent() is None
                 w._set_rec_mode('nps')
-                assert w.gear_btn.get_visible()
+                assert w.gear_btn.get_parent() is w._tab_labels[1] and w.gear_btn.get_visible()
                 def named(widget, name):
                     if isinstance(widget, (Gtk.Switch, Gtk.Scale)) and widget.get_accessible().get_name() == name:
                         return widget
@@ -220,21 +221,22 @@ def test_tabs_keys_clipboard_and_persistence():
                 assert w.rec.tasks[-1][-1]['every'] == 6
                 named(w._rec_views['pp']['stack'], 'DT').set_active(False)
                 assert w.rec.tasks[-1][-2]['dt'] is False
-                # The selected map: one line of the playlist-only facts, the full card on hover.
+                # The selected map: numbers first (fixed place whatever the title), the full card on hover.
                 card = dict(c, rate=1.2, acc_mid=.941, acc_lo=.905, acc_hi=.963, ranked=True, pp_lo=380., pp_hi=430.,
                             best=400., gain=3.1, p_up=.45, skill='chordstream', plays_like=(7.4, 1000))
                 w._on_rec(dict(type='card', c=card))
-                assert '~94.1%' in w.card_lbl.get_text() and '\n' not in w.card_lbl.get_text()
+                assert '~94.1%' in w.card_lbl.get_text().split('\n')[0] and 'Cyber Shaman' in w.card_lbl.get_text().split('\n')[1]
                 assert '+3.1pp' not in w.card_lbl.get_text() and 'Top-1000' in w.card_lbl.get_tooltip_text()
                 w._set_rec_mode('pp')
-                assert '+3.1pp · 45% to beat' in w.card_lbl.get_text()
+                assert '+3.1pp · 45% to beat' in w.card_lbl.get_text().split('\n')[0]
                 w._set_rec_mode('skills')
                 w._save_ui()
                 geometry=json.load(open(prefs))
                 assert geometry['pp_mix']['on'] and geometry['pp_mix']['every'] == 6 and not geometry['pp_settings']['dt']
                 assert geometry['skills_acc_target'] == .925 and geometry['display']['skills'] == 1
                 assert geometry['h']>=370 and geometry['recs_h']>=850
-                assert geometry['details_h'] > geometry['h']
+                assert geometry['details_h'] > geometry['h'] and geometry['recs_pos'] == list(w.recs.get_position())
+                assert geometry['pos'] == list(w.get_position())
                 screenshot = os.environ.get("MANIASCOPE_UI_SCREENSHOT")
                 if screenshot:
                     c = dict(c, sha="a"*64, acc_mid=.94, acc_lo=.915, acc_hi=.967, ranked=False, skill="chordstream")
@@ -249,19 +251,26 @@ def test_tabs_keys_clipboard_and_persistence():
                         time.sleep(.01)
                     size = w.recs.get_size()
                     Gdk.pixbuf_get_from_window(w.recs.get_window(), 0, 0, *size).savev(screenshot, "png", [], [])
+                w.move(123, 77); w.recs.move(150, 400)
+                until = time.monotonic() + .3
+                while time.monotonic() < until:
+                    while Gtk.events_pending(): Gtk.main_iteration_do(False)
+                    time.sleep(.01)
                 w.destroy(); w.recs.destroy()
                 saved = json.load(open(prefs))
+                assert saved['pos'] == [123, 77] and saved['recs_pos'] == [150, 400]
                 assert saved["recommendation_mode"] == "skills" and saved["next_action"] == "copy"
                 assert saved["pp_keys"] == [4,5,6,8,9] and saved["nps_keys"] == [7]
                 assert saved['skills_keys'] == [7] and set(saved['practice_skills']) == {'ln','jumptrill'}
                 assert saved["mode"] == "auto"       # viewer Auto/manual remains separate
-                again=ui.ManiaScopeWindow();again.show_all();again.recs.show_all()
+                assert saved["recs_open"]             # closed with the playlist open: it reopens on start
+                again=ui.ManiaScopeWindow();again.show_all()
                 until=time.monotonic()+.15
                 while time.monotonic()<until:
                     while Gtk.events_pending():Gtk.main_iteration_do(False)
                     time.sleep(.01)
-                assert again.get_size()[1]>=geometry['h']
-                assert again.recs.get_size()[1]>=geometry['recs_h']
+                assert again.get_size()[1]>=geometry['h'] and list(again.get_position()) == [123, 77] and list(again.recs.get_position()) == [150, 400]
+                assert again.recs.get_size()[1]>=geometry['recs_h'] and again.recs_btn.get_active() and again.recs.get_visible()
                 again.destroy();again.recs.destroy()
 
 

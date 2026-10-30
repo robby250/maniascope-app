@@ -144,7 +144,8 @@ class WaitBanner(Gtk.Box):
     """What a tab still waits for, with a bar: a first run must never look finished or stuck."""
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4, no_show_all=True)
-        self.text = Gtk.Label(xalign=0, wrap=True, max_width_chars=60)
+        # Narrow natural width: KWin grows the window to a newly shown label's natural width (user 2026-10-30).
+        self.text = Gtk.Label(xalign=0, wrap=True, max_width_chars=36)
         self.text.get_style_context().add_class("dim-label")
         self.bar = Gtk.ProgressBar()
         self.pack_start(self.text, False, False, 0)

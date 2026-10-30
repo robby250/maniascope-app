@@ -24,15 +24,15 @@ mkdir -p node realmjs && cp "$C/node/node.exe" node/
   && WINEPATH='C:\node' run 'C:\node\node.exe' 'C:\node\node_modules\npm\bin\npm-cli.js' install realm@12)
 rm -rf realmjs/node_modules/realm/prebuilds/{android,apple}          # 930 MB of mobile static libraries
 export WINEPATH='C:\gtk\bin' GI_TYPELIB_PATH='C:\gtk\lib\girepository-1.0'
-wine 'C:\py\python.exe' -c "import recdata; print(recdata.calc_id())" </dev/null >calc_id.txt 2>/dev/null
+wine 'C:\py\python.exe' -c "import sys; sys.path.insert(0, 'app'); import recdata; print(recdata.calc_id())" </dev/null >calc_id.txt 2>/dev/null
 [ "$(tr -d "\r" <calc_id.txt)" = "$(cat packaging/calc_id.expected)" ] || { echo "calc id $(cat calc_id.txt) != expected"; exit 1; }
 # Rust calculator, cross-built here for windows-gnu (abi3: one .pyd for any Python ≥ 3.10). The source
 # self-test loads it from the cache folder native_backend looks in; the spec bundles it for the frozen app.
 CARGO_TARGET_DIR="$W/target" ~/.cargo/bin/cargo build -q --release --target x86_64-pc-windows-gnu --manifest-path native/Cargo.toml
 cp "$W/target/x86_64-pc-windows-gnu/release/maniascope_native.dll" native/maniascope_native.pyd
-cache=$(wine 'C:\py\python.exe' -c "import native_backend; print(native_backend.location())" </dev/null 2>/dev/null | tr -d "\r")
+cache=$(wine 'C:\py\python.exe' -c "import sys; sys.path.insert(0, 'app'); import native_backend; print(native_backend.location())" </dev/null 2>/dev/null | tr -d "\r")
 mkdir -p "$(winepath -u "$cache")" && cp native/maniascope_native.pyd "$(winepath -u "$cache")/"
-run 'C:\py\python.exe' maniascope_app.py --self-test
+run 'C:\py\python.exe' app/maniascope_app.py --self-test
 run 'C:\py\python.exe' -m PyInstaller --noconfirm packaging/maniascope.spec
 (cd dist/ManiaScope && run ManiaScope.exe --self-test)
 grep -q "self-test OK.*native" "$W/dl/last.log"

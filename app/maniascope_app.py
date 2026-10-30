@@ -17,7 +17,8 @@ def self_test():
     import dans
     import recdata
     import skill_calc
-    here = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    import native_backend
+    here = str(native_backend.ROOT)
     res = skill_calc.compute(skill_calc.parse_osu(os.path.join(here, "packaging", "selftest.osu")), 1.0)
     assert 1 < res["scores"]["overall"] < 20, res["scores"]["overall"]
     assert dans._table(), "dan table missing or built by another calculator"
@@ -47,7 +48,8 @@ def log_to_file():
     for fd in (1, 2):
         os.dup2(fh.fileno(), fd)  # C-level GLib/GTK output too
     sys.stdout = sys.stderr = fh
-    here = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    import native_backend
+    here = str(native_backend.ROOT)
     try:
         calc = open(os.path.join(here, "calc_id.txt")).read().strip()
     except OSError:

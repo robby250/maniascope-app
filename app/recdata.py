@@ -36,7 +36,6 @@ import time
 import urllib.parse
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 import paths  # noqa: E402
 REC_DIR = os.path.expanduser(os.environ.get("MANIASCOPE_REC", os.path.join(paths.DATA, "rec")))
 DB_FILE = os.path.join(REC_DIR, "rec.db")
@@ -472,6 +471,8 @@ _EXACT_IMPLEMENTATIONS = {
     # source digest → earlier calc ID, for refactors proven exact on the parity set.
     # lib.rs left the identity (it only registers modules; fit.rs added): calculator sources unchanged.
     "ee9cce9ecc7d8c5d4db94092ebd268d5d795b6c1797c53f2b244cf13956dbc84": "3c695ee7a23f",
+    # Modules moved to app/: difficulty_model finds calib/difficulty.json via native_backend.ROOT, same file.
+    "df6725a18a949a82f1214a8a39299c8ecdf4aec44c819a3052c234e3ee309e66": "3c695ee7a23f",
 }
 
 
@@ -1177,7 +1178,8 @@ def refresh(archive=None, download=False, user_id=None, charts=None, build=build
         got = _safe_extract(archive, stage, NEEDED)
         if set(NEEDED) - got:
             raise ValueError(f"archive lacks {sorted(set(NEEDED) - got)}")
-        sys.path.insert(0, os.path.join(HERE, "calib"))
+        import native_backend
+        sys.path.insert(0, os.path.join(native_backend.ROOT, "calib"))
         import stage1
         scores, maps = stage1.parse(stage + os.sep)
         prev = load_public()

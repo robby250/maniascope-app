@@ -45,10 +45,10 @@ jobs:
           Pop-Location
       - name: Source self-test
         run: |
-          python -c "import recdata; print(recdata.calc_id())" > calc_id.txt
+          python -c "import sys; sys.path.insert(0, 'app'); import recdata; print(recdata.calc_id())" > calc_id.txt
           # The released population evidence is keyed by this identity (public-<calc>.pkl).
-          python -c "import recdata; c, e = recdata.calc_id(), open('packaging/calc_id.expected').read().strip(); assert c == e, (c, e)"
-          python maniascope_app.py --self-test
+          python -c "import sys; sys.path.insert(0, 'app'); import recdata; c, e = recdata.calc_id(), open('packaging/calc_id.expected').read().strip(); assert c == e, (c, e)"
+          python app/maniascope_app.py --self-test
       - name: Freeze
         run: |
           # The GTK runtime's typelibs/schemas are collected by PyInstaller's gi hooks from C:\gtk.

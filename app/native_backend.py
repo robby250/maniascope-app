@@ -13,7 +13,13 @@ import shutil
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parent
+def tree_root(app):
+    """Source checkout: modules in app/, native/ and calib/ beside it. Packaged builds and runtime snapshots are flat."""
+    return app if (app/'calib').is_dir() else app.parent
+
+
+APP = Path(__file__).resolve().parent
+ROOT = tree_root(APP)
 WINDOWS = sys.platform == 'win32'
 ARTIFACT = 'maniascope_native.pyd' if WINDOWS else 'maniascope_native.abi3.so'
 
@@ -23,15 +29,16 @@ def sources(root=None):
     return [crate/'Cargo.toml', crate/'Cargo.lock'] + sorted((crate/'src').glob('*.rs'))
 
 
-def identity_files(root=None):
+def identity_files(app=None):
     """What calc_id hashes: crate sources, Python faces, fitted stages."""
     import recdata
-    root = Path(root or ROOT)
+    app = Path(app or APP)
+    root = tree_root(app)
     # The predictor, the personal fit, the fitting kernels, the feature codec and the thread pool share the crate, not the identity: none changes a
     # calculator result, and a change to them must not re-analyse every library. lib.rs only declares and
     # registers modules (every calculator module is hashed itself).
     return ([p for p in sources(root) if p.name not in ('lib.rs', 'predict.rs', 'choices.rs', 'personal.rs', 'fit.rs', 'background.rs', 'codec.rs')]
-            + [root/(name+'.py') for name in recdata.CALCULATOR_MODULES] + [root/'calib/difficulty.json'])
+            + [app/(name+'.py') for name in recdata.CALCULATOR_MODULES] + [root/'calib/difficulty.json'])
 
 
 def source_hash():

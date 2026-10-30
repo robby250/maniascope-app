@@ -445,7 +445,7 @@ def _map_markup(c):
 
 
 def target_markup(c, obs):
-    """The picked map in one line: the rate to set (green once osu! shows it), title, expectation."""
+    """The picked map: the rate to set (green once osu! shows it) and expectation first, so they never move; title below."""
     if not c:
         return ""
     rate = c["rate"]
@@ -464,20 +464,23 @@ def target_markup(c, obs):
     expected = f"~{100*c['acc_mid']:.1f}%" if c.get("acc_mid") is not None else "pending"
     if same_chart and sha and sha != observed_sha:
         expected = "Updated chart selected"
-    return (f'<span foreground="{colour}" weight="bold">{mark} SET {rate:.2f}× · {wanted}</span>  '
-            + _map_markup(c) + f"  <small>{expected}</small>")
+    return (f'<span foreground="{colour}" weight="bold">{mark} SET {rate:.2f}× · {wanted}</span>  <b>{expected}</b>\n'
+            + _map_markup(c))
 
 
 def card_markup(c, mode="pp", note=None):
-    """The selected map: one line of what only the playlist window shows, and the full card as its tooltip."""
+    """The selected map: numbers on the first line, at a fixed place whatever the title (user 2026-10-30), then
+    title and details. The full card is its tooltip."""
     if not c:
         return "<small>" + GLib.markup_escape_text(note or "Select a map to see its prediction") + "</small>", None
     m, sec = divmod(int(c["length"]), 60)
-    line = (f"<small>SELECTED</small>  {_map_markup(c)}  <b>{c.get('rate', 1.):.2f}× · ~{100 * c['acc_mid']:.1f}%</b>"
-            f" <small>({100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%)</small>")
-    if mode == "pp" and c["ranked"]:
-        line += f"  +{c['gain']:.1f}pp · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'}"
     skill = skill_calc.NAMES.get(c.get("skill"), c.get("skill") or "")
+    line = (f"<small>SELECTED</small>  <b>~{100 * c['acc_mid']:.1f}%</b>"
+            f" <small>({100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%)</small>  <b>{c.get('rate', 1.):.2f}×</b>")
+    if mode == "pp" and c["ranked"]:
+        line += f"  <b>+{c['gain']:.1f}pp</b> · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'}"
+    details = [f"{m}:{sec:02d}", skill, f"{c['nps']:.1f} NPS" if c.get("nps") else ""]
+    line += "\n" + _map_markup(c) + "\n<small>" + GLib.markup_escape_text(" · ".join(x for x in details if x)) + "</small>"
     tip = [f"Expected ~{100 * c['acc_mid']:.1f}%, usually {100 * c['acc_lo']:.1f}–{100 * c['acc_hi']:.1f}%",
            f"{c.get('rate', 1.):.2f}× · {m}:{sec:02d} · {skill}"]
     if not c["ranked"]:
@@ -527,11 +530,14 @@ class ManiaScopeWindow(Gtk.Window):
         # `w`/`h` are the compact viewer geometry. Details may temporarily grow
         # the window, but collapsing must return to this size rather than letting
         # the timeline consume the space that the skill rows used.
-        self._win_size = (int(ui.get("w", 400)), int(ui.get("h", 230)))
-        self._details_size = (int(ui.get("details_w", self._win_size[0])),
-                              int(ui.get("details_h", self._win_size[1])))
+        # Defaults: the user's own sizes on G835LX (2026-10-30).
+        self._win_size = (int(ui.get("w", 442)), int(ui.get("h", 214)))
+        self._details_size = (int(ui.get("details_w", 441)), int(ui.get("details_h", 663)))
         self._restoring_compact = False
-        self._recs_size = (int(ui.get("recs_w", 620)), int(ui.get("recs_h", 760)))
+        self._recs_size = (int(ui.get("recs_w", 442)), int(ui.get("recs_h", 420)))
+        # Windows/X11 only: Wayland ignores move() (a compositor window rule places them there).
+        self._recs_pos = tuple(ui["recs_pos"]) if ui.get("recs_pos") else None
+        self._win_pos = tuple(ui["pos"]) if ui.get("pos") else None
         self.set_default_size(*(self._details_size if ui.get("details") else self._win_size))
         self._auto = ui.get("mode", "auto") == "auto"
         self._manual_rate = float(ui.get("rate", 1.0))
@@ -586,6 +592,8 @@ class ManiaScopeWindow(Gtk.Window):
         bar.pack_end(self._overflow())
         self.set_titlebar(bar)
         self.set_title("ManiaScope")   # taskbar name; the header bar shows none
+        if self._win_pos:              # after the titlebar: it changes the frame move() is relative to
+            self.move(*self._win_pos)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         for side in ("start", "end", "top"):
@@ -644,6 +652,8 @@ class ManiaScopeWindow(Gtk.Window):
         self.timeline.connect("draw", self.on_draw_timeline)
         root.pack_start(self.timeline, True, True, 2)
         self._recs_window()
+        if ui.get("recs_open"):           # open last time the app closed: reopen once the main window is up
+            GLib.idle_add(lambda: self.recs_btn.set_active(True))
 
         self.details = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.NONE)
         grid = self._grid = Gtk.Grid(column_spacing=8, row_spacing=1)
@@ -695,6 +705,7 @@ class ManiaScopeWindow(Gtk.Window):
         # GTK/Wayland may not emit the X11 configure events used previously.
         # Allocation works on both backends and also covers the playlist window.
         self.connect("size-allocate", self._on_configure)
+        self.connect("configure-event", self._on_moved)
         self.connect("destroy", self._on_destroy)
         self.connect("delete-event", lambda *_: (lifecycle("close requested"), False)[1])
         self.connect("unmap-event", lambda *_: (lifecycle("window unmapped"), False)[1])
@@ -1144,7 +1155,7 @@ class ManiaScopeWindow(Gtk.Window):
             box.pack_start(keys, False, False, 0)
             box.pack_start(self._acc_target_row(mode), False, False, 0)
             self._section(box, "MIX")
-            box.pack_start(self._slider("Variety ↔ high NPS", self._nps_focus, lambda v: f"{100 * v:.0f}% NPS",
+            box.pack_start(self._slider("Variety to high NPS", self._nps_focus, lambda v: f"{100 * v:.0f}% NPS",
                                         self._set_nps_focus, tooltip="Choose more variety or prioritize the highest "
                                                                      "NPS. Both aim at the accuracy target."),
                            False, False, 0)
@@ -1206,7 +1217,7 @@ class ManiaScopeWindow(Gtk.Window):
                 self._slider("HT min gain", opt["ht_gain"], lambda v: f"{v:g}pp", set_("ht_gain"),
                              values=(1., 2., 3., 5., 8., 10., 15., 20.))])
             self._section(box, "STYLE")
-            box.pack_start(self._slider("Safe ↔ Push", opt["push"],
+            box.pack_start(self._slider("Safe to Push", opt["push"],
                                         lambda v: "auto" if abs(v) < .01 else f"{'push' if v > 0 else 'safe'} {abs(v):.2f}",
                                         set_("push"), -.5, .5, .05,
                                         tooltip="Middle: follows your form. Push: higher-pp, lower-accuracy maps. "
@@ -1233,18 +1244,27 @@ class ManiaScopeWindow(Gtk.Window):
             if button is not None:
                 bar.pack_start(button)
         # In-tab settings page, not a popover: the PP tab has ~8 controls (GNOME HIG keeps popovers small).
-        self.gear_btn = Gtk.ToggleButton(image=Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
+        # The gear sits in the current tab's label (user 2026-10-30) and moves with the tab.
+        self.gear_btn = Gtk.ToggleButton(image=Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.MENU),
+                                         relief=Gtk.ReliefStyle.NONE, can_focus=False)
         self.gear_btn.set_tooltip_text("Settings for this tab")
         self.gear_btn.connect("toggled", self._toggle_settings)
-        bar.pack_end(self.gear_btn)
+        self._tab_labels = []
         bar.show_all()
         win.set_titlebar(bar)
-        win.connect("size-allocate", self._on_recs_size)
+        win.set_title("ManiaScope — Playlist")   # after the header bar, else Wayland shows "skillsets.py" (KWin rules match it)
+        win.connect("configure-event", self._on_recs_size)
         win.set_transient_for(self)
         win.connect("delete-event", lambda *_: (self.recs_btn.set_active(False), True)[1])
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=10)
-        win.add(box)
-        line = lambda **kw: Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, **kw)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        # Content never sizes the window: KWin grew it to each new natural/minimum width (user 2026-10-30, twice).
+        # Only the user's resize (and the saved size) sets it; too-wide content scrolls instead.
+        outer = Gtk.ScrolledWindow(propagate_natural_width=False, propagate_natural_height=False)
+        outer.add(box)
+        outer.show()
+        win.add(outer)
+        # Wrap, never ellipsize: a narrow window must still show every word (user 2026-10-30).
+        line = lambda **kw: Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, max_width_chars=50, **kw)
         self.card_lbl = line()          # the full card is its tooltip
         self.card_lbl.set_markup("<small>select a map in lazer</small>")
         box.pack_start(self.card_lbl, False, False, 0)
@@ -1293,8 +1313,13 @@ class ManiaScopeWindow(Gtk.Window):
             stack.add_named(page, "list")
             stack.add_named(self._settings_page(mode, key_btn), "settings")
             stack.show_all()
-            self._rec_notebook.append_page(stack, Gtk.Label(label=recommend.MODE_NAMES[mode]))
+            tab = Gtk.Box(spacing=2)
+            tab.pack_start(Gtk.Label(label=recommend.MODE_NAMES[mode]), False, False, 0)
+            tab.show_all()
+            self._tab_labels.append(tab)
+            self._rec_notebook.append_page(stack, tab)
         self._rec_notebook.set_current_page(recommend.MODES.index(self._rec_mode))
+        self._tab_labels[recommend.MODES.index(self._rec_mode)].pack_start(self.gear_btn, False, False, 0)
         from stats_view import StatsView
         self._stats_open = False
         self.stats_view = StatsView(self._practice_from_stats)
@@ -1302,7 +1327,7 @@ class ManiaScopeWindow(Gtk.Window):
         self._rec_notebook.append_page(self.stats_view, Gtk.Label(label="Stats"))
         self._rec_notebook.connect("switch-page", self._switch_rec_page)
         box.show_all()
-        self.recs_btn.connect("toggled", lambda b: win.present() if b.get_active() else win.hide())
+        self.recs_btn.connect("toggled", lambda b: self._present_recs() if b.get_active() else win.hide())
 
     def _toggle_settings(self, button):
         mode = recommend.MODES[self._rec_notebook.get_current_page()] if not self._stats_open else None
@@ -1352,8 +1377,8 @@ class ManiaScopeWindow(Gtk.Window):
             if not view["hover"] or not view["ready"]:
                 self._flush_pool(mode)
         elif msg["type"] == "result":
-            self.result_lbl.set_markup(f"<small>LAST PLAY</small>  <b>{GLib.markup_escape_text(msg['title'])}</b>  "
-                                       f"{GLib.markup_escape_text(msg['text'].replace(chr(10), ' · '))}")
+            self.result_lbl.set_markup(f"<small>LAST PLAY</small>  {GLib.markup_escape_text(msg['text'].replace(chr(10), ' · '))}"
+                                       f"\n<b>{GLib.markup_escape_text(msg['title'])}</b>")
             self.result_lbl.set_tooltip_text(f"{msg['title']}\n{msg['text']}")
             self.result_lbl.show()
             if self._auto_next and self._rec_mode in msg.get("targets", ()) and self.next_btn.get_sensitive():
@@ -1468,7 +1493,11 @@ class ManiaScopeWindow(Gtk.Window):
     def _switch_rec_page(self, _notebook, _page, index):
         active = index == len(recommend.MODES)
         self.gear_btn.set_active(False)        # still the old page: its settings close
-        self.gear_btn.set_visible(not active)
+        if self.gear_btn.get_parent():
+            self.gear_btn.get_parent().remove(self.gear_btn)
+        if not active:
+            self._tab_labels[index].pack_start(self.gear_btn, False, False, 0)
+            self.gear_btn.show_all()
         old = self._stats_open
         self._stats_open = active
         if not active:
@@ -1620,8 +1649,8 @@ class ManiaScopeWindow(Gtk.Window):
         view["note"].set_text(f"{phase}{' · ' + msg['note'] if msg['note'] else ''}")
         view["note"].set_tooltip_text("\n".join(t for t in (view["note"].get_text(), msg["summary"]) if t))
         done, total = msg.get("progress") or (0, 0)
-        view["analysing"] = ((f"Maps analysed for this playlist · {done:,} / {total:,} (more are analysed "
-                              "in the background, paused while you play)", done, total) if total else None)
+        view["analysing"] = ((f"Analysing maps · {done:,} / {total:,} · paused while you play", done, total)
+                             if total else None)
         self._show_wait(view)
         for c in msg["shown"]:
             m, sec = divmod(int(c["length"]), 60)
@@ -1637,14 +1666,14 @@ class ManiaScopeWindow(Gtk.Window):
                 sub = ([f"{c['nps']:.1f} NPS"] if mode == "nps" else []) + [length, c.get("description") or c.get("skill") or ""]
             if not c.get("installed", True):
                 sub.append("download" if mode != "pp" else "not installed")
-            title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, hexpand=True)
+            title = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, max_width_chars=40, hexpand=True)
             title.set_markup(f"<b>{c['rate']:.2f}×</b>  {_map_markup(c)}")
-            key = Gtk.Label(xalign=1)
+            key = Gtk.Label(xalign=1, valign=Gtk.Align.START)
             key.set_markup(f"<b>{GLib.markup_escape_text(number)}</b>")
-            detail = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+            detail = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, max_width_chars=40)
             detail.set_markup(f"<small>{GLib.markup_escape_text(' · '.join(x for x in sub if x))}</small>")
             detail.get_style_context().add_class("dim-label")
-            grid = Gtk.Grid(column_spacing=10, margin_top=5, margin_bottom=5, margin_start=4, margin_end=4)
+            grid = Gtk.Grid(column_spacing=10, row_spacing=2, margin_top=7, margin_bottom=7, margin_start=4, margin_end=4)
             grid.attach(title, 0, 0, 1, 1)
             grid.attach(key, 1, 0, 1, 1)
             grid.attach(detail, 0, 1, 2, 1)
@@ -1732,12 +1761,24 @@ class ManiaScopeWindow(Gtk.Window):
                     self._queue_save()
         return False
 
-    def _on_recs_size(self, win, _allocation):
+    def _on_moved(self, _w, _e):
+        pos = tuple(self.get_position())
+        if self.get_mapped() and pos != self._win_pos:
+            self._win_pos = pos
+            self._queue_save()
+        return False
+
+    def _present_recs(self):
+        if self._recs_pos and not self.recs.get_mapped():
+            self.recs.move(*self._recs_pos)
+        self.recs.present()
+
+    def _on_recs_size(self, win, _event):
         if win.get_mapped() and win.get_window() and not win.get_window().get_state() & (
                 Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN | Gdk.WindowState.ICONIFIED):
-            size = tuple(win.get_size())
-            if min(size) > 1 and size != self._recs_size:
-                self._recs_size = size
+            size, pos = tuple(win.get_size()), tuple(win.get_position())
+            if min(size) > 1 and (size, pos) != (self._recs_size, self._recs_pos):
+                self._recs_size, self._recs_pos = size, pos
                 self._queue_save()
         return False
 
@@ -1766,7 +1807,8 @@ class ManiaScopeWindow(Gtk.Window):
                            "details": self.details_btn.get_active(),
                            "w": self._win_size[0], "h": self._win_size[1],
                            "details_w": self._details_size[0], "details_h": self._details_size[1],
-                           "recs_w": self._recs_size[0], "recs_h": self._recs_size[1]}, fh)
+                           "recs_w": self._recs_size[0], "recs_h": self._recs_size[1], "recs_pos": self._recs_pos, "pos": self._win_pos,
+                           "recs_open": self.recs_btn.get_active()}, fh)
             os.replace(UI_FILE + ".tmp", UI_FILE)
         except OSError:
             pass
