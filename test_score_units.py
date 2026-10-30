@@ -23,13 +23,13 @@ def test_reference_conversion_is_monotone_and_shared_by_all_displayed_demands():
     source = {'keys':7, 'od':5., 'horizon':8., 'scores':{'overall':10., 'stream':8., 'ln':0.},
               'levels':{8.:8.}, 'timeline':[0.,8.,10.], 'archetypes':[{'rating':8.}],
               'baseline_overall':9., 'no_sv_overall':8.}
-    result = U.apply(copy.deepcopy(source), params)
+    result = D.calc(params).units_apply(source)
     expected = U.display_rating(8., 5., model)
     assert result['scores']['stream'] == result['levels'][8.] == result['timeline'][1] == expected
     assert result['archetypes'][0]['rating'] == result['no_sv_overall'] == expected
     assert result['scores']['ln'] == result['timeline'][0] == 0.
     assert result['preunit_overall'] == 10.
-    assert U.apply(dict(source, keys=6), params)['scores'] == source['scores']
+    assert D.calc(params).units_apply(dict(source, keys=6))['scores'] == source['scores']
 
 
 def test_midpoint_display_keeps_fitted_features_in_their_original_coordinates():

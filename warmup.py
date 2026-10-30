@@ -30,11 +30,14 @@ def family(skill):
     return next((k for k,v in MEMBERS.items() if skill in v), skill if skill in FAMILIES else 'rice')
 
 
+# Descriptive stamina/tech refinements should not erase the underlying
+# execution family, just as in the shared recommendation model.
+DESCRIPTIVE = ('stamina','technical','patterntech','rhythmtech','mash')
+
+
 def dominant(f):
     sk=f.get('sk', {})
-    # Descriptive stamina/tech refinements should not erase the underlying
-    # execution family, just as in the shared recommendation model.
-    names=[k for k in sk if k not in ('stamina','technical','patterntech','rhythmtech','mash')]
+    names=[k for k in sk if k not in DESCRIPTIVE]
     return family(max(names,key=lambda k:sk[k])) if names else 'rice'
 
 

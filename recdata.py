@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS installed_local(sha256 TEXT PRIMARY KEY, online_md5 T
   audio_required INTEGER, creator TEXT);
 CREATE INDEX IF NOT EXISTS scores_bm ON scores(beatmap_id);
 CREATE INDEX IF NOT EXISTS scores_sha ON scores(sha256);
+CREATE INDEX IF NOT EXISTS scores_local ON scores(local_id);
 CREATE INDEX IF NOT EXISTS installed_bid ON installed(beatmap_id);
 CREATE INDEX IF NOT EXISTS events_t ON events(t);
 """
@@ -468,22 +469,13 @@ def add_live_score(db, score, path, fresh, play=None):
 # ANY further source/parameter/skill-schema edit misses this full-hash allowlist
 # and receives its own identity as before. Never alias a changed model by version.
 _EXACT_IMPLEMENTATIONS = {
-    '01494018451ea5f32a37f96220e7b4b0a05d5fd717e54298a7fb6a402dd630c2': 'c1021be2829b',
-    # Lazy gesture control + repeated-scroll shortcut: 117 charts / 492 exact
-    # full-result comparisons against 81bd9bc; no numerical/data refit.
-    '122617c85f8580e2cea4f5a1e66486aada67902c4487b4607514592dde0b072c': '4030a1d1b082',
-    # Shared hand bounce/held notes and simpler gesture accumulation: 84 exact
-    # results across 4–10K plus 12 reference/rate cases against 631885d.
-    '19a543fbfdba71b11ca266a4af9e98e1015bbe18cac4c8c7d09abdeb9546ec87': '8b15bc2f11dd',
-    # Only rebuild the four changed technical series: 84 exact full results
-    # across 4–10K and the four gameplay references against the same baseline.
-    '382d46362e6f65212705025a271aae287f793a7896d6f62d49b87c79deedc86a': '8b15bc2f11dd',
+    # source digest → earlier calc ID, for refactors proven exact on the parity set (none yet for the
+    # Rust calculator).
 }
 
 
-CALCULATOR_MODULES = ('skill_calc', 'difficulty_model', 'execution', 'gestures',
-                     'pattern_control', 'scroll_reading', 'structural_residual',
-                     'chart_structure', 'rolled_execution', 'archetype_names', 'score_units')
+# The Python faces of the native calculator (native_backend.calc_id hashes them with the crate).
+CALCULATOR_MODULES = ('skill_calc', 'difficulty_model', 'structural_residual', 'chart_structure', 'score_units')
 
 
 def _calculator_identity(paths):
@@ -506,15 +498,7 @@ def calc_id():
     A normal new process is required to activate a new calculator/data bundle.
     """
     import native_backend
-    if native_backend.CALCULATOR is not None:
-        return native_backend.CALCULATOR
-    if getattr(sys, "frozen", False):
-        # Packaged modules have no source files to hash; the build records the identity it froze.
-        with open(os.path.join(sys._MEIPASS, "calc_id.txt"), encoding="utf-8") as fh:
-            return fh.read().strip()
-    import importlib
-    modules = [importlib.import_module(name) for name in CALCULATOR_MODULES]
-    return _calculator_identity([module.__file__ for module in modules] + [modules[1].PARAMETERS])
+    return native_backend.calc_id()
 
 
 SKILLS = ("stream", "jumpstream", "handstream", "jackspeed", "chordjack", "minijack", "chordstream", "delay",
@@ -551,50 +535,95 @@ def feats_from(keys, sc, levels, ln, notes, od, length_ms):
 
 
 def chart_feats(path, rates, anchors=None, *, analyses=None):
-    """→ {rate: feats} for one chart; ranked variants (0.75 / 1 / 1.5) also get lazer stars and judgement count."""
-    import skill_calc
-    import feedback
-    import nps
-    chart = skill_calc.parse_osu(path)
-    od = feedback._od(path)
-    ts = [t for t, _e, _c in chart.notes]
-    length = (max(e for _t, e, _c in chart.notes) - min(ts)) if ts else 0
-    out = {}
-    for rate in rates:
-        f = dict((anchors or {}).get(rate) or {})
-        if not f:
-            res = (analyses or {}).get(rate)
-            if res is None:
-                res = skill_calc.compute(chart, rate)
-            demand = res.get('preunit_result', res)
-            f = feats_from(res["keys"], demand["scores"], demand["levels"] if res["horizon"] else None,
-                           res["ln_notes"] / max(1, res["notes"]), res["notes"], od, length)
-            # The fitted predictor's sustain coordinate predates the horizon
-            # display-unit repair. Preserve that schema until a validated refit.
-            if res['horizon'] and not res.get('rolled_correction'):
-                f['stam'] /= rate ** skill_calc.RATE_G
-            f["description"] = skill_calc.describe(res)[0] if res["horizon"] else "Sparse"
-            f["endurance"] = res.get("endurance", {})
-            f["raw_overall"] = res.get("raw_overall", f["overall"])
-            f["calibration_features"] = res.get("calibration_features", [])
-            f["execution"] = res.get("execution", {})
-            f['nps'] = res.get('structure') or nps.structure(chart, rate)
-            f['baseline_overall'] = demand.get('baseline_overall', f['overall'])
-            f['tech_profile'] = res.get('tech_profile', {})
-            f['archetype_profile'] = res.get('archetype_profile', {})
-            import score_units, difficulty_model
-            f = score_units.feature(f, difficulty_model.parameters())
-        if 'nps' not in f:
-            f["nps"] = nps.structure(chart, rate)
-        if rate in (0.75, 1.0, 1.5) and "stars" not in f:
-            try:
-                import rosu_pp_py as rp
-                d = rp.Difficulty(mods={0.75: 256, 1.0: 0, 1.5: 64}[rate], lazer=True).calculate(rp.Beatmap(path=path))
-                f["stars"], f["hits"] = d.stars, d.n_objects + d.n_hold_notes
-            except Exception:
-                pass                         # optional PP attributes never gate native local analysis
-        out[rate] = f
+    """→ {rate: feats} for one chart; ranked variants (0.75 / 1 / 1.5) also get lazer stars and judgement count.
+    analyses: precomputed skill_calc results by rate (no recalculation)."""
+    out = feats_batch([(path, rates, anchors)], analyses=analyses)[0]
+    if isinstance(out, Exception):
+        raise out
     return out
+
+
+def feats_batch(items, threads=0, *, analyses=None):
+    """chart_feats for many charts: [(path, rates, anchors)] → per item {rate: feats} or the Exception.
+    One native batch computes every missing chart-rate on `threads` niced threads without the GIL."""
+    import skill_calc
+    needs, datas = [], []
+    for path, rates, anchors in items:
+        need = [r for r in rates if not (anchors or {}).get(r) and (analyses or {}).get(r) is None]
+        needs.append(need)
+        if not need:
+            datas.append(None)
+            continue
+        try:
+            with open(path, "rb") as fh:
+                datas.append(fh.read())
+        except OSError as exc:
+            datas.append(exc)
+    jobs = [(d, need) for d, need in zip(datas, needs) if isinstance(d, bytes)]
+    computed = iter(skill_calc.compute_batch(jobs, threads=threads) if jobs else ())
+    out = []
+    for (path, rates, anchors), need, data in zip(items, needs, datas):
+        if isinstance(data, OSError):
+            out.append(data)
+            continue
+        results = dict(analyses or {})
+        if isinstance(data, bytes):
+            got = next(computed)
+            if isinstance(got, str):
+                out.append(skill_calc.ChartError(got))
+                continue
+            results.update(zip(need, got))
+        try:
+            out.append({r: _feats_at(path, r, (anchors or {}).get(r), results.get(r)) for r in rates})
+        except Exception as exc:          # one broken chart is one missing candidate
+            out.append(exc)
+    # Lazer stars and judgement count for the ranked variants, on the same background threads.
+    starred = [(i, [r for r in fs if r in (0.75, 1.0, 1.5) and "stars" not in fs[r]]) for i, fs in enumerate(out)
+               if isinstance(fs, dict)]
+    starred = [(i, rs) for i, rs in starred if rs]
+    for (i, rs), got in zip(starred, skill_calc.N.lazer_stars_batch(
+            [(datas[i] if isinstance(datas[i], bytes) else _read(items[i][0]), rs) for i, rs in starred], threads)):
+        for r, (stars, hits) in zip(rs, got or ()):   # None: rosu-pp can't read it; stars stay optional
+            out[i][r]["stars"], out[i][r]["hits"] = stars, hits
+    return out
+
+
+def _read(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return b""
+
+
+def _feats_at(path, rate, anchor, res):
+    import skill_calc
+    import nps
+    f = dict(anchor or {})
+    if not f:
+        demand = res.get('preunit_result', res)
+        od = res["od"] if "od" in res else __import__("feedback")._od(path)
+        f = feats_from(res["keys"], demand["scores"], demand["levels"] if res["horizon"] else None,
+                       res["ln_notes"] / max(1, res["notes"]), res["notes"], od, res.get("length", 0))
+        # The fitted predictor's sustain coordinate predates the horizon
+        # display-unit repair. Preserve that schema until a validated refit.
+        if res['horizon'] and not res.get('rolled_correction'):
+            f['stam'] /= rate ** skill_calc.RATE_G
+        f["description"] = skill_calc.describe(res)[0] if res["horizon"] else "Sparse"
+        f["endurance"] = res.get("endurance", {})
+        f["raw_overall"] = res.get("raw_overall", f["overall"])
+        f["calibration_features"] = res.get("calibration_features", [])
+        f["execution"] = res.get("execution", {})
+        if res.get('structure'):
+            f['nps'] = res['structure']
+        f['baseline_overall'] = demand.get('baseline_overall', f['overall'])
+        f['tech_profile'] = res.get('tech_profile', {})
+        f['archetype_profile'] = res.get('archetype_profile', {})
+        import score_units, difficulty_model
+        f = score_units.feature(f, difficulty_model.parameters())
+    if 'nps' not in f:
+        f["nps"] = nps.structure(skill_calc.parse_osu(path), rate)
+    return f
 
 
 def predictable_context(mods, rate):
@@ -610,15 +639,23 @@ def predictable_context(mods, rate):
     return True
 
 
-def _cand_job(job):
-    bid, path, md5 = job
-    try:
-        with open(path, "rb") as fh:
-            if hashlib.md5(fh.read()).hexdigest() != md5:
-                return bid, "md5 mismatch"
-        return bid, chart_feats(path, (0.75, 1.0, 1.5))
-    except Exception as exc:          # a broken chart is one missing candidate, not a failed build
-        return bid, f"{type(exc).__name__}: {exc}"
+def _cand_feats(jobs, threads=0):
+    """[(bid, path, md5)] → [(bid, {rate: feats} or the error text)] for the ranked variants (0.75 / 1 / 1.5)."""
+    checked, out = [], []
+    for bid, path, md5 in jobs:
+        try:
+            with open(path, "rb") as fh:
+                ok = hashlib.md5(fh.read()).hexdigest() == md5
+        except OSError as exc:
+            out.append((bid, f"{type(exc).__name__}: {exc}"))
+            continue
+        if ok:
+            checked.append((bid, path))
+        else:
+            out.append((bid, "md5 mismatch"))
+    for (bid, _p), fs in zip(checked, feats_batch([(p, (0.75, 1.0, 1.5), None) for _b, p in checked], threads)):
+        out.append((bid, f"{type(fs).__name__}: {fs}" if isinstance(fs, Exception) else fs))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +770,7 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
     """
     import numpy as np
     raw = collections.defaultdict(list)
+    shares_of = {}                       # per chart variant: 3M score rows share ~75k feature dicts
     for s in scores:
         u, b, _acc, rate, year, _sid, ymd, stats = s[:8]
         if u == exclude_user or (date_cut and ymd >= date_cut):
@@ -743,7 +781,10 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
         a, n = acc320((stats[0], stats[1], stats[2], stats[3], stats[4], stats[5]))
         if accuracy == 'lazer':a=acc_lazer(stats)
         elif accuracy != 'pp':raise ValueError('Unknown accuracy target')
-        raw[(u, f["keys"], year)].append((b, rate, f["overall"], f["od"], a, f["keys"], n, gap_shares(f)))
+        g = shares_of.get((b, rate))
+        if g is None:
+            g = shares_of[b, rate] = gap_shares(f)
+        raw[(u, f["keys"], year)].append((b, rate, f["overall"], f["od"], a, f["keys"], n, g))
     rows = []
     for g, lst in raw.items():
         if len(lst) < 20:
@@ -790,7 +831,9 @@ def fit_population(scores, maps, feats, exclude_user, date_cut=None, *, accuracy
     nuisance=None
     if specialization:
         import population_response
-        z=np.array([population_response.skills(feats[r[1]][r[2]]) for r in rows])
+        skills_of={}
+        z=np.array([skills_of[r[1],r[2]] if (r[1],r[2]) in skills_of else
+                    skills_of.setdefault((r[1],r[2]),population_response.skills(feats[r[1]][r[2]])) for r in rows])
         gram,projected,nuisance=population_response.eliminate(X,dm(y),z,ug)
         A-=gram;rhs-=projected
     lower = np.concatenate([np.full(G, .2), np.full(G, -np.inf), np.zeros(G), np.full(len(gap_cols), -np.inf)])
@@ -872,7 +915,6 @@ def parse_user(D, user_id):
 def build_public(D, out_dir, scores, maps, user_id, charts=None, prev=None, workers=None, date_cut=None):
     """Everything the app needs from a public snapshot, in one pickle. charts(bid) → path or None.
     prev: an earlier public.pkl whose chart features (same md5 + calculator identity) are reused."""
-    from multiprocessing import Pool
     cid = calc_id()
     feats, jobs = {}, []
     old = (prev or {}).get("feats", {})
@@ -884,14 +926,14 @@ def build_public(D, out_dir, scores, maps, user_id, charts=None, prev=None, work
             jobs.append((b, charts(b), m[5]))
     print(f"features: {len(feats)} reused, {len(jobs)} charts to analyse", flush=True)
     bad = collections.Counter()
-    with Pool(workers or max(1, (os.cpu_count() or 2) - 2)) as pool:
-        for i, (b, f) in enumerate(pool.imap_unordered(_cand_job, jobs, chunksize=20)):
+    threads = workers or max(1, (os.cpu_count() or 2) - 2)
+    for i in range(0, len(jobs), 256):          # in-process native batches on niced threads
+        for b, f in _cand_feats(jobs[i:i + 256], threads):
             if isinstance(f, str):
                 bad[f.split(":")[0]] += 1
             else:
                 feats[b] = dict(f, md5=maps[b][5], calc=cid)
-            if i % 2000 == 0:
-                print(f"  {i}/{len(jobs)}", flush=True)
+        print(f"  {min(len(jobs), i + 256)}/{len(jobs)}", flush=True)
     print("failed charts:", dict(bad), flush=True)
     fr = {b: {r: v for r, v in f.items() if isinstance(r, float)} for b, f in feats.items()}
     pop = fit_population(scores, maps, fr, user_id, date_cut)

@@ -597,10 +597,11 @@ def test_builder_prefers_exact_current_public_web_packets_below_current_sqlite(t
     monkeypatch.setattr(nps, 'candidates_from', inspect)
     monkeypatch.setattr(nps, 'installed', lambda _db: ({}, ''))
     monkeypatch.setattr(nps, 'reach', lambda *args: None)
-    executor = Mock()
+    computed = Mock()
+    monkeypatch.setattr(recdata, 'feats_batch', computed)
     session = R.Session([], 1000.)
     try:
-        builder._build(db, executor, (predictor, session, (7,), 1, 0, (7,), (), 'nps'))
+        builder._build(db, (predictor, session, (7,), 1, 0, (7,), (), 'nps'))
         assert captured['matched'][1.] is current and captured['matched'][1.5] is current
         assert captured['cached'][1.] == sqlite_feature and captured['cached'][1.5] is current
         for sha in names:
@@ -608,7 +609,7 @@ def test_builder_prefers_exact_current_public_web_packets_below_current_sqlite(t
             assert captured[sha][.7] == old
         for sha in ('mismatch', 'feature_mismatch', 'stale', 'wrongkeys', 'nonoverlap'):
             assert captured[sha][1.] == captured[sha][1.5] == old
-        executor.submit.assert_not_called()
+        computed.assert_not_called()
         predictor.predict.assert_not_called()
         assert db.execute('SELECT COUNT(*) FROM feats').fetchone()[0] == 1
     finally:

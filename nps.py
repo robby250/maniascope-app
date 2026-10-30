@@ -5,14 +5,13 @@ installed catalogue, recomputable structure and rate work, and the NPS objective
 """
 import collections
 import hashlib
+import heapq
 import json
 import math
 import os
 import random
 import threading
 import time
-from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
-from multiprocessing import get_context
 
 import numpy as np
 
@@ -199,33 +198,9 @@ def description(f):
     return " / ".join(skill_calc.NAMES.get(k, k) for v, k in names[:2])
 
 
-def _nice():
-    import paths
-    paths.lower_priority()
-    # Numerical helpers in spawned workers should not each start a BLAS swarm.
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-
-
-def _job(inst, rates, anchors, calc=None):
-    """Only this low-priority subprocess parses/computes charts."""
-    path = inst.get("path") or recdata.local_file(inst["sha256"])
-    try:
-        if calc is not None and recdata.calc_id() != calc:
-            # The existing viewer may deliberately stay open after source sync.
-            # Spawned workers import the new on-disk module; keep serving the
-            # caller's exact calculator rather than mixing new/old features.
-            import selected_analysis
-            if selected_analysis.previous_helper(calc) is None:
-                return inst["sha256"], {}, "Calculator changed on disk; reopen ManiaScope to activate it"
-            fs = {}
-            for rate in rates:
-                fs.update(selected_analysis.calculate(path, rate, calc))
-            return inst["sha256"], fs, None
-        fs = recdata.chart_feats(path, rates, anchors=anchors)
-        return inst["sha256"], fs, None
-    except Exception as exc:
-        return inst["sha256"], {}, f"{type(exc).__name__}: {exc}"
+def webmaps_workers():
+    import webmaps
+    return webmaps._workers()
 
 
 def installed(db):
@@ -288,7 +263,7 @@ class Builder(threading.Thread):
             self.cv.notify_all()
 
     def run(self):
-        db = executor = None
+        db = None
         try:
             while not self.halt.is_set():
                 with self.cv:
@@ -301,28 +276,21 @@ class Builder(threading.Thread):
                 try:
                     if db is None:
                         db = recdata.connect()
-                    if executor is None:
-                        executor = ProcessPoolExecutor(max_workers=2, mp_context=get_context("spawn"), initializer=_nice)
-                    self._build(db, executor, request)
+                    self._build(db, request)
                 except Exception as exc:
                     import traceback
                     traceback.print_exc()
                     self._catalog_key = None     # an interrupted catalogue is not reusable
-                    if isinstance(exc, BrokenExecutor) and executor is not None:
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        executor = None          # recreate only on the next requested build
                     _pred, _session, keys, revision, generation, skills_keys, selected_skills, mode = request
                     self.emit("error", {"error": f"{type(exc).__name__}: {exc}", "mode": mode,
                                         "keys_by_mode": {"nps": keys, "skills": skills_keys},
                                         "selected_skills": selected_skills, "revision": revision,
                                         "generation": generation})
         finally:
-            if executor:
-                executor.shutdown(wait=False, cancel_futures=True)
             if db is not None:
                 db.close()
 
-    def _build(self, db, executor, request):
+    def _build(self, db, request):
         pred, session, keys, revision, generation, skills_keys, selected_skills, active_mode = request
         if active_mode not in ("nps", "skills"):
             return                          # PP never waits for an invisible tab
@@ -417,10 +385,13 @@ class Builder(threading.Thread):
         unknown = sorted((s for s in catalog if not analyses[s]), key=lambda s: hashlib.sha256(s.encode()).digest())
         enrich = [s for s in catalog if analyses[s] and s not in current]
         # Broad known-chart reuse first; don't serially exhaust only personal favorites.
+        first = {sha: min(analyses[sha], key=lambda r: abs(r - 1)) for sha in enrich}
+        _predict_all(pred, catalog, session, predictions, [(sha, r, analyses[sha][r]) for sha, r in first.items()])
+
         def initial_value(sha):
-            rate = min(analyses[sha], key=lambda r: abs(r - 1))
-            f, inst = analyses[sha][rate], catalog[sha]
-            e = _predicted(pred, inst, f, rate, session)
+            rate = first[sha]
+            f = analyses[sha][rate]
+            e = predictions[(sha, rate)]
             slope = e.get('rate_slope') or rate_slope(pred, f)
             need = rate * math.exp(rate_shift(e, session, f, central_target(session, f)) / slope)
             density = f.get("notes", 0) / max(1000., f.get("length", 1)) * min(MAX_RATE, need)
@@ -463,6 +434,7 @@ class Builder(threading.Thread):
             if self.busy():
                 self.halt.wait(1)
                 continue
+            pass_start = time.monotonic()
             candidates, fronts = {}, {}
             for mode, subset in catalogs.items():
                 candidates[mode], fronts[mode] = candidates_from(
@@ -495,44 +467,44 @@ class Builder(threading.Thread):
                     refinement_groups[proposal_group((_score, sha, rate))] += 1
                     if len(jobs) >= 2:
                         break
-            for queue_, n in ((pending_enrich, 6), (pending_unknown, 2)):
-                for _ in range(min(n, len(queue_))):
-                    sha = queue_.popleft()
-                    if sha in bad:
-                        continue
-                    fs = analyses[sha]
-                    rate = min(fs, key=lambda r: abs(r - 1)) if fs else 1.
-                    jobs.append((sha, rate, {rate: fs[rate]} if fs else {}))
+            def take():
+                """The next queued maps: analysed ones at a new rate (enrich) and never-analysed ones."""
+                out = []
+                for queue_, n in ((pending_enrich, 24), (pending_unknown, 40)):
+                    for _ in range(min(n, len(queue_))):
+                        sha = queue_.popleft()
+                        if sha in bad:
+                            continue
+                        fs = analyses[sha]
+                        rate = min(fs, key=lambda r: abs(r - 1)) if fs else 1.
+                        out.append((sha, rate, {rate: fs[rate]} if fs else {}))
+                return out
+            jobs += take()
             # A useful exact shortlist does not need an endless all-library refinement job (160 per update),
             # but unanalysed maps keep going until the library is done: a calculator change left ~10k waiting
             # for two weeks at 160 per update (user 2026-10-25). busy() still pauses it during gameplay.
             if not jobs:
                 publish(candidates)
                 return
-            # At most two concurrent chart computations; no unbounded future queue.
-            for pos in range(0, len(jobs), 2):
+            # In-process native batches on every core but two (niced threads, the GIL released while the
+            # calculator runs). Spawned workers and per-chart round trips used to cost more than the Rust
+            # calculation itself (~20 charts/s; a 52k-chart library took 45 min after a calculator change).
+            # A pass analyses for at least as long as its bookkeeping (candidates for every catalogue, seconds
+            # on a large library) took: a fixed ~50 maps a pass left the tail of a re-analysis at ~10/s.
+            bookkeeping, analysing = time.monotonic() - pass_start, time.monotonic()
+            while jobs:
                 if self.halt.is_set() or self.request is not None:
                     return
                 while self.busy() and not self.halt.is_set():
                     self.halt.wait(1)
                 if self.halt.is_set() or self.request is not None:
                     return
-                batch = jobs[pos:pos + 2]
-                futures = [executor.submit(_job, catalog[s], [r], a, calc) for s, r, a in batch]
-                condition = self.cv
-                def completed(_future):
-                    with condition:
-                        condition.notify_all()
-                for future in futures:
-                    future.add_done_callback(completed)
-                for future in futures:
-                    with self.cv:
-                        self.cv.wait_for(lambda: future.done() or self.halt.is_set() or self.request is not None)
-                        if self.halt.is_set() or self.request is not None:
-                            for pending in futures:
-                                pending.cancel()  # running jobs finish normally; no compute deadline
-                            return
-                    sha, fs, failure = future.result()
+                done = recdata.feats_batch([(catalog[s].get("path") or recdata.local_file(s), [r], a)
+                                            for s, r, a in jobs], threads=webmaps_workers())
+                results = [(s, {} if isinstance(fs, Exception) else fs,
+                            f"{type(fs).__name__}: {fs}" if isinstance(fs, Exception) else None)
+                           for (s, _r, _a), fs in zip(jobs, done)]
+                for sha, fs, failure in results:
                     if failure:
                         bad[sha] = failure
                         continue
@@ -547,6 +519,7 @@ class Builder(threading.Thread):
                     for rate in fs:
                         predictions.pop((sha, rate), None)
                     count += 1
+                jobs = take() if time.monotonic() - analysing < bookkeeping else []
                 self.halt.wait(.02)
 
 
@@ -562,8 +535,14 @@ def missed_rates(session, inst, target):
     return {r: acc for r, acc in last.items() if abs(acc - target) > MISS_TOL}
 
 
-def _predicted(pred, inst, f, rate, session):
-    return pred.predict(f, inst["md5"] or inst["sha256"], pred.md5_bid.get(inst["md5"]), rate, session, accuracy_only=True)
+def _predict_all(pred, catalog, session, predictions, todo):
+    """predictions[(sha, rate)] for [(sha, rate, features)] still missing, in one native batch."""
+    todo = [t for t in todo if (t[0], t[1]) not in predictions]
+    if todo:
+        for (sha, rate, _f), e in zip(todo, pred.predict_many(
+                [(f, catalog[sha]["md5"] or catalog[sha]["sha256"], pred.md5_bid.get(catalog[sha]["md5"]), rate)
+                 for sha, rate, f in todo], session)):
+            predictions[(sha, rate)] = e
 
 
 def practice_value(f, expected, rate, target, session):
@@ -600,6 +579,10 @@ def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=l
     memo = {} if memo is None else memo
     predictions = {} if predictions is None else predictions
     choices, proposals = [], []
+    # Every missing prediction in one native batch (recommend.Predictor.predict_many).
+    rateable = {sha: list(_rateable(analyses[sha], mode, selected_skills)) for sha in catalog if sha not in memo}
+    _predict_all(pred, catalog, session, predictions,
+                 [(sha, rate, f) for sha, rfs in rateable.items() for rate, f in rfs])
     for sha, inst in catalog.items():
         if sha in memo:
             choice, proposal = memo[sha]
@@ -610,20 +593,7 @@ def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=l
             continue
         memo[sha] = [None, None]
         fs = analyses[sha]
-        rated = []
-        for rate, f in fs.items():
-            if not MIN_RATE <= rate <= MAX_RATE or f.get("notes", 0) < 100 or f.get("length", 0) < 10000:
-                continue
-            st = f.get("nps", {})
-            if st.get("version") != STRUCTURE_VERSION or not st.get("nps"):
-                continue
-            if mode == "skills" and not skill_practice.match(f, selected_skills)[0]:
-                continue
-            e = predictions.get((sha, rate))
-            if e is None:
-                e = _predicted(pred, inst, f, rate, session)
-                predictions[(sha, rate)] = e
-            rated.append((rate, f, e))
+        rated = [(rate, f, predictions[(sha, rate)]) for rate, f in rateable[sha]]
         if not rated:
             continue
         target = central_target(session, rated[0][1])
@@ -706,13 +676,26 @@ def candidates_from(catalog, analyses, pred, session, memo=None, skip_proposal=l
     by = collections.defaultdict(list)
     for item in proposals:
         by[item[3]].append(item)
-    kept = sorted(proposals, reverse=True)[:24]
+    kept = heapq.nlargest(24, proposals)
     for values in by.values():
-        kept += sorted(values, reverse=True)[:4]
+        kept += heapq.nlargest(4, values)
     unique = {(s, r): (v, s, r) for v, s, r, _g in kept}
     # Keep the actual eligible population: an equal per-category frontier would
     # turn a rare SV category into the same sampling mass as thousands of rice maps.
     return choices, sorted(unique.values(), reverse=True)
+
+
+def _rateable(fs, mode, selected_skills):
+    """(rate, features) of one chart that can be offered: playable rate, long enough, current structure."""
+    for rate, f in fs.items():
+        if not MIN_RATE <= rate <= MAX_RATE or f.get("notes", 0) < 100 or f.get("length", 0) < 10000:
+            continue
+        st = f.get("nps", {})
+        if st.get("version") != STRUCTURE_VERSION or not st.get("nps"):
+            continue
+        if mode == "skills" and not skill_practice.match(f, selected_skills)[0]:
+            continue
+        yield rate, f
 
 
 def rate_label(rate):

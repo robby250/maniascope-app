@@ -71,7 +71,7 @@ def test_control_work_is_local_and_zero_gain_is_neutral():
     import control_demand as C
     import skill_calc as S
     a=pattern(((0,1),(2,),(0,),(1,2)),repeats=240)
-    runs=[S._demand(a,1.,left,None) for left in (True,False)]
+    runs=S.demand_runs(a,1.,sv=False)
     out=C.factors(a,1.,runs,[(0.,0.,0.),(0.,.25,0.),(0.,1.,0.)])
     assert out[0]['factor']==1.
     assert out[2]['factor']>out[1]['factor']>1.
@@ -80,12 +80,12 @@ def test_control_work_is_local_and_zero_gain_is_neutral():
     # A fixed bracket is still physically difficult, but is not charged again
     # for changing its two finger groups when those groups never change.
     fixed=pattern(((0,1),(2,)),repeats=240)
-    fr=[S._demand(fixed,1.,left,None) for left in (True,False)]
+    fr=S.demand_runs(fixed,1.,sv=False)
     assert C.factors(fixed,1.,fr,[(0.,1.,0.)])[0]['factor']==1.
     # A distant first phrase receives no local control increment just because
     # the second phrase has retargets. No full-map label multiplier is applied.
     c=chart(fixed.notes+[(t+30000,e+30000,col) for t,e,col in a.notes],keys=7)
-    cr=[S._demand(c,1.,left,None) for left in (True,False)]
+    cr=S.demand_runs(c,1.,sv=False)
     before,after=C.factors(c,1.,cr,[(0.,0.,0.),(0.,1.,0.)])
     assert before['timeline'][:30]==pytest.approx(after['timeline'][:30],abs=1e-10)
     assert sum(after['timeline'][60:])>sum(before['timeline'][60:])
@@ -95,7 +95,7 @@ def test_candidate_demand_cannot_become_negative():
     import control_demand as C
     import skill_calc as S
     a=pattern(((0,1),(1,2)))
-    runs=[S._demand(a,1.,left,None) for left in (True,False)]
+    runs=S.demand_runs(a,1.,sv=False)
     extra=C.prepare(a,1.,runs)
     for gains in ((-1.,0.,0.),(math.nan,0.,0.),(1.,0.)):
         with pytest.raises(ValueError):C.aggregate(runs,extra,gains)

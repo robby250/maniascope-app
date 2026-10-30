@@ -30,9 +30,9 @@ Runs from source with your system's Python. Open a terminal and do these steps o
 
 | Distro | Command |
 |---|---|
-| Fedora | `sudo dnf install git python3-gobject gtk3 python3-cairo python3-numpy python3-pip python3-devel gcc unzip` |
-| Debian / Ubuntu / Mint / Pop!_OS | `sudo apt install git python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-numpy python3-pip python3-dev build-essential unzip` |
-| Arch / Manjaro / EndeavourOS | `sudo pacman -S git python-gobject gtk3 python-cairo python-numpy python-pip base-devel unzip` |
+| Fedora | `sudo dnf install git python3-gobject gtk3 python3-cairo python3-numpy python3-pip unzip` |
+| Debian / Ubuntu / Mint / Pop!_OS | `sudo apt install git python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-numpy python3-pip unzip` |
+| Arch / Manjaro / EndeavourOS | `sudo pacman -S git python-gobject gtk3 python-cairo python-numpy python-pip unzip` |
 
 **2. Download ManiaScope and set it up:**
 
@@ -47,7 +47,8 @@ cd maniascope-app
 - the pp calculator (rosu-pp-py);
 - the score reader, which reads your lazer scores and installed maps (Node.js and Realm; downloaded if
   you don't have Node);
-- the fast calculator, which makes switching maps ~2.5× faster;
+- the difficulty calculator (prebuilt for each release; on a newer `git pull` it is built with
+  [Rust](https://rustup.rs) if you have it);
 - tosu (it asks; say yes), which lets ManiaScope see the rate you pick in lazer;
 - the application-menu entry.
 

@@ -57,13 +57,10 @@ def fixture(keys=7):
 
 
 def test_calculator_hot_stages_honor_selection_cancellation():
-    import execution
-    import gestures
-    import scroll_reading
     c = S.parse_osu(fixture())
-    for calculate in (execution.analyse, gestures.analyse, scroll_reading.geometry):
+    for calculate in (S.compute, S.sv_reading):
         with pytest.raises(S.AnalysisCancelled):
-            calculate(c, 1., cancelled=lambda: True)
+            calculate(c, cancelled=lambda: True)
 
 
 def test_live_result_reads_only_its_chart_and_keeps_metadata_fresh(tmp_path):
@@ -127,108 +124,6 @@ def test_event_decode_reuse_keeps_tracking_and_new_results_fresh(tmp_path):
         r['id'] for r in rows if recdata.tracking_allowed(db, r['t'])]
     assert all(r['kind']=='start' for r in recdata.tracked_events(db, 0, ('start',)))
     db.close()
-
-
-def test_sv_reference_reuses_exact_physical_hand_work():
-    import execution
-    for keys in (4,7,10):
-        c=S.parse_osu(fixture(keys))
-        for rate in (.75,.98,1.19,1.5):
-            kinds=[];strain=S.sv_reading(c,kinds,rate)
-            prepared=S._demand_geometry(c,rate)
-            assert execution.analyse(c,rate,prepared=prepared)==execution.analyse(c,rate)
-            for left in ((True,False) if keys%2 else (True,)):
-                recorded=[]
-                with_sv=S._demand(c,rate,left,strain,kinds,plain_runs=recorded)
-                plain=S._demand(c,rate,left,None)
-                assert recorded==[plain]
-                assert with_sv==S._demand(c,rate,left,strain,kinds)
-                assert with_sv==S._demand(c,rate,left,strain,kinds,prepared=prepared)
-
-
-def test_repeating_chord_shares_one_bounce_calculation_per_hand():
-    c = S.parse_osu(chart([(1000+100*i, col) for i in range(20) for col in (0,1,4,5)], keys=7))
-    with patch.object(S, '_v', wraps=S._v) as speed:
-        parts, total, _ = S._demand(c, 1., True, None)
-    bounces = [call for call in speed.call_args_list if call.args[1:] == (.07, .5)]
-    assert len(bounces) == 2*19
-    assert sum(parts['chordjack']) > 0 and sum(total) > 0
-
-
-def test_technical_reattribution_matches_full_pass_without_rebuilding_other_labels():
-    for keys in (4, 7, 10):
-        c = S.parse_osu(fixture(keys))
-        parts, total, _ = S._demand(c, 1.19, True, None)
-        for demand in (total, [0.]*len(total)):
-            expected = S._attribute(parts, demand, keys)
-            with patch.object(S, 'skills', side_effect=AssertionError('unused labels requested')):
-                actual = S._attribute(parts, demand, keys, technical_only=True)
-            assert set(actual) == {'technical', 'patterntech', 'rhythmtech', '_switch'}
-            assert actual == {k: expected[k] for k in actual}
-
-
-def test_phase_buffers_and_attribution_ignore_unused_work():
-    from array import array
-    c = S.parse_osu(fixture())
-    parts, total, fine = S._demand(c, 1.19, True, None)
-    buffers = tuple(array('d', side) for side in fine)
-    for phase in range(S.PHASES):
-        assert S._phase_total(buffers, phase) == S._phase_total(fine, phase)
-    expected = S._attribute(parts, total, c.keys)
-    parts['unused'] = None  # an unconsumed counter must not get a window pass
-    assert S._attribute(parts, total, c.keys) == expected
-
-
-def test_benchmark_requires_native_modules_before_importing_ui(tmp_path, monkeypatch):
-    import builtins
-    import sys
-    from calib import benchmark_analysis as B
-    source, native = tmp_path/'source', tmp_path/'native'
-    source.mkdir(); native.mkdir()
-    extension = native/'probe.so'
-    extension.write_bytes(b'native fixture')
-    calls = []
-    available = [True]
-    module = SimpleNamespace(__file__=str(extension))
-    def activate(directory):
-        assert sys.path[0] == str(source) and directory == native
-        calls.append('activate')
-        sys.path.insert(0, str(native))
-        return available[0]
-    def load(name):
-        assert name == 'probe' and sys.path[0] == str(native)
-        calls.append('module')
-        return module
-    class ReachedUI(Exception):
-        pass
-    original_import = builtins.__import__
-    def observe_import(name, *args, **kwargs):
-        if name == 'skillsets':
-            calls.append('ui')
-            raise ReachedUI
-        return original_import(name, *args, **kwargs)
-    monkeypatch.setattr(sys, 'path', sys.path.copy())
-    monkeypatch.setitem(sys.modules, 'native_backend', SimpleNamespace(
-        ROOT=source, activate=activate, MODULES=('probe',), SUFFIX='.so', CALCULATOR='fixture',
-        INPUTS=(), hashes=lambda root, names: {}, location=lambda inputs, directory: directory))
-    monkeypatch.setattr(B, 'references', lambda _: [])
-    monkeypatch.setattr(B.importlib, 'import_module', load)
-    monkeypatch.setattr(builtins, '__import__', observe_import)
-    with pytest.raises(ReachedUI):
-        B.run(source, 'manifest', tmp_path/'output', native=True, native_directory=native)
-    assert calls == ['activate', 'module', 'ui']
-    calls.clear(); available[0] = False
-    with pytest.raises(RuntimeError, match='unavailable'):
-        B.run(source, 'manifest', tmp_path/'output', native=True, native_directory=native)
-    assert calls == ['activate']
-    calls.clear(); available[0] = True; module.__file__ = str(source/'probe.py')
-    with pytest.raises(RuntimeError, match='same native backend'):
-        B.run(source, 'manifest', tmp_path/'output', native=True, native_directory=native)
-    assert calls == ['activate', 'module']
-    calls.clear(); module.__file__ = str(tmp_path/'other-native'/'probe.so')
-    with pytest.raises(RuntimeError, match='same native backend'):
-        B.run(source, 'manifest', tmp_path/'output', native=True, native_directory=native)
-    assert calls == ['activate', 'module']
 
 
 def test_memory_disk_and_native_feature_inputs_are_exact(tmp_path):
@@ -363,10 +258,9 @@ def test_song_select_polls_promptly_without_increasing_gameplay_polling():
 
 
 def test_lazy_control_is_retained_for_plans_without_jumptrill_membership():
-    import gestures
     from test_gestures import rolls
     c=rolls((0,3,1,2),gap=30,n=40,od=10)
-    result=gestures.analyse(c,with_plans=True)
+    result=S.N.gestures_analyse(c,with_plans=True)
     # Feasible rolling offsets can produce a plan even when no simultaneous
     # chord fits the windows. Lazy control must cover this separate consumer.
     assert not any(result['series']['rolled'])
@@ -377,11 +271,19 @@ def test_lazy_control_is_retained_for_plans_without_jumptrill_membership():
 
 def test_compatible_source_identity_does_not_hide_a_changed_model(tmp_path):
     import recdata
-    import difficulty_model as D
+    import shutil
+    import native_backend as N
     identity=recdata.calc_id.__wrapped__()
-    changed=tmp_path/'parameters.json'
-    changed.write_text(Path(D.PARAMETERS).read_text()+'\n')
-    with patch.object(D,'PARAMETERS',str(changed)):
-        assert recdata.calc_id.__wrapped__()!=identity
+    for path in N.identity_files():
+        copy=tmp_path/path.relative_to(N.ROOT)
+        copy.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(path,copy)
+    copied=lambda:recdata._calculator_identity(N.identity_files(tmp_path))
+    assert copied()==identity
+    for name in ('calib/difficulty.json','native/src/demand.rs'):
+        original=(tmp_path/name).read_text()
+        (tmp_path/name).write_text(original+'\n')
+        assert copied()!=identity
+        (tmp_path/name).write_text(original)
     with patch.object(recdata,'SKILLS',recdata.SKILLS+('different-feature',)):
         assert recdata.calc_id.__wrapped__()!=identity

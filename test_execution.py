@@ -2,7 +2,6 @@
 from unittest.mock import patch
 
 import difficulty_model as D
-import execution
 import skill_calc as S
 
 
@@ -36,7 +35,7 @@ def test_changing_columns_and_independent_holds_still_require_control():
     # Tail synchronization is evidence separate from head width, not a rule
     # erasing independent LN mechanics on every wide chord.
     async_ln=chart([(1000+400*i,1070+400*i+45*c,c) for i in range(50) for c in range(7)])
-    assert execution.analyse(async_ln,1)['release_sync'] < execution.analyse(fixed,1)['release_sync'] or \
+    assert S.N.execution_analyse(async_ln,1)['release_sync'] < S.N.execution_analyse(fixed,1)['release_sync'] or \
         S.compute(async_ln,1)['execution']['mash'] < b['execution']['mash']
 
 

@@ -26,7 +26,6 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from multiprocessing import Pool
 
 import recdata
 
@@ -275,30 +274,26 @@ def _store(db, r, data):
                    (sha, hashlib.md5(data).hexdigest(), r["bid"]))
 
 
-def _analyse(sha):
-    try:
-        return sha, recdata.chart_feats(os.path.join(WEB_DIR, "osu", sha + ".osu"), RATES), None
-    except Exception as exc:          # one broken chart is one missing candidate
-        return sha, None, f"{type(exc).__name__}: {exc}"
-
-
 def analyse(db, workers=None):
     calc = recdata.calc_id()
     todo = [r[0] for r in db.execute("SELECT DISTINCT sha FROM diffs WHERE sha IS NOT NULL AND sha NOT IN "
                                      "(SELECT sha FROM feats WHERE calc=?)", (calc,))]
     print(f"charts to analyse: {len(todo)}", flush=True)
     t0, done = time.time(), (_kv(db, "progress") or {}).get("analysed", 0)
-    with Pool(_workers(workers)) as pool:          # leaving the block terminates the workers on a pause
-        for i, (sha, fs, err) in enumerate(pool.imap_unordered(_analyse, todo, chunksize=2)):
-            with db:
+    for start in range(0, len(todo), 64):          # in-process native batches; a pause stops between them
+        chunk = todo[start:start + 64]
+        results = recdata.feats_batch([(os.path.join(WEB_DIR, "osu", sha + ".osu"), RATES, None) for sha in chunk],
+                                      threads=_workers(workers))
+        with db:
+            for sha, fs in zip(chunk, results):
+                err = f"{type(fs).__name__}: {fs}" if isinstance(fs, Exception) else None
                 db.execute("INSERT OR REPLACE INTO feats VALUES(?,?,?)",
-                           (sha, calc, pickle.dumps(fs) if fs else pickle.dumps({"error": err})))
-            _progress(db, phase="analyse", analysed=done + i + 1)
-            if i % 500 == 0:
-                print(f"analysed {i}/{len(todo)}", flush=True)
-            if i >= 20 and i % 20 == 0:
-                _kv(db, "sec_analyse", (time.time() - t0) / (i + 1))
-            _check_stop()
+                           (sha, calc, pickle.dumps({"error": err}) if err else pickle.dumps(fs)))
+        i = start + len(chunk)
+        _progress(db, phase="analyse", analysed=done + i)
+        print(f"analysed {i}/{len(todo)}", flush=True)
+        _kv(db, "sec_analyse", (time.time() - t0) / i)
+        _check_stop()
     return calc
 
 

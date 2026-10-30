@@ -33,8 +33,8 @@ def chart(notes, keys=7, mode=3, shuffle=False, timing=("0,500,4,1,0,100,1,0",))
     return path
 
 
-def rate(notes, r=1.0, **kw):
-    return S.compute(S.parse_osu(chart(notes, **kw)), r)["scores"]
+def rate(notes, r=1.0, overrides=None, **kw):
+    return S.compute(S.parse_osu(chart(notes, **kw)), r, overrides=overrides)["scores"]
 
 
 def top(notes, n=1, **kw):
@@ -231,7 +231,7 @@ def test_card_taxonomy():
     assert card[0]["name"].startswith("Tech ") and "Technical" not in [e["name"] for e in card]
     parts = [p for e in card for p in e["parts"]]
     assert len(parts) == len(set(parts))
-    for n in list(S.NAMES.values()) + list(S.TECH_NAMES.values()) + list(S.STAMINA_NAMES.values()):
+    for n in S.NAMES.values():          # Tech X / X Stamina names: native/src/card.rs tests
         assert len(n) <= 16 and len(n.split()) <= 3, n
 
 
@@ -266,8 +266,8 @@ def test_changing_jumptrill():
         with patch.object(D, "parameters", return_value={}):
             result = S.compute(ch)
         assert S.ranked(result)[0] == "jumptrill"
-        with patch.object(S, "TRILL_GAP", 0), patch.object(D, "parameters", return_value={}):
-            plain = S.compute(ch)
+        with patch.object(D, "parameters", return_value={}):
+            plain = S.compute(ch, overrides={"TRILL_GAP": 0})
         for key in ("overall", "stamina"):
             assert result["scores"][key] == plain["scores"][key]
         for key in ("levels", "horizon", "timeline"):
@@ -285,18 +285,16 @@ def test_changing_jumptrill():
 
 
 def test_fast_changing_chords_lose_mirror_discount():
-    from unittest.mock import patch
-
     changing = [(1000 + 110 * i, c) for i in range(400)
                 for c in ((0, 1, 4, 5) if i % 2 else (1, 2, 5, 6))]
     fixed = [(1000 + 110 * i, c) for i in range(400) for c in (0, 1, 4, 5)]
     slow = [(t * 2, c) for t, c in changing]
     a, b = rate(changing)["overall"], rate(fixed)["overall"]
     s = rate(slow)["overall"]
-    with patch.object(S, "MIRROR", 1.0):
-        assert rate(changing)["overall"] == a   # fast partial repeats are separate movements
-        assert rate(fixed)["overall"] > b      # complete repeats still share one bounce
-        assert rate(slow)["overall"] > s       # slower changing chords keep the discount
+    k = {"MIRROR": 1.0}
+    assert rate(changing, overrides=k)["overall"] == a   # fast partial repeats are separate movements
+    assert rate(fixed, overrides=k)["overall"] > b      # complete repeats still share one bounce
+    assert rate(slow, overrides=k)["overall"] > s       # slower changing chords keep the discount
 
 
 def res(notes, r=1.0, **kw):

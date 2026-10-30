@@ -118,6 +118,9 @@ def test_rate_search_actually_moves_toward_an_eligible_cold_opening():
         md5_bid = {}
         def predict(self, f, chart, bid, rate, session, *, accuracy_only=False):
             return {'acc_mid': .94, 'opening_acc': .91, 'sd_model': .1}
+
+        def predict_many(self, items, session):
+            return [self.predict(*it, session, accuracy_only=True) for it in items]
     s = R.Session([], 1000)
     candidates, proposals = nps.candidates_from({'a': inst('a')}, {'a': {1.: f}}, Predictor(), s)
     assert not candidates and len(proposals) == 1
@@ -136,6 +139,9 @@ def test_cold_refinement_does_not_stop_in_an_ineligible_rounding_cell():
         md5_bid = {}
         def predict(self, *args, accuracy_only=False):
             return {'acc_mid': .95, 'opening_acc': .9369, 'sd_model': .1}
+
+        def predict_many(self, items, session):
+            return [self.predict(*it, session, accuracy_only=True) for it in items]
     choices, proposals = nps.candidates_from({'a': inst('a')}, {'a': {1.35: f}}, Predictor(), R.Session([],1000))
     assert not choices and proposals[0][2] == 1.34
 
@@ -202,7 +208,6 @@ def test_technical_practice_requires_presence_not_only_a_local_peak():
 
 
 def test_whole_map_technical_presence_distinguishes_regular_from_irregular_hands():
-    import pattern_control as P
     import skill_calc as C
     from test_skill_calc import chart
     regular = [(i*80, i%4) for i in range(400)]
@@ -211,11 +216,11 @@ def test_whole_map_technical_presence_distinguishes_regular_from_irregular_hands
         t += (60.,93.,47.,111.,75.)[i%5]
         irregular.append((t,i%4))
     a=C.parse_osu(chart(regular,keys=4));b=C.parse_osu(chart(irregular,keys=4))
-    pa,pb=P.tech_profile(a),P.tech_profile(b)
+    pa,pb=C.N.tech_profile(a),C.N.tech_profile(b)
     assert pa['technical'] < .1
     assert pb['rhythmtech'] > .5 and pb['technical'] > .5
-    assert P.technical_description('Dump / Minijack',{'technical':.72},pb) == 'Tech Dump / Minijack'
-    assert P.technical_description('Dump / Minijack',{'technical':.72},pa) == 'Dump / Minijack'
+    assert C.N.technical_title('Dump',{'technical':.72},pb) == 'Tech Dump'
+    assert C.N.technical_title('Dump',{'technical':.72},pa) == 'Dump'
 
 
 

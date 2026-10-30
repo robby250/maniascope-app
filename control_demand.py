@@ -52,7 +52,7 @@ def aggregate(runs, extra, gains):
         for h,(seconds,tolerance) in enumerate(S.HORIZONS):
             width=min(len(timeline),max(1,int(seconds/S.BIN)))
             maximum=np.max((sums[ends]-sums[np.maximum(0,ends-width)])/width)
-            value=S._star(S.SCALE*math.sqrt(max(0.,maximum))/tolerance)
+            value=S.N.star(S.SCALE*math.sqrt(max(0.,maximum))/tolerance)
             levels[h]=max(levels[h],value)
     return levels.tolist(),main.tolist()
 
@@ -62,10 +62,10 @@ def factors(chart, rate, runs, settings):
     import skill_calc as S
     work=prepare(chart,rate,runs)
     zero,original=aggregate(runs,work,[0.]*len(H.NAMES))
-    baseline=S._combine(zero,len(chart.notes))
+    baseline=S.N.combine(zero,len(chart.notes))
     out=[]
     for gains in settings:
         levels,timeline=aggregate(runs,work,gains)
-        ratio=S._combine(levels,len(chart.notes))/baseline if baseline>0 else 1.
+        ratio=S.N.combine(levels,len(chart.notes))/baseline if baseline>0 else 1.
         out.append({'factor':ratio,'levels':levels,'timeline':timeline})
     return out

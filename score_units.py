@@ -1,23 +1,12 @@
 """Fixed displayed difficulty, separate from the predictor's fitted coordinates."""
 import math
 
+import native_backend
+N = native_backend.load()
+
 
 def rating(value, od, model):
-    if value <= 0:
-        return value
-    knee = model.get('knee', 4.)
-    x = math.log(value)
-    a, b = model['input']
-    target = a*x + b*max(0., x-math.log(knee))**2
-    target += model['window']*math.log((64.-3*max(0., min(10., od))) /
-                                     (64.-3*model.get('reference_od', 8.)))
-    origin, slope, curve = model['reference']
-    if slope <= 0 or curve < 0:
-        raise ValueError('Reference response must be monotone')
-    delta = target-origin-slope*math.log(knee)
-    if delta <= 0 or curve == 0:
-        return math.exp((target-origin)/slope)
-    return knee*math.exp(2*delta/(slope+math.sqrt(slope*slope+4*curve*delta)))
+    return N.unit_rating(value, od, model)
 
 
 def display_rating(value, od, model):
@@ -27,20 +16,8 @@ def display_rating(value, od, model):
 
 def display_factor(keys, baseline, execution, original, parameters):
     """Gameplay-reference correction using the existing chart-only basis."""
-    unit = parameters.get('score_units', {}).get('modes', {}).get(str(keys), {})
-    coeff = unit.get('display_coeff')
-    values = execution.get('residual_vector')
-    if coeff is None or values is None or original <= 0:
-        return 1.
-    import structural_residual
-    stage = parameters['structural_residual']
-    model = dict(stage['modes'][str(keys)], coeff=coeff)
-    display = {'structural_residual': dict(stage, modes={str(keys): model})}
-    rolled = execution.get('rolled_factor', 1.)
-    # The tree stage is part of the stars, not of the display basis: keep it on both sides of the ratio.
-    corrected = structural_residual.correction(keys, baseline/rolled, values, display)*rolled \
-        * math.exp(structural_residual.tree_shift(keys, baseline, values, parameters))
-    return corrected/original
+    import difficulty_model
+    return difficulty_model.calc(parameters).display_factor(keys, baseline, execution, original)
 
 
 def feature_display_factor(f):
@@ -77,39 +54,6 @@ def displayed_value(value, keys, od=8., factor=1.):
     original = math.exp(target/a if delta <= 0 or b == 0 else
                         knee+2*delta/(a+math.sqrt(a*a+4*b*delta)))
     return (value+original)/2 if factor == 1. else display_rating(original*factor, od, model)
-
-
-def apply(result, parameters):
-    model = parameters.get('score_units', {}).get('modes', {}).get(str(result['keys']))
-    if not model or not result.get('horizon'):
-        return result
-    factor = display_factor(result['keys'], result['baseline_overall'],
-                            result.get('execution', {}), result['scores']['overall'], parameters)
-    convert = lambda value: display_rating(value*factor, result['od'], model)
-    # Retain exact inputs for feature extraction, including its historical
-    # horizon schema and rounding. Predictions keep their trained coordinates;
-    # changing the displayed scale must not change an accuracy forecast.
-    result['preunit_result'] = {k: result[k] for k in ('scores', 'levels', 'baseline_overall')}
-    result['preunit_overall'] = result['scores']['overall']
-    result['scores'] = {key: convert(value) for key, value in result['scores'].items()}
-    result['levels'] = {key: convert(value) for key, value in result['levels'].items()}
-    result['timeline'] = [convert(value) for value in result['timeline']]
-    for field in ('archetypes', 'unit_card'):
-        for item in result.get(field, ()):
-            item['rating'] = convert(item['rating'])
-    result['baseline_overall'] = display_rating(result['baseline_overall'], result['od'], model)
-    if 'no_sv_overall' in result:
-        physical = result.get('execution', {}).get('scroll_base')
-        no_sv_factor = factor
-        if physical:
-            import difficulty_model
-            baseline = difficulty_model._baseline_rating(result['keys'], physical['raw'],
-                                                         physical['features'], physical['execution'])
-            no_sv_factor = display_factor(result['keys'], baseline, physical['execution'],
-                                          result['no_sv_overall'], parameters)
-        result['no_sv_overall'] = display_rating(result['no_sv_overall']*no_sv_factor, result['od'], model)
-    result['structural_correction'] = result['scores']['overall']-result['baseline_overall']
-    return result
 
 
 def feature(f, parameters):

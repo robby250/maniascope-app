@@ -6,8 +6,6 @@ from unittest.mock import patch
 import pytest
 import skill_practice as T
 import skill_calc as S
-import scroll_reading as R
-import pattern_control as P
 from test_execution import chart
 
 
@@ -35,12 +33,11 @@ def test_quadstream_recognition_has_no_new_physical_charge_and_no_wide_name():
     c=make(((0,),tuple(range(4)),(2,),tuple(range(4))))
     a=S.compute(c)
     assert 'Quadstream' in S.describe(a)[0]
-    with patch.object(P,'quadstream',return_value=([0.]*(int((c.notes[-1][0]-1000)/500)+1),0.)):
-        b=S.compute(c)
-    assert abs(a['scores']['overall']-b['scores']['overall'])<1e-9
+    b=S.compute(c,overrides={'off':['quadstream']})
+    assert abs(a['scores']['overall']-b['scores']['overall'])<1e-9 and 'Quadstream' not in S.describe(b)[0]
     assert S.compute(make(((0,1),tuple(range(4)),(2,3),tuple(range(4)))))['scores']['quadstream']==0
     wide=make(((0,),tuple(range(7)),(6,),tuple(range(7))),7)
-    assert P.quadstream(wide,1)[1]>.8 and 'quadstream' not in S.compute(wide)['scores']
+    assert S.N.quadstream(wide,1)[1]>.8 and 'quadstream' not in S.compute(wide)['scores']
     rare=chart([(1000+i*90,1000+i*90,i%4) for i in range(1600)],keys=4)
     rare.notes=sorted(rare.notes+[(46090,46090,c) for c in range(4) if c!=1])
     assert 'Quadstream' not in S.describe(S.compute(rare))[0]
@@ -49,12 +46,12 @@ def test_quadstream_recognition_has_no_new_physical_charge_and_no_wide_name():
 def test_constant_scroll_setting_and_uniform_multiplier_do_not_create_sv():
     c=chart([(1000+i*100,1000+i*100,i%4) for i in range(100)],keys=4)
     c.sv=[(0,2.)]
-    assert not any(R.reading(c))
+    assert not any(S.sv_reading(c))
     assert S.compute(c)['scores']['overall']==S.compute(c,sv=False)['scores']['overall']
     c.sv=[(0,1.),(3000,.3),(3400,1.),(6000,2.),(6600,1.)]
-    a=R.geometry(c)
+    a=S.N.scroll_geometry(c)
     c.sv=[(t,m*3) for t,m in c.sv]
-    b=R.geometry(c)
+    b=S.N.scroll_geometry(c)
     assert a['summary']==pytest.approx(b['summary'],abs=1e-9)
 
 
@@ -63,7 +60,7 @@ def test_sv_rate_compensation_matches_retimed_chart_and_preserves_no_sv_mode():
     c.sv=[(0,1.),(3000,.25),(3400,2.5),(3500,1.),(7000,.1),(7700,1.)]
     retimed=chart([(t/1.23,e/1.23,k) for t,e,k in c.notes],keys=4)
     retimed.sv=[(t/1.23,m) for t,m in c.sv]
-    assert R.geometry(c,1.23)['summary']==pytest.approx(R.geometry(retimed)['summary'],abs=1e-9)
+    assert S.N.scroll_geometry(c,1.23)['summary']==pytest.approx(S.N.scroll_geometry(retimed)['summary'],abs=1e-9)
     plain=S.compute(c,1.23,sv=False)
     assert plain['scores']['sv']==0 and not plain['execution'].get('scroll_base')
     included=S.compute(c,1.23)
@@ -74,15 +71,15 @@ def test_sv_rate_compensation_matches_retimed_chart_and_preserves_no_sv_mode():
 def test_fine_stutter_is_not_averaged_into_constant_speed_or_infinite_slow_cost():
     c=chart([(1000+i*80,1000+i*80,i%4) for i in range(200)],keys=4)
     c.sv=[(0,1.)]+[(t,m) for i in range(300) for t,m in ((2000+10*i,.02),(2005+10*i,1.98))]+[(5000,1.)]
-    assert R.geometry(c)['summary']['stutter']>0
+    assert S.N.scroll_geometry(c)['summary']['stutter']>0
     c.sv=[(0,1.),(2000,.001),(3000,1.)]
-    slow=R.geometry(c)
+    slow=S.N.scroll_geometry(c)
     assert max(v[1] for v in slow['vectors'])<=1
-    kinds=[];strain=R.reading(c,kinds=kinds)
+    kinds=[];strain=S.sv_reading(c,kinds)
     assert all(math.isfinite(v) for v in strain)
     assert all(abs(sum(k)-1)<1e-9 for k,v in zip(kinds,strain) if v>0)
     for rate in (0,-1,float('nan'),float('inf')):
-        with pytest.raises(ValueError):R.geometry(c,rate)
+        with pytest.raises(ValueError):S.N.scroll_geometry(c,rate)
 
 
 def test_selected_native_failure_is_an_error_not_viewer_exit():
@@ -127,32 +124,46 @@ def test_invisible_velocity_flicker_costs_less_than_visible_stutter():
         c=chart([(1000+i*80,1000+i*80,i%4) for i in range(160)],keys=4)
         c.sv=[(0,1.)]+[(t,m) for base in range(1000,11000,period)
                       for t,m in ((base,.02),(base+period/2,1.98))]+[(11000,1.)]
-        return R.geometry(c)['summary']['stutter']
+        return S.N.scroll_geometry(c)['summary']['stutter']
     assert flicker(4) < .3*flicker(80)
 
 
 def test_redundant_sv_control_points_do_not_change_reading():
     c=chart([(1000+i*80,1000+i*80,i%4) for i in range(120)],keys=4)
     c.sv=[(0,1.),(3000,.2),(4000,2.),(4300,1.)]
-    first=R.geometry(c)['summary']
+    first=S.N.scroll_geometry(c)['summary']
     c.sv=[(0,1.),(1500,1.),(2000,1.),(3000,.2),(3500,.2),(4000,2.),(4100,2.),(4300,1.)]
-    assert R.geometry(c)['summary']==pytest.approx(first,abs=1e-12)
+    assert S.N.scroll_geometry(c)['summary']==pytest.approx(first,abs=1e-12)
 
 
 def test_straight_approaches_keep_preview_but_have_no_motion():
     c=chart([(1000+i*80,1000+i*80,i%4) for i in range(200)],keys=4)
     c.sv=[(0,1.),(6000,1.3),(9000,1.)]
-    result=R.geometry(c)
+    result=S.N.scroll_geometry(c)
     flat=[v for (t,_,_),v in zip(c.notes,result['vectors']) if 7000<t<8500]
-    assert flat and all(v[0]>0 and v[2:]==(0.,0.) for v in flat)
+    assert flat and all(v[0]>0 and v[2:]==[0.,0.] for v in flat)
     assert any(v[2]>0 for (t,_,_),v in zip(c.notes,result['vectors']) if 6000<t<6500)
 
 
 def test_scroll_weights_select_only_calibrated_keymode():
     config={'scroll_reading': {'weights':[1.,2.,3.,4.],
                               'modes': {'4': {'weights':[2.,3.,4.,5.]}}}}
-    geometry={'vectors':[(1.,1.,1.,1.)], 'kinds':[(0.,0.,1.,0.,0.)]}
-    with patch('difficulty_model.parameters',return_value=config), patch.object(R,'geometry',return_value=geometry):
-        assert R.reading(SimpleNamespace(keys=4))==[14.]
-        assert R.reading(SimpleNamespace(keys=7))==[10.]
-        assert R.reading(SimpleNamespace(keys=10))==[10.]
+    with patch('difficulty_model.parameters',return_value=config):
+        for keys,weights in ((4,[2.,3.,4.,5.]),(7,[1.,2.,3.,4.]),(10,[1.,2.,3.,4.])):
+            c=chart([(1000+i*80,1000+i*80,i%keys) for i in range(200)],keys=keys)
+            c.sv=[(0,1.),(3000,.25),(3400,2.5),(3500,1.)]
+            vectors=S.N.scroll_geometry(c)['vectors']
+            assert any(map(any,vectors))
+            assert S.sv_reading(c)==pytest.approx([sum(v*w for v,w in zip(x,weights)) for x in vectors],rel=1e-12)
+
+
+def test_native_lazer_stars_match_rosu_pp_py():
+    import recdata
+    import rosu_pp_py as rp
+    from test_skill_calc import chart as chart_file
+    path=chart_file([(1000+60*i,i%4) for i in range(800)],keys=4)
+    f=recdata.chart_feats(path,(0.75,1.0,1.5,1.2))
+    for rate,mods in ((0.75,256),(1.0,0),(1.5,64)):
+        d=rp.Difficulty(mods=mods,lazer=True).calculate(rp.Beatmap(path=path))
+        assert (f[rate]['stars'],f[rate]['hits'])==(d.stars,d.n_objects+d.n_hold_notes)
+    assert 'stars' not in f[1.2]

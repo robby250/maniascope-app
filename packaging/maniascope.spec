@@ -4,6 +4,7 @@
 # Windows CI adds the GTK3 runtime (gvsbuild) and node+realm; see .github/workflows/windows.yml.
 import glob
 import os
+import sys
 
 root = os.path.abspath(os.path.join(SPECPATH, ".."))
 R = lambda *p: os.path.join(root, *p)
@@ -22,11 +23,10 @@ a = Analysis([R("maniascope_app.py")], pathex=[root], datas=datas,
              excludes=["pytest", "tkinter"],
              # The UI uses a few symbolic icons; the gi hook would otherwise copy every system theme.
              hooksconfig={"gi": {"icons": ["Adwaita", "hicolor"], "themes": ["Adwaita"], "languages": ["en_US"]}})
-# Compiled calculator from build_windows_wine.sh: its modules leave the PYZ, so imports find the .pyd.
-native = glob.glob(R("native", "*.pyd"))
-compiled = {os.path.basename(p).split(".")[0] for p in native}
-a.pure = [entry for entry in a.pure if entry[0] not in compiled]
-a.binaries += [(os.path.basename(p), p, "EXTENSION") for p in native]
+# The Rust calculator (build_windows_wine.sh cross-builds it); native_backend imports it by name.
+a.binaries += [("maniascope_native.pyd", R("native", "maniascope_native.pyd"), "EXTENSION")]
+# abi3 modules link the stable-ABI python3.dll, which PyInstaller doesn't collect (only python3XX.dll).
+a.binaries += [("python3.dll", os.path.join(sys.base_prefix, "python3.dll"), "BINARY")]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="ManiaScope", console=False,
           icon=R("packaging/icon.ico") if os.path.exists(R("packaging/icon.ico")) else None)

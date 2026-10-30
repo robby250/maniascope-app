@@ -15,6 +15,7 @@ A shared skill-mix weighting (jack, speed, stamina, tech, LN, length on top of s
 moved held-out error 0.75 → 0.73 tiers: noise, so anchors use the rating alone (2026-10-01).
 """
 import collections
+import copy
 import csv
 import json
 import math
@@ -25,8 +26,6 @@ from concurrent.futures import ProcessPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-import native_backend  # noqa: E402
-native_backend.activate()
 import dans  # noqa: E402
 import recdata  # noqa: E402
 import skill_calc  # noqa: E402
@@ -55,9 +54,7 @@ def song_starts(path, chart, songs=4):
 
 
 def piece(chart, lo, hi):
-    sub = skill_calc.Chart()
-    for k in skill_calc.Chart.__slots__:
-        setattr(sub, k, getattr(chart, k))
+    sub = copy.deepcopy(chart)
     sub.notes = [n for n in chart.notes if lo <= n[0] < hi]
     sub.sv = [p for p in chart.sv if lo - 5000 <= p[0] < hi] if chart.sv else chart.sv
     return sub

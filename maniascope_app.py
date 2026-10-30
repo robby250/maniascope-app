@@ -24,8 +24,8 @@ def self_test():
     import selected_analysis
     got = selected_analysis.calculate(os.path.join(here, "packaging", "selftest.osu"), 1.0, recdata.calc_id())
     assert abs(got[1.0]["overall"] - res["scores"]["overall"]) < .5
-    native = os.path.splitext(skill_calc.__file__)[1] in (".pyd", ".so")
-    print("self-test OK", recdata.calc_id(), round(res["scores"]["overall"], 2), "native" if native else "python", flush=True)
+    print("self-test OK", recdata.calc_id(), round(res["scores"]["overall"], 2), "native",
+          os.path.basename(skill_calc.N.__file__), flush=True)
     return 0
 
 def log_to_file():

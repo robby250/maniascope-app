@@ -472,3 +472,28 @@ def test_recent_family_offset_adds_chordjack_led_hinge_only_above_point_seven():
     led=dict(keys=7,sk=dict(chordjack=.9));mixed=dict(keys=7,sk=dict(chordjack=.6))
     assert m.recent_offset(led)==pytest.approx(.3*.2) and m.recent_offset(mixed)==0.
     assert m.recent_offset(dict(keys=4,sk=dict(chordjack=.9)))==0.
+
+
+def test_native_bulk_predictions_match_the_python_predictor():
+    rec,f=paired_personal()
+    for m in (rec.model,rec.accuracy_model):
+        m.pop['mb']={42:(.1,30.)}; m.pop['mbr']={(42,1.):(.12,20.),(42,1.5):(.3,8.)}
+        m.aff={'md5:x':(-.05,3.)}; m.aff['other']=(.08,4.)
+        m.rate_aff={'other':[(1.,.08,4.),(1.2,.15,2.)]}; m.rate_support={'other':(1.,1.2)}
+        m.warmup.elasticities={'7':1.1,'7:chords':1.3}
+    pred=R.Predictor(rec,source_id='fixture')
+    events=completed_loss({},.2,.3)+completed_loss({},.1,-.1,1)
+    variants=[f,dict(f,sk=dict(jack=.9,minijack=.95,stamina=.99),ln=0.),dict(f,sk={},keys=7),
+              dict(f,overall=9.,od=6.,endurance={'load':.4},nps={'chord':2.,'overlap':.3},
+                   calibration_features=[0.]*8+[.5],execution={'residual_vector':[.01*i for i in range(len(R._STRUCTURE_NAMES))]})]
+    items=[(v,c,b,r) for v in variants for c,b in (('other',42),('fresh',None),('chart',None)) for r in (.9,1.,1.27,1.5)]
+    for warm in (False,True):
+        session=R.Session(events,1400.); session.warm_flag=warm
+        slow=[pred.predict(*it,session,accuracy_only=True) for it in items]
+        fast=pred.predict_many(items,R.Session(events,1400.) if not warm else session)
+        for a,b in zip(slow,fast):
+            assert set(a)==set(b)
+            for k in a:
+                if k!='accuracy_forecast':
+                    assert b[k]==pytest.approx(a[k],rel=1e-12,abs=1e-12),k
+    assert pred.display._native is not None   # the kernel ran (played 'chart' items took the Python path)

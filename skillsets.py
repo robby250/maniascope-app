@@ -37,8 +37,6 @@ import traceback  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
-import native_backend
-native_backend.activate()
 
 import feedback  # noqa: E402
 import recdata
@@ -684,7 +682,6 @@ class ManiaScopeWindow(Gtk.Window):
         self.rec = recommend.Worker(lambda m: GLib.idle_add(self._on_rec, m), busy=lambda: self._live is not None)
         self._sync_rec()
         self.rec.start()
-        self._native_build()
         self.watcher = LazerWatcher(lambda o: GLib.idle_add(self._on_obs, o),
                                     lambda s: GLib.idle_add(self._on_status, s),
                                     lambda t: GLib.idle_add(self._on_progress, t),
@@ -1093,30 +1090,6 @@ class ManiaScopeWindow(Gtk.Window):
         row.pack_start(scale, True, True, 0)
         row.pack_end(value, False, False, 0)
         return row
-
-    def _native_build(self):
-        """Source installs: build the compiled calculator in the background when it is missing or stale
-        (after setup or a git pull). Pure Python makes every map switch ~2.5× slower (friend 2026-10-01)."""
-        if native_backend.CALCULATOR is not None or getattr(sys, "frozen", False):
-            return
-        say = lambda text: self._on_rec({"type": "status", "text": text, "pin": "native"})
-        import importlib.util
-        if not (importlib.util.find_spec("Cython") and importlib.util.find_spec("setuptools")):
-            say("Slow mode: map switching is ~2.5× slower without the compiled calculator. "
-                "Run ./setup.sh once to enable it.")
-            return
-        say("Building the fast calculator in the background (one-time, about 1–2 min)…")
-        proc = subprocess.Popen(["nice", "-n", "10", sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "native_backend.py")],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-
-        def wait():
-            err = proc.communicate()[1]
-            if proc.returncode:
-                print(err[-3000:], flush=True)
-            GLib.idle_add(say, "Fast calculator ready: restart ManiaScope to switch maps ~2.5× faster."
-                          if proc.returncode == 0 else
-                          "Could not build the fast calculator (see run.log); running in slow mode.")
-        threading.Thread(target=wait, daemon=True).start()
 
     def _recs_window(self):
         """Its own window, so the main one can stay an OBS source: selected-map card, pick, list."""

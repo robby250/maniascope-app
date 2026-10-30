@@ -767,26 +767,26 @@ class FeatureSource:
         return sorted(need)
 
     def fill(self, pairs, stop=lambda: False, workers=3, chunk=40, cancel=lambda: False, progress=None):
-        """Compute features in niced worker processes, a chunk at a time (stop() pauses between chunks).
-        progress(charts_done, charts_total) after each chunk."""
-        from multiprocessing import get_context
+        """Compute features in-process on `workers` niced native threads, a chunk at a time (stop() pauses
+        between chunks). progress(charts_done, charts_total) after each chunk."""
         by = collections.defaultdict(list)
         for sha, rate in pairs:
             by[sha].append(rate)
-        jobs = [(sha, rates, self.calc) for sha, rates in by.items()]
+        jobs = list(by.items())
         done = 0
-        with get_context("spawn").Pool(workers, initializer=paths.lower_priority) as pool:
-            for i in range(0, len(jobs), chunk):
+        for i in range(0, len(jobs), chunk):
+            if cancel():
+                return done
+            while stop():
                 if cancel():
                     return done
-                while stop():
-                    if cancel():
-                        return done
-                    time.sleep(2)
-                for sha, res in pool.map(_feat_job, jobs[i:i + chunk]):
-                    done += self._store(sha, res)
-                if progress:
-                    progress(min(len(jobs), i + chunk), len(jobs))
+                time.sleep(2)
+            part = jobs[i:i + chunk]
+            for (sha, _rates), res in zip(part, recdata.feats_batch(
+                    [(chart_path(sha), rates, None) for sha, rates in part], threads=workers)):
+                done += self._store(sha, res)
+            if progress:
+                progress(min(len(jobs), i + chunk), len(jobs))
         return done
 
     def _store(self, sha, res):
@@ -806,23 +806,7 @@ class FeatureSource:
         rate = round(rate, 3)
         if sha and not self({"sha256": sha, "md5": md5, "beatmap_id": bid, "rate": rate})[0] \
                 and os.path.exists(chart_path(sha) or ""):
-            self._store(*_feat_job((sha, [rate], self.calc)))
-
-
-def _feat_job(job):
-    sha, rates, *identity = job
-    try:
-        if identity and identity[0] != recdata.calc_id():
-            import selected_analysis
-            if selected_analysis.previous_helper(identity[0]) is None:
-                return sha, "Calculator changed on disk; reopen ManiaScope to activate it"
-            features = {}
-            for rate in rates:
-                features.update(selected_analysis.calculate(chart_path(sha), rate, identity[0]))
-            return sha, features
-        return sha, recdata.chart_feats(chart_path(sha), rates)
-    except Exception as exc:
-        return sha, str(exc)
+            self._store(sha, recdata.feats_batch([(chart_path(sha), [rate], None)])[0])
 
 
 # ---------------------------------------------------------------------------
@@ -1488,15 +1472,25 @@ class Recommender:
         """Everything a refit replaces, computed without changing this object: the worker runs it on
         a background thread and keeps answering cards from the previous model (a 15–40 s refit held
         the selected card that long, G835LX run.log 2026-10)."""
+        # Its own connection: the worker's, read from this thread while the worker wrote, failed the
+        # worker's commits ("database is locked", "another row available"; bench 2026-10-30).
+        db = recdata.connect()
+        try:
+            return self._fit(db)
+        finally:
+            db.close()
+
+    def _fit(self, db):
         st = {"_observed": []}
         self._fitting = st          # observe() records results that land while this runs
-        feats = st["feats"] = (self.feats if hasattr(self, "feats") and self.feats.calc == recdata.calc_id()
-                               else FeatureSource(self.db, self.pub))
-        st["installed"] = installed_by_md5(self.db)
-        st["local_shas"] = {r[0] for r in self.db.execute("SELECT sha256 FROM installed")}
-        rows, st["skipped"] = evidence_rows(self.db, self.pub, feats)
+        feats = st["feats"] = FeatureSource(db, self.pub)
+        if hasattr(self, "feats") and self.feats.calc == feats.calc:
+            feats.cache = self.feats.cache
+        st["installed"] = installed_by_md5(db)
+        st["local_shas"] = {r[0] for r in db.execute("SELECT sha256 FROM installed")}
+        rows, st["skipped"] = evidence_rows(db, self.pub, feats)
         st["rows"] = rows
-        session = Session(load_events(self.db))
+        session = Session(load_events(db))
         begin = min((e["t"] for e in session.events if e["kind"] == "start"), default=float("inf"))
         historical = [r for r in rows if not r["ts"] or r["ts"] < begin]
         levels = play_levels(historical)
@@ -1511,10 +1505,10 @@ class Recommender:
                           for r in historical]
             st["accuracy_model"]=Personal(display_pub,display_rows,levels=levels)
         st["_baseline_begin"] = begin
-        st["ledger"], st["ledger_missing"] = build_ledger(self.db, self.pub, st["installed"])
+        st["ledger"], st["ledger_missing"] = build_ledger(db, self.pub, st["installed"])
         import pp_playlist
-        st["pp_ranks"], st["pp_reference"] = pp_playlist.reference(self.db, st["ledger"])
-        st["_shown"] = self._fit_shown(begin)
+        st["pp_ranks"], st["pp_reference"] = pp_playlist.reference(db, st["ledger"])
+        st["_shown"] = self._fit_shown(begin, db)
         return st
 
     def apply_fit(self, st):
@@ -1522,6 +1516,7 @@ class Recommender:
         if getattr(self, "_fitting", None) is st:
             self._fitting = None
         self.__dict__.pop("_typ", None)
+        st["feats"].db = self.db    # the fit's connection is closed; the worker reads through its own
         self.__dict__.update(st)
         self._score_cache = {}
         self._typ = {}
@@ -1558,7 +1553,7 @@ class Recommender:
                     self.pp_ranks, self.pp_reference = pp_playlist.reference(self.db, self.ledger)
         self._score_cache.clear()
 
-    def _fit_shown(self, until):
+    def _fit_shown(self, until, db):
         """The model works in acc320 (pp accuracy); the player reads lazer's accuracy. Map one to the other
         by the user's own judgement mix: log(1 − shown) = a + b·log(1 − acc320), fit on their scores."""
         xs, zs = [], []
@@ -1567,7 +1562,7 @@ class Recommender:
         if math.isfinite(until):
             query += " AND julianday(played)<julianday(?,'unixepoch')"
             args = (until,)
-        for (st,) in self.db.execute(query,args):
+        for (st,) in db.execute(query,args):
             st = json.loads(st)
             a, n = recdata.acc320(st)
             al = recdata.acc_lazer(st)
@@ -2027,6 +2022,64 @@ def predictor_id():
     return digest.hexdigest()[:12]
 
 
+def _native_model(model, shown):
+    """A fitted Personal (and its warmup model) as the native bulk predictor (native/src/predict.rs)."""
+    import native_backend
+    import warmup
+    if not recdata._GAP_MEMBERS:
+        recdata._gap_members()
+    pop, wpop = model.pop, model.warmup.population or {}
+    parts = recdata.GAP_SHARE_PARTS
+    mbr = collections.defaultdict(list)
+    for r, _v in recdata.VARIANTS:              # VARIANTS order: rising rates, as base_of's anchors
+        for (b, rr), v in pop["mbr"].items():
+            if rr == r:
+                mbr[b].append((math.log(r), float(v[0]), float(v[1])))
+    return native_backend.load().PredModel({
+        "consts": {"names": list(model.names), "families": list(warmup.FAMILIES),
+                   "members": [(k, list(v)) for k, v in warmup.MEMBERS.items()],
+                   "gap_parts": [[] if p == "all" else list(recdata._GAP_MEMBERS[p]) for p in parts],
+                   "gap_knots": list(recdata.GAP_KNOTS), "gap_shared": recdata.GAP_SHARED,
+                   "gap_borrow": list(recdata.GAP_BORROW), "recent_families": list(RECENT_FAMILIES),
+                   "geometry": list(_GEOMETRY_INDICES), "dominant_skip": list(warmup.DESCRIPTIVE)},
+        "pop": {"slope": pop["slope"], "window": pop["window"], "curve": pop.get("curve", {}),
+                "curve_knee": pop.get("curve_knee", 4.), "tau2": pop["tau2"], "kappa": pop["kappa"],
+                "mb": {b: (float(v[0]), float(v[1])) for b, v in pop["mb"].items()}, "mbr": dict(mbr),
+                "gap": {k: [(parts.index(p), [float(c) for c in cs]) for p, cs in g.items()]
+                        for k, g in pop.get("gap", {}).items()},
+                "share_mean": {k: [float(m.get(p, 0.)) for p in parts] for k, m in pop.get("share_mean", {}).items()}},
+        "levels": dict(model.levels),
+        "level": {k: model.level_of(k) for k in model.level}, "glob": model.glob, "sd_all": model.sd_all,
+        "shape": {k: ([float(x) for x in model.zmean[k]], [float(x) for x in model.zscale[k]],
+                      [float(x) for x in model.beta[k]]) for k in model.beta},
+        "recent": {k: tuple([float(x) for x in a] for a in v) for k, v in model.recent.items()},
+        "aff": {c: (float(a), float(n)) for c, (a, n) in model.aff.items()},
+        "rate_aff": {c: [(float(r), float(a), float(n)) for r, a, n in v] for c, v in model.rate_aff.items()},
+        "rate_support": {c: (float(lo), float(hi)) for c, (lo, hi) in model.rate_support.items()},
+        "rate_bandwidth": model.rate_bandwidth, "tau2_c": model.tau2_c, "kap_c": model.kap_c,
+        "shown": tuple(shown),
+        "warmup": {"slope": wpop.get("slope", {}), "curve": wpop.get("curve", {}),
+                   "curve_knee": wpop.get("curve_knee", 4.), "elasticities": model.warmup.elasticities,
+                   "modes": model.warmup.modes, "fallback": model.warmup.fallback}})
+
+
+_NO_LOADING = np.zeros(1 + 8)
+
+
+def _native_session(view, keys):
+    """The frozen session tables the native predictor reads, per keymode (Session caches the same values)."""
+    import native_backend
+    import warmup
+    model = view._warmup_model
+    tables = {}
+    for k in keys:
+        view.correction(k, None, loading=_NO_LOADING)        # fills the posterior cache
+        tables[k] = {"cold_scale": view.cold_scale(k), "form": [float(x) for x in view._corrections[("posterior", k)][0]],
+                     "penalty": [model.penalty(k, fam, view.activation(k, fam), 0., 1.) for fam in warmup.FAMILIES],
+                     "activation": [view.activation(k, fam) for fam in warmup.FAMILIES]}
+    return native_backend.load().PredSession({"warm": bool(view.warm_flag), "keys": tables})
+
+
 class Predictor:
     """Immutable model snapshot shared with rate work; no DB or GTK ownership."""
     def __init__(self, rec, *, model=None, shown=None, source_id=None):
@@ -2057,6 +2110,39 @@ class Predictor:
             calculator=self.calc, predictor=self.predictor_id, rate=rate, band_z=BAND_Z,
             sha256=chart if isinstance(chart,str) and len(chart)==64 else None,
             md5=chart if isinstance(chart,str) and len(chart)==32 else None)
+        return out
+
+    def predict_many(self, items, session):
+        """predict(..., accuracy_only=True) for [(f, chart, bid, rate)], natively in bulk. Charts with plays
+        in the session window keep the Python path: their rate penalty, chart correction and retry."""
+        # The kernel implements the fitted form-prior correction; models without one (legacy fits, test
+        # stubs) keep the Python path.
+        if getattr(self, "display", None) is None or getattr(self.display.model.warmup, "form_prior", None) is None:
+            return [self.predict(f, chart, bid, rate, session, accuracy_only=True) for f, chart, bid, rate in items]
+        session.bind_warmup(getattr(self.model, "warmup", None))
+        view = session.for_accuracy(self.display.model.warmup)
+        played = {b[4:] for b in (*view._attempts_by_map, *view.retry_played) if b[:4] in ("md5:", "sha:")}
+        native = [i for i, it in enumerate(items) if it[1] not in played]
+        out = [None] * len(items)
+        if native:
+            keys = {items[i][0]["keys"] for i in native}
+            cached = view.__dict__.get("_native")
+            if cached is None or cached[0] is not self.display or not keys <= cached[1]:
+                cached = view._native = (self.display, keys | (cached[1] if cached else set()),
+                                         _native_session(view, keys | (cached[1] if cached else set())))
+            if self.display.__dict__.get("_native") is None:
+                self.display._native = _native_model(self.display.model, self.display.shown)
+            now = time.time()
+            for i, e in zip(native, self.display._native.predict_accuracy(cached[2], [items[i] for i in native])):
+                chart, rate = items[i][1], items[i][3]
+                e["accuracy_forecast"] = accuracy_targets.forecast_state(e, generated_at=now,
+                    calculator=self.calc, predictor=self.predictor_id, rate=rate, band_z=BAND_Z,
+                    sha256=chart if isinstance(chart,str) and len(chart)==64 else None,
+                    md5=chart if isinstance(chart,str) and len(chart)==32 else None)
+                out[i] = e
+        for i, it in enumerate(items):
+            if out[i] is None:
+                out[i] = self.predict(*it, session, accuracy_only=True)
         return out
 
     def _predict(self, f, chart, bid, rate, session):

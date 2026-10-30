@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-time setup for ManiaScope on Linux; run it again after `git pull` (it skips what is done).
 #
-# Requirements (README step 1): python3 with PyGObject (GTK 3) + pycairo + numpy, and a C compiler
-# with Python headers for the fast calculator.
+# Requirements (README step 1): python3 with PyGObject (GTK 3) + pycairo + numpy. The calculator is
+# downloaded for release versions, built with Rust (rustup.rs) otherwise.
 # Everything else is installed for this user only, under ~/.local, with no sudo.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,16 +60,24 @@ if [ ! -d "$DATA/realmjs/node_modules/realm" ]; then
   (cd "$DATA/realmjs" && PATH="$NODE_DIR:$PATH" && npm init -y >/dev/null && npm install --no-fund --no-audit realm@12)
 fi
 
-echo "== 4/5 Fast calculator (map switching ~2.5× faster)"
-if ! python3 -c "import Cython, setuptools" 2>/dev/null; then
-  echo "Installing Cython…"
-  pipi cython setuptools || true
-fi
-if (cd "$HERE" && nice python3 native_backend.py >/tmp/maniascope-native.log 2>&1); then
-  echo "Built."
+echo "== 4/5 Calculator (native, required)"
+SO="$(cd "$HERE" && python3 -c 'import native_backend as N; print(N.location()/N.ARTIFACT)')"
+if [ -f "$SO" ]; then
+  echo "Ready."
+elif command -v cargo >/dev/null || [ -x "$HOME/.cargo/bin/cargo" ]; then
+  echo "Building it with Rust (~1 min)…"
+  (cd "$HERE" && nice python3 native_backend.py)
 else
-  echo "Could not build it (log: /tmp/maniascope-native.log). ManiaScope still works, ~2.5× slower."
-  echo "Usually the C compiler or Python headers from README step 1 are missing; install them and run ./setup.sh again."
+  # A release ships the calculator for its own sources (asset named by their hash); newer sources need Rust.
+  name="maniascope_native-$(basename "$(dirname "$SO")").abi3.so"
+  url="$(curl -fsSL https://api.github.com/repos/robby250/maniascope-app/releases \
+         | grep -o "https://[^\"]*/$name" | head -1)" || true
+  if [ -n "$url" ] && mkdir -p "$(dirname "$SO")" && curl -fsSL -o "$SO.part" "$url"; then
+    mv "$SO.part" "$SO" && echo "Downloaded."
+  else
+    echo "No prebuilt calculator for this version. Install Rust (https://rustup.rs) and run ./setup.sh again."
+    exit 1
+  fi
 fi
 
 echo "== 5/5 tosu and the application menu"

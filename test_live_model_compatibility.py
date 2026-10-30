@@ -33,23 +33,6 @@ def test_archived_helper_requires_exact_safe_identity(tmp_path):
         assert selected_analysis.previous_helper(invalid,tmp_path) is None
 
 
-def test_spawned_background_workers_keep_the_old_callers_calculator():
-    import nps
-    import recommend
-    old = 'c1021be2829b'
-    with patch.object(recdata,'calc_id',return_value='123456789abc'), \
-         patch.object(recdata,'local_file',return_value='/fixture/chart.osu'), \
-         patch.object(recommend,'chart_path',return_value='/fixture/chart.osu'), \
-         patch.object(selected_analysis,'previous_helper',return_value='/fixture/old/selected_analysis.py'), \
-         patch.object(selected_analysis,'calculate',side_effect=lambda p,r,c:{r:{'calculator':c}}) as calculate, \
-         patch.object(recdata,'chart_feats') as current:
-        sha, features, error = nps._job({'sha256':'a'*64},[.9,1.],{},old)
-        assert error is None and set(features) == {.9,1.}
-        assert features[.9]['calculator'] == old and not current.called
-        sha, features = recommend._feat_job(('a'*64,[1.2],old))
-        assert features[1.2]['calculator'] == old and calculate.call_count == 3
-
-
 def test_preserved_runtime_survives_a_source_update(tmp_path):
     import os
     import shutil

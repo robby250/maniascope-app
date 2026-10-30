@@ -26,16 +26,13 @@ rm -rf realmjs/node_modules/realm/prebuilds/{android,apple}          # 930 MB of
 export WINEPATH='C:\gtk\bin' GI_TYPELIB_PATH='C:\gtk\lib\girepository-1.0'
 wine 'C:\py\python.exe' -c "import recdata; print(recdata.calc_id())" </dev/null >calc_id.txt 2>/dev/null
 [ "$(tr -d "\r" <calc_id.txt)" = "$(cat packaging/calc_id.expected)" ] || { echo "calc id $(cat calc_id.txt) != expected"; exit 1; }
+# Rust calculator, cross-built here for windows-gnu (abi3: one .pyd for any Python ≥ 3.10). The source
+# self-test loads it from the cache folder native_backend looks in; the spec bundles it for the frozen app.
+CARGO_TARGET_DIR="$W/target" ~/.cargo/bin/cargo build -q --release --target x86_64-pc-windows-gnu --manifest-path native/Cargo.toml
+cp "$W/target/x86_64-pc-windows-gnu/release/maniascope_native.dll" native/maniascope_native.pyd
+cache=$(wine 'C:\py\python.exe' -c "import native_backend; print(native_backend.location())" </dev/null 2>/dev/null | tr -d "\r")
+mkdir -p "$(winepath -u "$cache")" && cp native/maniascope_native.pyd "$(winepath -u "$cache")/"
 run 'C:\py\python.exe' maniascope_app.py --self-test
-# Compiled calculator (~2.7× faster): Cython C made here, mingw-w64 against the bundled Python's DLL and
-# its UCRT (the default msvcrt would mix two C runtimes). Outputs match plain Python within 1e-9.
-[ -x "$W/venv/bin/cython" ] || { python3 -m venv "$W/venv" && "$W/venv/bin/pip" -q install Cython==3.3.0; }
-x86_64-w64-mingw32-gcc -dumpspecs | sed 's/-lmsvcrt/-lucrt/g' >"$W/dl/ucrt.specs"
-mkdir -p native
-for m in $(python3 -c "import recdata; print(*recdata.CALCULATOR_MODULES)"); do echo "$m"; done | xargs -P "$(nproc)" -I{} sh -c \
-  '"$0/venv/bin/cython" -3 -X annotation_typing=True -X infer_types=True {}.py -o native/{}.c &&
-   x86_64-w64-mingw32-gcc -specs="$0/dl/ucrt.specs" -D_UCRT -O2 -g0 -shared -DNDEBUG -w -I"$1/py/include" native/{}.c \
-     -L"$1/py" -lpython314 -static-libgcc -o native/{}.cp314-win_amd64.pyd' "$W" "$C"
 run 'C:\py\python.exe' -m PyInstaller --noconfirm packaging/maniascope.spec
 (cd dist/ManiaScope && run ManiaScope.exe --self-test)
 grep -q "self-test OK.*native" "$W/dl/last.log"

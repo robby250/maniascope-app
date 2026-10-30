@@ -43,13 +43,13 @@ def preserve_runtime(directory=None):
         target = Path(temp)/calculator
         target.mkdir()
         files = [p for p in source.glob('*.py') if not p.name.startswith('test_')]
-        files += list(source.glob('*.pxd')) + [source/'calib/difficulty.json']
+        import native_backend
+        files += native_backend.sources(source) + [source/'calib/difficulty.json']
         for path in files:
             dest = target/path.relative_to(source)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, dest)
-        copied = recdata._calculator_identity([target/(m+'.py') for m in recdata.CALCULATOR_MODULES]
-                                              + [target/'calib/difficulty.json'])
+        copied = recdata._calculator_identity(native_backend.identity_files(target))
         if copied != calculator:
             raise OSError('Calculator changed while preserving its runtime')
         target.rename(base/calculator)
@@ -187,8 +187,6 @@ def child_main(argv):
         return 0
     serve = argv[0] == "--serve"
     calculator = argv[1] if serve else argv[2]
-    import native_backend
-    native_backend.activate()
     import recdata
     if recdata.calc_id() != calculator:
         archived=previous_helper(calculator)

@@ -26,6 +26,9 @@ class Predictor:
         return {"acc_mid": f["test_acc"], "acc_lo": f["test_acc"]-.025,
                 "acc_hi": f["test_acc"]+.015, "sd_model": .1}
 
+    def predict_many(self, items, session):
+        return [self.predict(*it, session, accuracy_only=True) for it in items]
+
 
 def inst(sha, keys=7):
     return {"sha256": sha, "md5": sha, "keys": keys, "beatmap_id": -1, "title": sha,
@@ -101,17 +104,17 @@ def test_builder_only_works_for_active_objective_and_reuses_catalogue(tmp_path, 
         db.execute('INSERT INTO feats VALUES (?,?)',('a@1.000|fixture',__import__('json').dumps(f)))
     messages=[];builder=nps.Builder(lambda kind,data:messages.append((kind,data)))
     with patch.object(nps,'installed',return_value=({'a':inst('a')},'')) as installed:
-        builder._build(db,None,(Predictor(),R.Session([],1000),(7,),12,3,(7,),('ln',),'skills'))
+        builder._build(db,(Predictor(),R.Session([],1000),(7,),12,3,(7,),('ln',),'skills'))
         assert messages and messages[-1][0]=='ready'
         data=messages[-1][1]
         assert data['revision']==12 and set(data['states'])=={'skills'}
         assert data['states']['skills']['candidates'][0]['practice_skills']==('ln',)
-        builder._build(db,None,(Predictor(),R.Session([],1000),(7,),13,3,(7,),('ln',),'nps'))
+        builder._build(db,(Predictor(),R.Session([],1000),(7,),13,3,(7,),('ln',),'nps'))
         assert set(messages[-1][1]['states'])=={'nps'}
         assert messages[-1][1]['states']['nps']['candidates'][0]['mode']=='nps'
         assert installed.call_count==1
         before=len(messages)
-        builder._build(db,None,(Predictor(),R.Session([],1000),(7,),14,3,(7,),('ln',),'pp'))
+        builder._build(db,(Predictor(),R.Session([],1000),(7,),14,3,(7,),('ln',),'pp'))
         assert len(messages)==before and installed.call_count==1
     db.close()
 
@@ -172,64 +175,12 @@ def test_demanded_is_match_for_every_single_skill():
         assert dem and all((g in sp.match(f, [g])[1]) == (g in dem) for g in sp.dimensions(f['keys']))
 
 
-def test_builder_recovers_after_broken_process_pool(tmp_path, monkeypatch):
-    from concurrent.futures import Future
-    from concurrent.futures.process import BrokenProcessPool
-    import webmaps
-    monkeypatch.setattr(webmaps, 'WEB_DIR', str(tmp_path/'web'))
-    db = recdata.connect(str(tmp_path/'rec.db'))
-    monkeypatch.setattr(recdata, 'connect', lambda: db)
-    pools, messages = [], []
-    f = feature({'ln': 1.})
-
-    class Pool:
-        def __init__(self, **kwargs):
-            self.broken = not pools
-            self.closed = False
-            pools.append(self)
-
-        def submit(self, *args):
-            future = Future()
-            if self.broken:
-                future.set_exception(BrokenProcessPool('worker exited'))
-            else:
-                future.set_result(('a', {1.: f}, None))
-            return future
-
-        def shutdown(self, **kwargs):
-            self.closed = True
-
-    monkeypatch.setattr(nps, 'ProcessPoolExecutor', Pool)
-    session = R.Session([], 1000)
-    session.warm_flag = True
-
-    def emit(kind, data):
-        messages.append((kind, data))
-        if kind == 'error':
-            if sum(k == 'error' for k, _ in messages) == 1:
-                builder.configure(Predictor(), session, (7,), 2, 3, (7,), ('ln',), 'skills')
-            else:
-                builder.stop()
-        elif data['states']['skills']['candidates']:
-            builder.stop()
-
-    builder = nps.Builder(emit)
-    builder.configure(Predictor(), session, (7,), 1, 3, (7,), ('ln',), 'skills')
-    with patch.object(nps, 'installed', return_value=({'a': inst('a')}, '')):
-        builder.run()
-    assert len(pools) == 2 and all(p.closed for p in pools)
-    assert sum(k == 'error' for k, _ in messages) == 1
-    ready = [data for kind, data in messages if kind == 'ready'][-1]
-    assert ready['revision'] == 2 and ready['states']['skills']['candidates'][0]['sha'] == 'a'
-
-
 def test_builder_retries_incomplete_catalogue(tmp_path, monkeypatch):
     from unittest.mock import Mock
     import webmaps
     monkeypatch.setattr(webmaps, 'WEB_DIR', str(tmp_path/'web'))
     db = recdata.connect(str(tmp_path/'rec.db'))
     monkeypatch.setattr(recdata, 'connect', lambda: db)
-    monkeypatch.setattr(nps, 'ProcessPoolExecutor', Mock(return_value=Mock()))
     catalog = Mock(side_effect=[RuntimeError('catalogue unavailable'),
                                ({'a': inst('a')}, {'a': {1.: feature({'ln': 1.})}})])
     monkeypatch.setattr(webmaps, 'catalog', catalog)
@@ -293,31 +244,22 @@ def test_builder_failure_is_scoped_preserves_list_and_clears_on_ready(tmp_path):
 
 
 @pytest.mark.parametrize('interrupt', ['stop', 'configure'])
-@pytest.mark.parametrize('running', [False, True])
-def test_builder_interrupts_pending_result(tmp_path, monkeypatch, interrupt, running):
+def test_builder_interrupts_after_the_running_batch(tmp_path, monkeypatch, interrupt):
     import threading
-    from concurrent.futures import Future
-    from unittest.mock import Mock
     import webmaps
     monkeypatch.setattr(webmaps, 'WEB_DIR', str(tmp_path/'web'))
     connect = recdata.connect
     monkeypatch.setattr(recdata, 'connect', lambda: connect(str(tmp_path/'rec.db')))
-    first = Future()
-    if running:
-        first.set_running_or_notify_cancel()
-    submitted = threading.Event()
-    ready = []
+    entered, release, calls, ready = threading.Event(), threading.Event(), [], []
 
-    def submit(*args):
-        if not submitted.is_set():
-            submitted.set()
-            return first
-        future = Future()
-        future.set_result(('a', {1.: feature({'ln': 1.})}, None))
-        return future
+    def batch(items, threads=0):
+        calls.append(items)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        return [{1.: feature({'ln': 1.})} for _ in items]
 
-    pool = Mock(submit=submit)
-    monkeypatch.setattr(nps, 'ProcessPoolExecutor', lambda **kwargs: pool)
+    monkeypatch.setattr(recdata, 'feats_batch', batch)
     session = R.Session([], 1000)
     session.warm_flag = True
 
@@ -332,20 +274,19 @@ def test_builder_interrupts_pending_result(tmp_path, monkeypatch, interrupt, run
     with patch.object(nps, 'installed', return_value=({'a': inst('a')}, '')):
         builder.start()
         try:
-            assert submitted.wait(2)
+            assert entered.wait(2)
             if interrupt == 'stop':
                 builder.stop()
             else:
                 builder.configure(Predictor(), session, (7,), 2, 3, (7,), ('ln',), 'skills')
-            builder.join(2)
-            assert not builder.is_alive(), 'stop/new request stayed blocked on the old future'
-            assert first.cancelled() == (not running)
+            release.set()          # a native batch is short; the request is honoured right after it
+            builder.join(5)
+            assert not builder.is_alive(), 'stop/new request stayed blocked after the batch'
             if interrupt == 'configure':
                 assert ready[-1]['revision'] == 2 and ready[-1]['states']['skills']['candidates']
         finally:
+            release.set()
             builder.stop()
-            if not first.done():
-                first.set_result(('a', {1.: feature({'ln': 1.})}, None))
             builder.join(2)
 
 
@@ -397,13 +338,13 @@ def test_builder_feature_decode_releases_read_lock_and_defers_new_rows(tmp_path,
 
     monkeypatch.setattr(nps.json, 'loads', decode)
     try:
-        builder._build(db, None, request)
+        builder._build(db, request)
         assert decoded == list(range(270))
         assert builder._loaded_rowid == upper   # advance past the irrelevant calculator tail
         assert 2. not in builder._analyses['a']
         assert builder._analyses['a'][1.]['cache_index'] == 0
         builder.halt.clear()
-        builder._build(db, None, request)
+        builder._build(db, request)
         assert decoded == list(range(272))
         assert builder._analyses['a'][2.]['cache_index'] == 270
         assert builder._analyses['a'][1.]['cache_index'] == 271
@@ -434,14 +375,14 @@ def test_builder_interrupts_cache_scan_and_resumes_remaining_rows(tmp_path, monk
 
     monkeypatch.setattr(nps.json, 'loads', decode)
     try:
-        builder._build(db, None, request)
+        builder._build(db, request)
         assert 0 < len(decoded) <= 256
         assert builder._loaded_rowid == len(decoded)
         builder.halt.clear()
         with builder.cv:
             continuation = builder.request or request
             builder.request = None
-        builder._build(db, None, continuation)
+        builder._build(db, continuation)
         assert decoded == list(range(300))
         assert builder._loaded_rowid == 300
         assert len(builder._analyses['a']) == 300
@@ -488,7 +429,7 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
 
     def build():
         try:
-            builder._build(db, None, request)
+            builder._build(db, request)
         except Exception as exc:
             errors.append(exc)
 
@@ -519,7 +460,7 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
                     builder.request = None
                 playing.clear()
                 builder.halt.clear()
-                builder._build(db, None, continuation)
+                builder._build(db, continuation)
             assert decoded == list(range(300)) and builder._loaded_rowid == 300
             assert worker.skills_state['candidates'] == [candidate]
             assert worker.rec.feats.cache[('a', 1.)] is candidate['f']
