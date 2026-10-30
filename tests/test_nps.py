@@ -7,7 +7,7 @@ import re
 import tempfile
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -741,3 +741,44 @@ def test_pp_maps_mix_into_the_nps_list_only_when_on(tmp_path):
         info = json.loads(worker.db.execute("SELECT info FROM events WHERE kind='offer'").fetchone()['info'])
         assert info['mode'] == 'pp' and info['purpose'] == 'nps_mix' and messages[-1]['mode'] == 'nps'
     worker.db.close()
+
+
+def test_new_accuracy_target_swaps_website_charts_without_reloading_the_library(tmp_path, monkeypatch):
+    """A target change moves the website window: only charts leaving/entering it change (user 2026-10-31: the
+    playlist has to follow a new target at once; a full reload re-decoded every analysed chart)."""
+    import webmaps
+    from test_skill_practice import feature
+    monkeypatch.setattr(webmaps, 'WEB_DIR', str(tmp_path))
+    (tmp_path/'web.pkl').write_bytes(b'')
+    f = feature({'stream': 1.})
+    web_inst = lambda sha: dict(sha256=sha, md5='m-' + sha, keys=7, installed=False, beatmap_id=0)
+    sets = {.95: ('w1', 'w2'), .97: ('w2', 'w3')}
+    monkeypatch.setattr(nps, 'reach', lambda pred, keys, target: {7: (target, target)})
+    monkeypatch.setattr(webmaps, 'catalog', lambda keys, md5s, window: (
+        {s: web_inst(s) for s in sets[round(window[7][0], 2)]}, {s: {1.: f} for s in sets[round(window[7][0], 2)]}))
+    installed = Mock(return_value=({'local': dict(web_inst('local'), installed=True)}, ''))
+    monkeypatch.setattr(nps, 'installed', installed)
+    captured = []
+    builder = nps.Builder(lambda *args: None)
+    def inspect(catalog, analyses, *args, **kwargs):
+        captured.append((set(catalog), analyses['local'], dict(analyses.get('w3', {}))))
+        builder.halt.set()
+        return nps.no_choices(), []
+    monkeypatch.setattr(nps, 'candidates_from', inspect)
+    db = recdata.connect(str(tmp_path/'rec.db'))
+    predictor = SimpleNamespace(calc='current', predictor_id='p', pub={'maps': {}, 'feats': {}}, md5_bid={})
+    with db:
+        db.execute('INSERT INTO feats VALUES (?,?)', ('local@1.000|current', json.dumps(f)))
+    for target in (.95, .97):
+        session = R.Session([], 1000.)
+        session.acc_target = target
+        if target == .97:
+            with db:          # analysed after the first pass's cursor: read by its own key range
+                db.execute('INSERT INTO feats VALUES (?,?)', ('w3@1.200|current', json.dumps(dict(f, x=2))))
+        builder.halt.clear()
+        builder._build(db, (predictor, session, (7,), 1, 0, (7,), (), 'nps'))
+    (first, local1, _), (second, local2, w3) = captured
+    assert first == {'local', 'w1', 'w2'} and second == {'local', 'w2', 'w3'}
+    assert installed.call_count == 1 and local2 is local1          # the library's analyses were kept
+    assert set(w3) == {1., 1.2}
+    db.close()

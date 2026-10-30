@@ -251,6 +251,7 @@ class Builder(threading.Thread):
         self._lead = {}
         self._loaded_rowid = 0
         self._store = None                  # native FeatStore of _analyses (_native_scores)
+        self._web, self._window, self._installed_md5 = set(), None, set()
 
     def configure(self, predictor, session, keys, revision, generation, skills_keys=(), selected_skills=(), active_mode="nps"):
         with self.cv:
@@ -267,6 +268,42 @@ class Builder(threading.Thread):
             self._current.add(sha)
         else:
             self._current.discard(sha)
+
+    def _swap_web(self, db, pred, calc, allowed, window):
+        """Website charts join NPS and Skills alike, marked not installed (Next offers the download). Only charts
+        leaving or entering `window` change; the installed library's analyses stay."""
+        import webmaps
+        web, web_feats = webmaps.catalog(set(allowed), self._installed_md5, window)
+        for sha in self._web - set(web):
+            self._catalog.pop(sha, None)
+            self._analyses.pop(sha, None)
+            self._current.discard(sha)
+            if self._store is not None:
+                self._store.drop(sha)
+        added = [sha for sha in web if sha not in self._catalog]
+        for sha in added:
+            inst = self._catalog[sha] = web[sha]
+            if sha in web_feats:
+                self._analyses[sha] = {r: f for r, f in web_feats[sha].items() if offerable(r)}
+                b = pred.md5_bid.get(inst["md5"])
+                pub = pred.pub["feats"].get(b, {})
+                if (pub.get("calc") == calc and inst["md5"] and pub.get("md5") == inst["md5"]
+                        and pred.pub["maps"].get(b, {}).get("md5") == inst["md5"]):
+                    # Replace only offered web anchors; current SQLite below still wins.
+                    for rate in self._analyses[sha]:
+                        if rate in pub and pub[rate].get("keys") == inst["keys"]:
+                            self._analyses[sha][rate] = pub[rate]
+            self._note(sha)
+        if self._loaded_rowid:
+            # The SQLite cursor already passed these charts' rows: read just theirs (primary-key range per chart).
+            for sha in added:
+                for row in db.execute("SELECT key,data FROM feats WHERE key>=? AND key<?", (sha + "@", sha + "A")):
+                    rate, _, row_calc = row["key"].split("@", 1)[1].partition("|")
+                    if row_calc == calc and offerable(float(rate)):
+                        self._analyses.setdefault(sha, {})[float(rate)] = recdata.feats_load(row["data"])
+                self._note(sha)
+        self._web = (self._web & set(web)) | set(added)
+        self._window = window
 
     def stop(self):
         self.halt.set()
@@ -313,7 +350,9 @@ class Builder(threading.Thread):
         web_path = os.path.join(webmaps.WEB_DIR, "web.pkl")
         web_mtime = os.path.getmtime(web_path) if os.path.exists(web_path) else None
         window = reach(pred, allowed, central_target(session)) if web_mtime else None
-        catalog_key = (calc, allowed, imported, web_mtime, window, recdata.client())
+        # The website window follows the accuracy target: a target change swaps only the website charts. Keying the
+        # whole catalogue on it re-decoded every analysed chart, so a new target took ages to show (user 2026-10-31).
+        catalog_key = (calc, allowed, imported, web_mtime, recdata.client())
         if catalog_key != self._catalog_key:
             full, self._catalog_error = installed(db)
             self._catalog = {s: i for s, i in full.items() if i["keys"] in allowed}
@@ -322,22 +361,10 @@ class Builder(threading.Thread):
             self._store = _feat_store()
             self._current = set()
             self._loaded_rowid = 0
-            # Website charts join NPS and Skills alike, marked not installed (Next offers the download).
-            web, web_feats = webmaps.catalog(set(allowed), {i["md5"] for i in full.values()}, window)
-            for sha, inst in web.items():
-                if sha not in self._catalog:
-                    self._catalog[sha] = inst
-                    if sha in web_feats:
-                        self._analyses[sha] = {r: f for r, f in web_feats[sha].items() if offerable(r)}
-                        b = pred.md5_bid.get(inst["md5"])
-                        pub = pred.pub["feats"].get(b, {})
-                        if (pub.get("calc") == calc and inst["md5"] and pub.get("md5") == inst["md5"]
-                                and pred.pub["maps"].get(b, {}).get("md5") == inst["md5"]):
-                            # Replace only offered web anchors; current SQLite below still wins.
-                            for rate in self._analyses[sha]:
-                                if rate in pub and pub[rate].get("keys") == inst["keys"]:
-                                    self._analyses[sha][rate] = pub[rate]
-                    self._note(sha)
+            self._web, self._window, self._installed_md5 = set(), None, {i["md5"] for i in full.values()}
+            self._swap_web(db, pred, calc, allowed, window)
+        elif window != self._window:
+            self._swap_web(db, pred, calc, allowed, window)
         catalog, error, analyses, current = self._catalog, self._catalog_error, self._analyses, self._current
         catalogs = {active_mode: catalog}
         # Reuse decoded features across scores/filter changes. SQLite rowids are
