@@ -30,6 +30,7 @@ pub(crate) struct Choice {
     pub(crate) length: f64, // play span at this rate, s
     pub(crate) profile: Vec<f64>,
     pub(crate) acc_mid: f64,
+    pub(crate) matched: Vec<String>, // included Skills the chart matches, for the how-often sliders
     pub(crate) pred: Pred,
     pub(crate) patch: Option<Py<PyDict>>, // refreshed metadata (Worker.t_nps_update) laid over the dict
 }
@@ -59,6 +60,7 @@ impl Choice {
             length: num("length")?,
             profile: opt("profile")?.map(|v| v.extract()).transpose()?.unwrap_or_default(),
             acc_mid: num("acc_mid")?,
+            matched: opt("matched_skills")?.map(|v| v.extract()).transpose()?.unwrap_or_default(),
             sha,
             pred: Pred::Py(d.clone().unbind()),
             patch: None,
@@ -245,6 +247,7 @@ impl ChoiceList {
                 group: get("group")?.str()?.to_string(),
                 nps: get("nps")?.extract()?, length: get("length")?.extract()?, profile: get("profile")?.extract()?,
                 acc_mid: c.acc_mid,
+                matched: c.matched.clone(),
                 pred: match &c.pred {
                     Pred::Native { p, generated_at } => Pred::Native { p: p.clone(), generated_at: *generated_at },
                     Pred::Py(d) => Pred::Py(d.clone_ref(m.py())),
@@ -253,22 +256,6 @@ impl ChoiceList {
             });
         }
         Ok(ChoiceList { items, forecast: self.forecast.clone() })
-    }
-
-    /// FeatureSource.cache[key(sha, rate)] = the choice's features (analyses[sha][rate], or a Python-path
-    /// choice's "f"): exact proposed features serve selected-map and start-event predictions at once.
-    fn fill_cache(&self, cache: &Bound<'_, PyDict>, key: &Bound<'_, PyAny>, analyses: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        for c in &self.items {
-            let f = match (&c.pred, analyses) {
-                (Pred::Py(d), _) => d.bind(cache.py()).get_item("f")?,
-                (Pred::Native { .. }, Some(a)) => a.get_item(&c.sha)?.get_item(c.rate).ok(),
-                (Pred::Native { .. }, None) => None,
-            };
-            if let Some(f) = f {
-                cache.set_item(key.call1((&c.sha, c.rate))?, f)?;
-            }
-        }
-        Ok(())
     }
 
     /// The worker's prepared pool: choices of `keys` at an offered rate whose chart is still here (a website
@@ -328,6 +315,10 @@ pub struct Ranking<'py> {
     shuffle: Option<(String, f64)>, // pp_playlist.preview's (str(seed), focus)
     #[pyo3(item)]
     count: Option<usize>,
+    #[pyo3(item)]
+    recent_web: Vec<bool>, // this tab's last offers, oldest first: was each a map you don't have
+    #[pyo3(item)]
+    skill_weights: Option<std::collections::HashMap<String, f64>>, // {included skill: how often} when the sliders differ
 }
 
 #[pymethods]
@@ -448,10 +439,13 @@ impl Prepared {
                 let c = &items[x.0];
                 if c.md5.is_empty() { c.sha.as_str() } else { c.md5.as_str() }
             }).collect();
-            let order = shuffle_order(&ids, &available.iter().map(|x| x.2).collect::<Vec<_>>(), seed, *focus);
+            let slots: Vec<((i64, &str), f64)> = available.iter().map(|x| slot(&items[x.0], r.skill_weights.as_ref())).collect();
+            let weights = balanced(&available.iter().map(|x| x.2).collect::<Vec<_>>(), &slots, *focus);
+            let order = shuffle_order(&ids, &weights, seed, *focus);
             available = order.into_iter().map(|i| available[i]).collect();
         }
-        let order = mix(&available.iter().map(|x| items[x.0].installed).collect::<Vec<_>>(), r.web);
+        let share = r.web / (1. + r.web);
+        let order = mix(&available.iter().map(|x| items[x.0].installed).collect::<Vec<_>>(), r.web, credit(&r.recent_web, share));
         let mut out: Vec<(usize, f64, f64, f64)> = order.into_iter().map(|i| available[i]).collect();
         if let Some(n) = r.count {
             out.truncate(n);
@@ -488,9 +482,36 @@ fn shuffle_order(ids: &[&str], weights: &[f64], seed: &str, focus: f64) -> Vec<u
     order
 }
 
-/// nps.mix: installed and website charts interleaved, each side in its ranked order, website at web/(1+web)
-/// (sampling both from one weighted pool let whichever side had more mass fill the list, user 2026-10-25).
-fn mix(installed: &[bool], web: f64) -> Vec<usize> {
+/// What a chart's weight is balanced by: its (keys, pattern group) on NPS; on Skills with how-often sliders its
+/// most wanted matched skill, across keymodes, with that slider as the skill's share.
+fn slot<'a>(c: &'a Choice, skills: Option<&std::collections::HashMap<String, f64>>) -> ((i64, &'a str), f64) {
+    let Some(skills) = skills else { return ((c.keys, c.group.as_str()), 1.) };
+    let at = |k: &String| skills.get(k).copied().unwrap_or(1.);
+    c.matched.iter().max_by(|a, b| at(a).total_cmp(&at(b))).map_or(((0, ""), 1.), |k| ((0, k.as_str()), at(k)))
+}
+
+/// Weights with each slot's total mass divided out as focus falls, then its share applied. At focus 0 every slot has
+/// its share of the sampled list; at 1 the weights are untouched. Library proportions alone made low variety
+/// "doar chordstreams si brackets" (Less, 2026-10-31): those own the top of NPS, so a harder shuffle changed nothing.
+fn balanced(weights: &[f64], slots: &[((i64, &str), f64)], focus: f64) -> Vec<f64> {
+    let mut mass: HashMap<(i64, &str), f64> = HashMap::default();
+    for (w, s) in weights.iter().zip(slots) {
+        *mass.entry(s.0).or_insert(0.) += w;
+    }
+    let evening = (1. - focus).powi(2);     // squared: the slider's middle keeps most of the library's mix
+    weights.iter().zip(slots).map(|(w, s)| w * s.1 / mass[&s.0].powf(evening)).collect()
+}
+
+/// Website share still owed after a tab's recent offers, oldest first: the mix keeps the slider's share across
+/// picks. A list rebuilt from zero after every pick opened with an installed map each time, and Next takes the
+/// first row, so 0 of 167 picks at 15 % were website charts (G835LX 2026-10-27..31, user 2026-10-31).
+fn credit(recent: &[bool], share: f64) -> f64 {
+    recent.iter().fold(0., |c: f64, &web| (c + share - if web { 1. } else { 0. }).clamp(-1., 1.))
+}
+
+/// nps.mix: installed and website charts interleaved, each side in its ranked order, website at web/(1+web) plus
+/// `credit` (sampling both from one weighted pool let whichever side had more mass fill the list, user 2026-10-25).
+fn mix(installed: &[bool], web: f64, credit: f64) -> Vec<usize> {
     let mut pools: [std::collections::VecDeque<usize>; 2] = Default::default();
     for (i, &inst) in installed.iter().enumerate() {
         pools[usize::from(!inst)].push_back(i);
@@ -498,8 +519,8 @@ fn mix(installed: &[bool], web: f64) -> Vec<usize> {
     let share = web / (1. + web);
     let mut taken = 0.;
     (0..installed.len()).map(|i| {
-        // A website chart only once its share is due, so a list never opens with one.
-        let side = usize::from(!pools[1].is_empty() && (pools[0].is_empty() || taken + 1. <= share * (i + 1) as f64 + 1e-9));
+        // A website chart only once its share is due.
+        let side = usize::from(!pools[1].is_empty() && (pools[0].is_empty() || taken + 1. <= credit + share * (i + 1) as f64 + 1e-9));
         taken += side as f64;
         pools[side].pop_front().unwrap()
     }).collect()
@@ -512,10 +533,11 @@ pub fn preview_order(rows: Vec<(String, f64)>, seed: &str, focus: f64) -> Vec<us
     shuffle_order(&ids, &rows.iter().map(|r| r.1).collect::<Vec<_>>(), seed, focus)
 }
 
-/// nps.mix for Python rows: the order of their installed flags.
+/// nps.mix for Python rows: the order of their installed flags. recent: as Ranking.recent_web.
 #[pyfunction]
-pub fn mix_order(installed: Vec<bool>, web: f64) -> Vec<usize> {
-    mix(&installed, web)
+#[pyo3(signature = (installed, web, recent=Vec::new()))]
+pub fn mix_order(installed: Vec<bool>, web: f64, recent: Vec<bool>) -> Vec<usize> {
+    mix(&installed, web, credit(&recent, web / (1. + web)))
 }
 
 /// BLAKE2b (RFC 7693) with an 8-byte digest, unkeyed: hashlib.blake2b(data, digest_size=8).digest().

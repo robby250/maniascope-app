@@ -119,9 +119,8 @@ def test_tabs_keys_clipboard_and_persistence():
                 w._set_rec_keys('skills',[7])
                 assert w._rec_keys['nps'] == (7,) and w._rec_keys['pp'] == (4,5,6,8,9)
                 w._set_practice_skills(['ln','chordstream/jumptrill'])
-                assert w._skill_checks['ln'].get_active() and w._skill_checks['jumptrill'].get_active()
-                assert not w._skill_checks['chordstream'].get_active()
-                assert not w._skill_checks['chordstream'].get_inconsistent()
+                assert w._skill_checks['ln'].value == 1 and w._skill_checks['jumptrill'].value == 1
+                assert w._skill_checks['chordstream'].value == 0 and not w._skill_checks['chordstream'].mixed
                 cskill=dict(c,mode='skills',purpose='skills',practice_skills=w._practice_skills,
                             acc_lo=.91,acc_hi=.97,description='LN Release / Jumptrill')
                 pskill=dict(pool(w._rec_revision),mode='skills',shown=[cskill])
@@ -135,7 +134,7 @@ def test_tabs_keys_clipboard_and_persistence():
                 w._on_rec(pskill) # stale filter result must not repopulate
                 assert not w._rec_views['skills']['list'].get_children()
                 w._any_skill_btn.clicked()
-                assert w._practice_skills == () and not any(b.get_active() for b in w._skill_checks.values())
+                assert w._practice_skills == () and not any(b.value for b in w._skill_checks.values())
                 w._set_practice_skills(['ln','chordstream/jumptrill'])
                 w._on_rec(dict(pskill,selection_id=w._selection_id,revision=w._rec_revision))
                 with patch.object(ui.recdata, 'local_file', return_value=local):
@@ -218,17 +217,28 @@ def test_tabs_keys_clipboard_and_persistence():
                 revealer = mix.get_parent().get_parent().get_children()[-2]
                 assert isinstance(revealer, Gtk.Revealer) and not revealer.get_reveal_child()
                 mix.set_active(True)
-                assert revealer.get_reveal_child() and w.rec.tasks[-1][-1]['on'] is True
+                assert revealer.get_reveal_child() and w.rec.tasks[-1][-2]['on'] is True
                 named(stack, 'One PP map every').set_value(6.)
-                assert w.rec.tasks[-1][-1]['every'] == 6
+                assert w.rec.tasks[-1][-2]['every'] == 6
                 named(w._rec_views['pp']['stack'], 'DT').set_active(False)
-                assert w.rec.tasks[-1][-2]['dt'] is False
+                assert w.rec.tasks[-1][-3]['dt'] is False
                 # The selected map: numbers first (fixed place whatever the title), the full card on hover.
                 card = dict(c, rate=1.2, acc_mid=.941, acc_lo=.905, acc_hi=.963, ranked=True, pp_lo=380., pp_hi=430.,
-                            best=400., gain=3.1, p_up=.45, skill='chordstream', plays_like=(7.4, 1000))
+                            best=400., gain=3.1, p_up=.45, skill='chordstream', plays_like=(7.4, 1000), md5='m', bid=None)
                 w._on_rec(dict(type='card', c=card))
                 assert 'expected ~94.1%' in w.card_lbl.get_text().split('\n')[0] and 'Cyber Shaman' in w.card_lbl.get_text().split('\n')[1]
                 assert '+3.1pp' not in w.card_lbl.get_text() and 'Top-1000' in w.card_lbl.get_tooltip_text()
+                # A PP map in the NPS list: PP details on its row and, once picked and selected, on the card.
+                w._on_rec(dict(pool(w._rec_revision), shown=[dict(card, purpose='nps_mix', stars=7.2)]))
+                w._flush_pool('nps')
+                row = ' '.join(l.get_text() for l in w._rec_views['nps']['list'].get_children()[0].get_child().get_children())
+                assert 'PP +3.1pp · 45%' in row and 'best 400pp' in row
+                w._on_rec(dict(type='target', mode='nps', revision=w._rec_revision, selection_id=w._selection_id,
+                               c=dict(card, purpose='nps_mix'), msg=''))
+                assert w.card_lbl.get_text().split('\n')[2].startswith('+3.1pp · 45% to beat')
+                w._on_rec(dict(type='card', c=dict(card, md5='other')))
+                assert '+3.1pp' not in w.card_lbl.get_text()           # another map selected
+                w._on_rec(dict(type='card', c=card))
                 w._set_rec_mode('pp')
                 assert w.card_lbl.get_text().split('\n')[2].startswith('+3.1pp · 45% to beat')
                 # The streamed top never changes height, whatever the title; the last play's acc has its own line.
@@ -299,36 +309,36 @@ def test_tabs_keys_clipboard_and_persistence():
                 again.destroy();again.recs.destroy()
 
 
-def test_skill_picker_native_cycle_and_separate_expansion():
+def test_skill_chips_cycle_mark_and_share_sliders():
+    import skillsets as ui
     from gi.repository import Gtk
     from skill_picker import SkillPicker
     import skill_practice as skills
-    changed = []
-    picker = SkillPicker((4, 7), (), changed.append)
+    changed, weights, moved = [], {}, []
+    picker = SkillPicker((4, 7), (), changed.append, weights, lambda k, v: moved.append((k, v)), ui.ManiaScopeWindow._slider)
     window = Gtk.Window()
     window.add(picker); window.show_all()
     try:
         for expected in (('sv',), ('!sv',), ()):
             picker.checks['sv'].clicked()
             assert picker.selected == expected and changed[-1] == expected
-        assert len(changed) == 3
+        picker.checks['sv'].clicked(); picker.checks['sv'].clicked()
+        assert '✕' in picker.checks['sv'].get_child().get_label() and 'skill-off' in picker.checks['sv'].get_style_context().list_classes()
+        picker.checks['sv'].clicked()
         picker.checks['ln'].clicked()
         assert all(skills.state(picker.selected, c.key) == 1 for c in skills.LN.children)
         picker.checks['ln/inverse'].clicked()
-        assert skills.state(picker.selected, 'ln/inverse') == -1
-        assert all(c.get_inconsistent() for c in picker.all_checks['ln/inverse'])
-        assert all(c.get_active() for c in picker.all_checks['ln/release'])
+        assert picker.checks['ln/inverse'].value == -1 and picker.checks['ln/release'].value == 1
+        assert picker.checks['ln'].mixed
         before = picker.selected
-        # Arrow is a sibling, not an expander wrapped around the checkbox.
-        arrow = picker.checks['ln'].get_parent().get_children()[0]
-        arrow.clicked()
-        assert picker.selected == before and (4, 'ln') in picker.expanded
-        assert len(changed) == 5
         picker.set_keys((7,))
-        assert picker.selected == before and picker.checks['ln/inverse'].get_inconsistent()
+        assert picker.selected == before and picker.checks['ln/inverse'].value == -1
+        assert not picker.often.get_children() or len(picker.often.get_children()) == sum(not k.startswith('!') for k in before)
+        picker.set_selection(())
         picker.checks['chordstream'].clicked()
-        assert skills.state(picker.selected, 'chordstream') == 1
-        assert skills.state(picker.selected, 'jumptrill') == 0
+        assert not picker.often.get_children()
+        picker.checks['delay'].clicked()
+        assert len(picker.often.get_children()) == 2
     finally:
         window.destroy()
 

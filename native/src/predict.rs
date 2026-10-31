@@ -428,6 +428,7 @@ impl PredModel {
             st.version = version;
         }
         let sel: Vec<Selection> = st.trees.iter().map(|t| t.select(&selected)).collect();
+        let included: Vec<&String> = selected.iter().filter(|k| !k.starts_with('!')).collect();
         struct Job {
             sha: String,
             key: String,
@@ -499,9 +500,12 @@ impl PredModel {
                         (Some((rate, value)), Some(p)) => {
                             let entry = st.charts[&j.sha].iter().find(|x| x.offer.rate == rate).unwrap();
                             let feats = entry.feats.as_ref().unwrap();
+                            let matched = entry.skill.as_ref().map_or_else(Vec::new, |s| {
+                                s.matched(&sel[usize::from(feats.keys != 4)]).into_iter().map(|i| included[i].clone()).collect()
+                            });
                             Some(Arc::new(Choice {
                                 group: GROUPS[self.group(feats)].to_string(), nps: entry.offer.nps, length: entry.offer.play_span.unwrap_or(0.) / rate,
-                                family: entry.offer.family.clone(), profile: entry.profile.clone(), acc_mid: p.acc_mid,
+                                family: entry.offer.family.clone(), profile: entry.profile.clone(), acc_mid: p.acc_mid, matched,
                                 sha: j.sha.clone(), md5: j.md5, keys: j.keys, rate, value, installed: j.installed,
                                 playcount: j.playcount, pred: Pred::Native { p, generated_at: now }, patch: None,
                             }))
@@ -742,6 +746,12 @@ impl SkillValues {
             return 1.;
         }
         s.positive.iter().map(|&k| at(&self.practice, k)).filter(|&v| v >= floor).map(|v| v.min(1.)).fold(0., f64::max)
+    }
+
+    /// skill_practice.match(f, selected)[1], as indices into the included skills.
+    fn matched(&self, s: &Selection) -> Vec<usize> {
+        let floor = 0.45f64.max(0.60 * self.values.iter().copied().fold(0., f64::max));
+        s.positive.iter().enumerate().filter(|(_, k)| k.is_some_and(|i| self.practice[i] >= floor)).map(|(j, _)| j).collect()
     }
 }
 

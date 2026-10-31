@@ -15,6 +15,7 @@ import navigation
 import nps
 import recdata
 import recommend as R
+import skill_practice
 
 
 def db():
@@ -137,6 +138,7 @@ def test_next_accepts_successive_requests_and_reports_errors():
     worker.put('next', False, 'nps', 0)
     with ExitStack() as stack:
         stack.enter_context(patch.object(R.recdata, 'connect', return_value=None))
+        stack.enter_context(patch.object(R.recdata, 'kv_get', return_value='lazer'))
         stack.enter_context(patch.object(R.recdata, 'load_public', return_value=None))
         stack.enter_context(patch.object(R, 'Recommender', return_value=object()))
         stack.enter_context(patch.object(nps, 'Builder', return_value=Mock()))
@@ -270,7 +272,7 @@ def test_prepared_playlist_preserves_order_and_logs_immediate_selection(tmp_path
     a = dict(sha='a',keys=7,rate=1.,var='NM',purpose='nps',f={},installed=True,acc_mid=.94)
     b, c = dict(a,sha='b'), dict(a,sha='c')
     worker.playlists['nps'] = [a,b]
-    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True, all=[])):
         shown = worker._prepared_playlist('nps', [c,b,a])
         assert [x['sha'] for x in shown] == ['a','b','c']
         assert shown[0]['acc_mid'] == .96 and a['acc_mid'] == .94
@@ -300,7 +302,7 @@ def test_prepared_queue_drops_maps_that_fell_out_of_the_current_ranking():
                         for s in ('stale', 'kept', 'new'))
     worker.playlists['nps'] = [stale, kept]
     worker._credible['nps'] = {R.event_key(kept), R.event_key(new)}
-    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True, all=[])):
         assert [c['sha'] for c in worker._prepared_playlist('nps', [new])] == ['kept', 'new']
 
 
@@ -308,7 +310,7 @@ def test_prepared_local_queue_rechecks_readiness_after_prediction_refresh():
     worker = R.Worker(lambda msg: None)
     worker.rec = SimpleNamespace(local_shas={'hard','ready','easy','cold','new'},
         predictor=SimpleNamespace(predict=lambda f,*a,**k:f['expected']))
-    session=SimpleNamespace(warm_flag=False)
+    session=SimpleNamespace(warm_flag=False,acc_target=.94,all=[])
     rows=[dict(sha=sha,keys=7,rate=1.1,var='1.10x',purpose='warmup',installed=True,
                practice_skills=(),f=dict(keys=7,expected=dict(acc_mid=acc,opening_acc=opening,
                                                              activation_minutes=0.,warmup_tau=6.)))
@@ -340,7 +342,7 @@ def test_prepared_queue_updates_the_same_chart_rate_before_dropping_it():
     # The suitable version may be outside the fresh 20-map preview.
     state = {'candidates': publication([high, faster]), 'mode': 'nps'}
     worker._local_pool_cache['nps'] = (None, state, state['candidates'].prepare([7], worker.rec.local_shas))
-    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True, all=[])):
         shown = worker._prepared_playlist('nps', [high])
     assert [c['sha'] for c in shown] == ['mid', 'high']
     assert shown[0]['rate'] == 1.2 and shown[0]['nps'] == 26.4 and shown[0]['acc_mid'] == .941
@@ -367,7 +369,7 @@ def test_prepared_queue_refreshes_same_rate_features_without_changing_offered_sn
     consumed = dict(offered, sha='c', md5='m-c', bid=3)
     worker.playlists[mode] = [offered, other]
     worker._playlist_consumed = [R.event_key(consumed)]
-    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True, all=[])):
         shown = worker._prepared_playlist(mode, [consumed, other, fresh])
     assert [c['sha'] for c in shown] == ['a', 'b']
     assert shown[0]['rate'] == 1. and shown[0]['f'] is new_f
@@ -392,7 +394,7 @@ def test_prepared_queue_does_not_refresh_another_revision_or_an_id_without_exact
         offered.update(sha='a', md5='m-a')
         fresh.update(sha='b', md5='m-b')
     worker.playlists['nps'] = [offered]
-    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+    with patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True, all=[])):
         shown = worker._prepared_playlist('nps', [fresh])
     assert shown[0]['f'] is old_f and shown[0]['description'] == 'Tech Delay'
     assert offered['description'] == 'Tech Delay'
@@ -450,7 +452,7 @@ def test_ready_refreshes_omitted_prepared_features_and_rechecks_technical_member
     queries = []
     db.set_trace_callback(queries.append)
     try:
-        with patch.object(worker, '_publish'), patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True)):
+        with patch.object(worker, '_publish'), patch.object(worker, '_session', return_value=SimpleNamespace(warm_flag=True, all=[])):
             worker.t_nps_update('ready', data)
             predict.assert_not_called()
             if authority == 'queued':
@@ -571,6 +573,44 @@ def test_website_charts_join_nps_as_downloads_with_a_mild_popularity_prior(tmp_p
     assert sum(not c.get('installed', True) for c in nps.mix(ranked, nps.web_factor(1.))[:20]) == 16
     assert [c['sha'] for c in nps.mix(ranked, 1.)[20:23]] == ['w10', 'w11', 'w12']   # locals ran out
     assert all(c.get('installed', True) for c in nps.mix(ranked, nps.web_factor(.05))[:10])   # 5 %: one in 20
+
+
+
+@pytest.mark.parametrize('slider,share', [(.15, .15), (.5, .5), (.8, .68), (1., .8)])
+def test_website_share_holds_across_next_picks(slider, share):
+    """Next takes the first row and the list is mixed again after every pick: the share must survive that."""
+    web = nps.web_factor(slider)
+    assert web/(1+web) == pytest.approx(share)
+    recent, picks = [], 40
+    for _ in range(picks):
+        queue = [dict(sha=f'w{i}', installed=False) for i in range(30)] + [dict(sha=f'l{i}') for i in range(30)]
+        first = nps.mix(queue, web, recent[-40:])[0]
+        recent.append(not first.get('installed', True))
+    assert abs(sum(recent) - share*picks) <= 1
+
+
+def test_low_variety_evens_out_pattern_groups():
+    rows = [dict(keys=7, sha=f'c{i}', md5=f'c{i}', family=f'c{i}', rate=1., nps=30., base_value=0., length=180.,
+                 profile=[1.], description='Mixed', group='chords', acc_mid=.94, playcount=None) for i in range(90)]
+    rows += [dict(r, sha=f'j{i}', md5=f'j{i}', family=f'j{i}', group='jack') for i, r in enumerate(rows[:10])]
+    def jacks(focus):
+        return sum(sum(c['group'] == 'jack' for c in rank_rows(rows, R.Session([], 1000), [7], seed=s, focus=focus)[:20])
+                   for s in range(40))/800
+    assert jacks(1.) < .1 and jacks(0.) > .3      # 10 % of the pool; the 10 jack maps cap a list of 20 at half
+
+
+def test_skill_sliders_share_the_list():
+    rows = [dict(keys=7, sha=f'a{i}', md5=f'a{i}', family=f'a{i}', rate=1., nps=30., base_value=0., length=180.,
+                 profile=[1.], description='Mixed', group='chords', acc_mid=.94, playcount=None,
+                 f=dict(keys=7, sk={}), practice_skills=(),
+                 matched_skills=('jackspeed',) if i < 50 else ('delay',)) for i in range(100)]
+    def share(weights):
+        heads = [rank_rows(rows, R.Session([], 1000), [7], mode='skills', seed=s, skill_weights=weights)[0]
+                 for s in range(200)]
+        return sum('jackspeed' in c['matched_skills'] for c in heads)/200
+    assert share({'jackspeed': 4., 'delay': 1.}) > .7 and share({'jackspeed': .25, 'delay': 1.}) < .3
+    assert skill_practice.shares(('delay', 'jackspeed', '!sv'), {'delay': 2.}) == {'delay': 2., 'jackspeed': 1.}
+    assert skill_practice.shares(('delay', 'jackspeed'), {}) is None and skill_practice.shares(('delay',), {'delay': 3.}) is None
 
 
 def test_builder_prefers_exact_current_public_web_packets_below_current_sqlite(tmp_path, monkeypatch):
@@ -743,6 +783,32 @@ def test_pp_maps_mix_into_the_nps_list_only_when_on(tmp_path):
     worker.db.close()
 
 
+def test_pp_row_in_the_nps_list_stays_a_pp_row_across_refreshes():
+    """A PP pick also in the NPS pool came back from the refresh as a plain NPS row, without its PP details."""
+    from unittest.mock import Mock
+    messages = []
+    worker = R.Worker(messages.append)
+    pick = dict(sha='p', md5='p', keys=7, rate=1., var='NM', ranked=True, gain=6., p_up=.6, best=100., length=120.,
+                purpose='pp', f={}, installed=True)
+    plain = lambda s: dict(sha=s, md5=s, keys=7, rate=1., var='NM', purpose='nps', f={}, installed=True, acc_mid=.94)
+    worker.rec = SimpleNamespace(score=Mock(return_value=([pick], None)), local_shas={'p', 'n'}, rows=[],
+                                 feats=SimpleNamespace(calc='test'),
+                                 predictor=SimpleNamespace(predict=Mock(return_value={'acc_mid': .96})))
+    worker.mode, worker.pp_mix = 'nps', dict(worker.pp_mix, on=True, every=1)
+    worker.keys['nps'] = (7,)
+    worker.playlists['nps'] = [dict(pick, purpose='nps_mix', why='PP'), plain('n')]
+    worker._credible['nps'] = {'md5:p', 'md5:n'}
+    worker._local_pool_cache['nps'] = (None, {}, SimpleNamespace(find=lambda key: 0 if key == 'md5:p' else None))
+    session = SimpleNamespace(warm_flag=True, all=[], freshness=lambda *a, **k: 1.)
+    with patch.object(worker, '_session', return_value=session), patch.object(R, 'summary', return_value=''), \
+         patch.object(worker, '_pool', return_value=('build', [plain('n')], '')), \
+         patch.object(nps, 'prepared_choice', return_value=plain('p')), patch.object(nps, 'eligible', return_value=True), \
+         patch.object(nps, 'mix', side_effect=lambda shown, web, recent=(): shown):
+        worker._publish()
+    row = next(c for c in messages[-1]['shown'] if c['sha'] == 'p')
+    assert row['purpose'] == 'nps_mix' and row['gain'] == 6. and row['p_up'] == .6
+
+
 def test_new_accuracy_target_swaps_website_charts_without_reloading_the_library(tmp_path, monkeypatch):
     """A target change moves the website window: only charts leaving/entering it change (user 2026-10-31: the
     playlist has to follow a new target at once; a full reload re-decoded every analysed chart)."""
@@ -755,7 +821,7 @@ def test_new_accuracy_target_swaps_website_charts_without_reloading_the_library(
     sets = {.95: ('w1', 'w2'), .97: ('w2', 'w3')}
     monkeypatch.setattr(nps, 'reach', lambda pred, keys, target: {7: (target, target)})
     monkeypatch.setattr(webmaps, 'catalog', lambda keys, md5s, window: (
-        {s: web_inst(s) for s in sets[round(window[7][0], 2)]}, {s: {1.: f} for s in sets[round(window[7][0], 2)]}))
+        {s: web_inst(s) for s in sets[round(window[7][0], 2)]}, {s: recdata.Rates({1.: f}) for s in sets[round(window[7][0], 2)]}))
     installed = Mock(return_value=({'local': dict(web_inst('local'), installed=True)}, ''))
     monkeypatch.setattr(nps, 'installed', installed)
     captured = []

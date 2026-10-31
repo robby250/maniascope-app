@@ -75,6 +75,8 @@ BAND_Z = 1.2816 * .75
 PESSIMISM = 0.25               # model uncertainty shifts the mean (in its sd), never widens the upside
 HALF_LIFE_MONTHS = 12.0
 RECENT_MONTHS = 2.0             # own plays the recent family offsets learn from
+MIN_LAZER_LN = 30               # lazer LN plays of a keymode from which stable ones stop being evidence
+STABLE_LN = .35                 # LN share up to which a stable result stands in for a lazer one
 RECENT_FAMILIES = ('stream', 'chordstream', 'delay', 'bracket', 'ln', 'minijack', 'technical', 'chordjack')
 LEVEL_BW = 4.0                 # months: level drift kernel
 HISTORY_ZONE = .15             # Stats history counts plays at most this far (log stars) below the competence level
@@ -337,18 +339,28 @@ def zvec(f, names, mu=-3.):
                      structure.get("overlap", 0.), math.sqrt(max(0., width)) * load] + geometry + [load * near_limit])
 
 
+def stable_evidence(rows):
+    """Rows the personal fit reads. Both forecasts target lazer plays. Stable merges a hold's head/tail into one
+    judgement; neither 305 nor 320 reweighting reconstructs the two separate judgements. Stable tap scores remain
+    transfer evidence. A keymode without lazer LN plays keeps charts up to STABLE_LN: most 7K charts hold some LN, so
+    the rule left a stable player's hardest plays out and their level on easy rice (Less 2026-11-01: 85 of 100 bests
+    dropped). G533QR's stable plays predicting its lazer LN plays: 7K RMSE .374 → .343, 4K .843 → .560; all of them
+    .434, 1.046."""
+    def lazer(r):
+        return (not r.get('key', '').startswith('legacy|') and
+                (str(r.get('client', '')).endswith('-lazer') or r.get('client') == 'lazer-live'))
+    lazer_ln = collections.Counter(r['keys'] for r in rows if r['f'].get('ln') and lazer(r))
+    return [r for r in rows if not r['f'].get('ln') or lazer(r)
+            or (lazer_ln[r['keys']] < MIN_LAZER_LN and r['f']['ln'] <= STABLE_LN)]
+
+
 class Personal:
     """Fitted from the user's own rows. Everything is per keymode with a pooled fallback."""
     levels = {}     # competence level per keymode (log stars); the rows' base already used it
     recent = {}     # keymode → (centre, scale, beta) of the recent family offsets
 
     def __init__(self, pub, rows, now=None, levels=None):
-        # Both forecasts target lazer plays. Stable merges a hold's head/tail
-        # into one judgement; neither 305 nor 320 reweighting reconstructs the
-        # two separate judgements. Stable tap scores remain transfer evidence.
-        rows = [r for r in rows if not r['f'].get('ln') or
-                (not r.get('key', '').startswith('legacy|') and
-                 (str(r.get('client', '')).endswith('-lazer') or r.get('client') == 'lazer-live'))]
+        rows = stable_evidence(rows)
         import native_backend, warmup
         self.pop, self.now = pub["pop"], now if now is not None else now_months()
         self.levels = levels or {}
@@ -547,6 +559,7 @@ class FeatureSource:
         # the full-library scan. Recreating this object must not decode that
         # entire catalogue after every score.
         self.cache = {}
+        self.live = {}      # mode → the Builder's analyses: website charts and exact proposals not in rec.db
 
     def lookup(self, key, refresh=False):
         f = None if refresh else self.cache.get(key)
@@ -557,6 +570,10 @@ class FeatureSource:
                     f = self.cache[key] = recdata.feats_load(row[0])
                 except (ValueError, TypeError):
                     return None
+            else:
+                sha, _, rest = key.partition("@")
+                rate = float(rest.split("|")[0])
+                f = next((a[sha].get(rate) for a in self.live.values() if a and sha in a and rate in a[sha]), None)
         return f
 
     def key(self, sha, rate):
@@ -2151,9 +2168,9 @@ class Worker(threading.Thread):
     """Owns the recommendation state and every write to its event log; the UI only queues tasks and
     renders what emit() hands back ({"type": "status" | "pool" | "target", ...})."""
 
-    def __init__(self, emit, busy=lambda: False):
+    def __init__(self, emit, busy=lambda: False, game=lambda: False):
         super().__init__(daemon=True, name="recommend")
-        self.q, self.emit, self.busy = _Tasks(), emit, busy
+        self.q, self.emit, self.busy, self.game = _Tasks(), emit, busy, game
         self._refresh_queued = self._yielding = False
         self.rec = self.target = None
         self.mode, self.action, self.revision = "pp", "auto", 0
@@ -2164,6 +2181,7 @@ class Worker(threading.Thread):
         self._playlist_consumed = collections.deque(maxlen=20)
         self.nps_focus = .5
         self.web_bias = {"nps": .5, "skills": .5}
+        self.skill_weights = {}
         self.acc_targets = {"nps": nps.DEFAULT_TARGET, "skills": nps.DEFAULT_TARGET}
         self.pp_settings, self.pp_mix = dict(PP_DEFAULTS), dict(PP_MIX_DEFAULTS)
         self._selection_id = 0
@@ -2246,7 +2264,7 @@ class Worker(threading.Thread):
             self.rec.pause = lambda: self._yield_urgent() or 0.
             self.rec.pp_settings = self.pp_settings
             self.generation += 1
-            self.builder = nps.Builder(lambda kind, data: self.put("nps_update", kind, data), self.busy)
+            self.builder = nps.Builder(lambda kind, data: self.put("nps_update", kind, data), self.busy, self.game)
             self.builder.start()
             self._restore_local(self.mode)
             self._request_nps()
@@ -2466,6 +2484,8 @@ class Worker(threading.Thread):
         shown = []
         credible = self._credible.get(mode) if mode in LOCAL_MODES and fresh else None
         for c in self.playlists[mode]:
+            if c.get("purpose") == "nps_mix":   # _mix_pp re-adds it; refreshed here it turned into a plain NPS row
+                continue
             if credible is not None and event_key(c) not in credible:
                 continue
             if c['keys'] not in self.keys[mode] or (mode == 'skills' and
@@ -2503,7 +2523,7 @@ class Worker(threading.Thread):
                 shown.append(c); seen.add(key)
         if mode in LOCAL_MODES:
             # Kept maps you don't have outlive the played ones and piled up at the top (user 2026-10-26).
-            shown = nps.mix(shown, nps.web_factor(self.web_bias[mode]))
+            shown = nps.mix(shown, nps.web_factor(self.web_bias[mode]), self._recent_web(session, mode))
         shown = shown[:20]
         if not shown and fresh:
             # A small credible library can cycle after its prepared queue ends.
@@ -2571,12 +2591,15 @@ class Worker(threading.Thread):
         self._yield_urgent()        # a selected map's card goes before the library-wide weighting
         web = nps.web_factor(self.web_bias[mode])
         consumed = tuple(self._playlist_consumed)
+        shares = skill_practice.shares(self.practice_skills, self.skill_weights) if mode == 'skills' else None
         seed = max((e.get('id', e['t']) for e in session.all
-                    if e['kind'] in ('offer', 'finish', 'abort', 'reset')), default=0) if mode == 'nps' else None
-        key = (session, prepared, taste, web, consumed, seed, self.nps_focus)
+                    if e['kind'] in ('offer', 'finish', 'abort', 'reset')), default=0) if mode == 'nps' or shares else None
+        recent = self._recent_web(session, mode)
+        key = (session, prepared, taste, web, consumed, seed, self.nps_focus, recent, shares)
         cached = self._local_weights.get(mode)
         if cached is None or len(cached[0]) != len(key) or any(a is not b and a != b for a, b in zip(cached[0], key)):
-            ranked = nps.rank(st, prepared, session, self.keys[mode], taste, mode, web, consumed, seed, self.nps_focus)
+            ranked = nps.rank(st, prepared, session, self.keys[mode], taste, mode, web, consumed, seed, self.nps_focus,
+                              recent_web=recent, skill_weights=shares)
             self._local_weights[mode] = (key, ranked)
         else:
             ranked = cached[1]
@@ -2608,6 +2631,12 @@ class Worker(threading.Thread):
         if st.get("restored") and not st.get("build_failed"):
             note += " · showing the last list while it updates"
         return session.phase(), shown, note
+
+    @staticmethod
+    def _recent_web(session, mode):
+        """Was each of this tab's last offers a map you don't have, oldest first (see nps.mix)."""
+        return tuple(bool(e["info"].get("web")) for e in session.all
+                     if e["kind"] == "offer" and e["info"].get("mode") == mode)[-40:]
 
     def _restore_local(self, mode):
         if not self.rec or mode not in LOCAL_MODES or mode in self._restored_modes:
@@ -2677,14 +2706,14 @@ class Worker(threading.Thread):
             if mode == self.mode:
                 self._publish(mode)
             return
-        # Exact proposed features are immediately available to selected-map and
-        # start-event predictions, without recalculating them on a Next click.
+        # Exact proposed features are immediately available to selected-map and start-event predictions,
+        # without recalculating them on a Next click and without decoding the whole list into the cache.
         for mode, state in data["states"].items():
             # The restart cache holds installed charts only; the first real build replaces
             # that placeholder list instead of keeping it, or website charts never show up.
             if getattr(self, mode+"_state", {}).get("restored"):
                 self.playlists[mode] = []
-            state["candidates"].fill_cache(self.rec.feats.cache, self.rec.feats.key, state.get("analyses"))
+            self.rec.feats.live[mode] = state.get("analyses")
             # A filtered-out chart has no fresh candidate. Refresh only the
             # retained queue at this publication; Next keeps its cheap cache reads.
             refreshed = {}
@@ -2717,7 +2746,7 @@ class Worker(threading.Thread):
                 self._publish(mode)
 
     def t_configure(self, mode, keys_by_mode, action="auto", revision=0, practice_skills=None, nps_focus=None,
-                    acc_targets=None, web_bias=None, pp_settings=None, pp_mix=None):
+                    acc_targets=None, web_bias=None, pp_settings=None, pp_mix=None, skill_weights=None):
         # Fast clicks need one search for the final selection, not a full
         # catalogue pass for every intermediate checkbox state. Other queued
         # events (including scores and gameplay) keep their original ordering.
@@ -2737,6 +2766,9 @@ class Worker(threading.Thread):
             if m in self.web_bias and value != self.web_bias[m]:
                 self.web_bias[m] = value
                 self.playlists[m] = []
+        if skill_weights is not None and skill_weights != self.skill_weights:
+            self.skill_weights = dict(skill_weights)
+            self.playlists['skills'] = []
         retarget = False
         for m, value in (acc_targets or {}).items():
             value = nps.normalize_target(value)
@@ -3024,7 +3056,7 @@ class Worker(threading.Thread):
                                          length=c.get("length"), accuracy=c.get("acc_mid"), title=c.get("title"),
                                          opening_accuracy=c.get("opening_acc"), activation_minutes=c.get("activation_minutes"),
                                          purpose=c.get("purpose"), md5=c.get("md5"), sha=c.get("sha"),
-                                         p_up=c.get("p_up"), gain=c.get("gain"), best_pp=c.get("best"), pp_mid=c.get("pp_mid"),
+                                         web=not c.get("installed", True), p_up=c.get("p_up"), gain=c.get("gain"), best_pp=c.get("best"), pp_mid=c.get("pp_mid"),
                                          practice_skills=c.get("practice_skills") if mode == "skills" else None,
                                          matched_skills=c.get("matched_skills") if mode == "skills" else None,
                                          accuracy_forecast=forecast, accuracy_forecast_recorded_at=time.time(),

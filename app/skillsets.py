@@ -60,6 +60,10 @@ TOSU_BIN = os.path.expanduser(os.environ.get("TOSU_BIN", tools_setup.tosu_bin())
 TOSU_ENV = os.path.join(os.path.dirname(TOSU_BIN), "tosu.env") if paths.WINDOWS else \
     os.path.expanduser("~/.config/tosu/tosu.env")
 
+# Only the patched tosu (patches/tosu-loop-waits.patch) refreshes song select faster than its 150 ms POLL_RATE:
+# 100 Hz of requests against an official build reads the same state and costs both processes CPU.
+TOSU_SELECT_POLL = 0.01 if os.path.exists(os.path.join(os.path.dirname(TOSU_BIN), "procfix-build.json")) else 0.1
+
 CACHE_DIR = paths.CACHE
 CRASH_LOG = os.path.join(CACHE_DIR, "crash.log")
 UI_FILE = os.path.join(paths.CONFIG, "ui.json")
@@ -278,7 +282,7 @@ class LazerWatcher(threading.Thread):
                 tosu = False
             # A cached chart is ready in milliseconds; 100 ms polling dominated
             # selection latency. Keep gameplay and unavailable-game polling slow.
-            delay = (0.3 if self._live is not None else (0.01 if obs.get("path") else 0.1)) if tosu else 1.0
+            delay = (0.3 if self._live is not None else (TOSU_SELECT_POLL if obs.get("path") else 0.1)) if tosu else 1.0
             self._halt.wait(delay)
 
     # -- tosu ---------------------------------------------------------------
@@ -598,6 +602,7 @@ class ManiaScopeWindow(Gtk.Window):
         self._keys_auto = {m for m in ("nps", "skills") if ui.get(f"{m}_keys") is None}
         self._key_checks, self._keys_syncing = {}, False
         self._practice_skills = skill_practice.normalize(ui.get("practice_skills"))
+        self._skill_weights = dict(ui.get("skill_weights") or {})
         self._nps_focus = nps_playlist.normalize_focus(ui.get("nps_focus", .5))
         self._web_bias = {m: nps_playlist.normalize_focus((ui.get("web_bias") or {}).get(m, .5)) for m in ("nps", "skills")}
         self._acc_targets = {m: nps_playlist.normalize_target(ui.get(f"{m}_acc_target", nps_playlist.DEFAULT_TARGET))
@@ -608,6 +613,8 @@ class ManiaScopeWindow(Gtk.Window):
                                                   if k in DISPLAY_DEFAULTS})
         self._next_action = ui.get("next_action", "auto")
         self._auto_next = ui.get("auto_next", True)
+        self._keep_above = ui.get("keep_above", False)
+        self._overlay = ui.get("overlay", False) and paths.WINDOWS
         if self._next_action not in ("auto", "copy", "link"):
             self._next_action = "auto"
         self._rec_revision, self._rec_views, self._card_data = 0, {}, None
@@ -640,6 +647,7 @@ class ManiaScopeWindow(Gtk.Window):
         self._tosu_proc = None
         self._web_proc = self._web_win = None
         self._web_polling = False
+        self._web_rows = []             # "Maps you don't have" rows waiting for the first website charts
         self._tosu_tried = 0.0
         self._live = None           # playback position (ms) while lazer is in gameplay
         self._context = ""
@@ -738,6 +746,8 @@ class ManiaScopeWindow(Gtk.Window):
         self.timeline.connect("draw", self.on_draw_timeline)
         root.pack_start(self.timeline, True, True, 2)
         self._recs_window()
+        self.set_keep_above(self._keep_above)
+        self.recs.set_keep_above(self._keep_above)
         if ui.get("recs_open"):           # open last time the app closed: reopen once the main window is up
             GLib.idle_add(lambda: self.recs_btn.set_active(True))
 
@@ -778,7 +788,8 @@ class ManiaScopeWindow(Gtk.Window):
         self._render()
         threading.Thread(target=self._worker, daemon=True).start()
         self._start_tosu()
-        self.rec = recommend.Worker(lambda m: GLib.idle_add(self._on_rec, m), busy=lambda: self._live is not None)
+        self.rec = recommend.Worker(lambda m: GLib.idle_add(self._on_rec, m), busy=lambda: self._live is not None,
+                                    game=lambda: self._obs.get("source") == "tosu" and bool(self._obs.get("path")))
         self._sync_rec()
         self.rec.start()
         self.watcher = LazerWatcher(lambda o: GLib.idle_add(self._on_obs, o),
@@ -855,6 +866,16 @@ class ManiaScopeWindow(Gtk.Window):
         auto_next.set_tooltip_text("Finishing the recommended map picks the next one and copies its search, as if you pressed Next")
         auto_next.connect("toggled", lambda m: (setattr(self, "_auto_next", m.get_active()), self._queue_save()))
         menu.append(auto_next)
+        above = Gtk.CheckMenuItem(label="Always on top", active=self._keep_above)
+        above.set_tooltip_text("Keep ManiaScope and the playlist above other windows. Not above exclusive fullscreen; "
+                               "for that use the in-game overlay.")
+        above.connect("toggled", lambda m: self._set_keep_above(m.get_active()))
+        menu.append(above)
+        if paths.WINDOWS:
+            overlay = Gtk.CheckMenuItem(label="In-game overlay (tosu)", active=self._overlay)
+            overlay.set_tooltip_text("Show this window inside osu!, also in fullscreen, through tosu's in-game overlay")
+            overlay.connect("toggled", self._toggle_overlay)
+            menu.append(overlay)
         item("Reset learned NPS taste", lambda _m: self.rec.put("reset_taste"), "Keep scores, session and map history; forget only learned taste")
         item("Import osu! scores now", lambda _m: self.rec.put("import"))
         if not os.access(TOSU_BIN, os.X_OK):
@@ -1087,6 +1108,8 @@ class ManiaScopeWindow(Gtk.Window):
             if getattr(self, "_web_ready", None) is not None:
                 self.rec.put("web_updated")      # new website charts join the open playlist without a restart
             self._web_ready = p.get("ready", 0)
+            for row in self._web_rows if self._web_ready else ():
+                row.set_sensitive(True)
         done = max(0., info.get("done", 0.))
         self.web_btn.set_label(f"Website charts… {100 * done:.0f}%" if run and p.get("phase") != "check"
                                else "Website charts… paused" if p.get("phase") in ("paused", "failed") else "Website charts…")
@@ -1195,14 +1218,21 @@ class ManiaScopeWindow(Gtk.Window):
         """How often this tab suggests website charts (maps you don't have) next to your own."""
         def show(v):
             f = nps_playlist.web_factor(v)
-            return f"{f / (1 + f):.0%} of list" if f else "never"
+            return f"{f / (1 + f):.0%} of picks" if f else "never"
         def changed(v):
             if v != self._web_bias[mode]:
                 self._web_bias[mode] = v
                 self._sync_rec()
-        return self._slider("Maps you don't have", self._web_bias[mode], show, changed,
-                            tooltip="Website charts (Website charts…): their share of the list. "
-                                    "Middle: half. Right end: 80 %. Left end: never.")
+        row = self._slider("Maps you don't have", self._web_bias[mode], show, changed,
+                           tooltip="Website charts (Website charts…): their share of your picks. Middle: half. "
+                                   "Right end: 80 %. Left end: never, only maps you own.")
+        # Without website charts it can change nothing (Less, 2026-10-31: set "Never", saw no difference).
+        if not os.path.exists(os.path.join(recdata.REC_DIR, "web", "web.pkl")):
+            row.set_sensitive(False)
+            row.set_tooltip_text("Nothing to mix yet: add charts with Website charts… on the NPS tab. Until then "
+                                 "every pick is a map you own.")
+            self._web_rows.append(row)
+        return row
 
     def _acc_target_row(self, mode):
         """The displayed-accuracy target this tab's picks aim at."""
@@ -1242,8 +1272,9 @@ class ManiaScopeWindow(Gtk.Window):
             box.pack_start(self._acc_target_row(mode), False, False, 0)
             self._section(box, "MIX")
             box.pack_start(self._slider("Variety to high NPS", self._nps_focus, lambda v: f"{100 * v:.0f}% NPS",
-                                        self._set_nps_focus, tooltip="Choose more variety or prioritize the highest "
-                                                                     "NPS. Both aim at the accuracy target."),
+                                        self._set_nps_focus, tooltip="Left: pattern types (jacks, streams, LN…) get an "
+                                        "even share of the list. Right: the highest NPS maps, mostly chordstreams and "
+                                        "brackets. Both aim at the accuracy target."),
                            False, False, 0)
             box.pack_start(self._web_bias_row(mode), False, False, 0)
             web = Gtk.Box()
@@ -1269,12 +1300,10 @@ class ManiaScopeWindow(Gtk.Window):
                                         "scoring while you play NPS."), False, False, 0)
             revealer = self._revealed(box, mix["on"], rows)
         elif mode == "skills":
-            self._section(box, "MAPS")
-            skill_row = Gtk.Box(spacing=8)
-            skill_row.pack_start(Gtk.Label(label="Skills", xalign=0, width_chars=16), False, False, 0)
+            self._section(box, "SKILLS")
             self.practice_btn = self._skill_picker()
-            skill_row.pack_start(self.practice_btn, True, True, 0)
-            box.pack_start(skill_row, False, False, 0)
+            box.pack_start(self.practice_btn, False, False, 0)
+            self._section(box, "MAPS")
             box.pack_start(keys, False, False, 0)
             box.pack_start(self._acc_target_row(mode), False, False, 0)
             box.pack_start(self._web_bias_row(mode), False, False, 0)
@@ -1477,6 +1506,7 @@ class ManiaScopeWindow(Gtk.Window):
             c = msg["c"]
             target = self._rec_views[mode]["target"]
             self._rec_views[mode]["target_data"] = c
+            self._show_card()
             target.set_parts(target_markup(c, self._obs) if c else [GLib.markup_escape_text(msg.get("msg") or "")],
                              "\n".join(t for t in (msg.get("msg"), c and c.get("why"), msg.get("copy")) if t) or None)
             if msg.get("copy"):
@@ -1484,7 +1514,11 @@ class ManiaScopeWindow(Gtk.Window):
         return False
 
     def _show_card(self):
-        self.card_lbl.set_parts(*card_markup(self._card_data, self._rec_mode, self._card_note))
+        c, pick = self._card_data, self._rec_views.get(self._rec_mode, {}).get("target_data")
+        # A PP map picked from the NPS list reads like one in the PP list (user 2026-10-31).
+        pp = c and pick and pick.get("purpose") == "nps_mix" and navigation.same_map(pick, md5=c["md5"], bid=c["bid"])
+        self.card_lbl.set_parts(*card_markup(c, "pp" if pp else self._rec_mode, self._card_note))
+        self._overlay_update()
 
     def _set_status(self, text):
         self._status_text = text
@@ -1529,7 +1563,8 @@ class ManiaScopeWindow(Gtk.Window):
 
     def _skill_picker(self):
         from skill_picker import SkillPicker
-        button = SkillPicker(self._rec_keys["skills"], self._practice_skills, self._set_practice_skills)
+        button = SkillPicker(self._rec_keys["skills"], self._practice_skills, self._set_practice_skills,
+                             self._skill_weights, self._set_skill_weight, self._slider)
         self._skill_checks, self._any_skill_btn = button.checks, button.any_button
         return button
 
@@ -1545,6 +1580,10 @@ class ManiaScopeWindow(Gtk.Window):
         view["ready"], view["pending"], view["target_data"] = False, None, None
         view["target"].set_parts([])
         view["note"].set_text("Finding " + skill_practice.label(selected) + " maps at your current level…")
+        self._sync_rec()
+
+    def _set_skill_weight(self, key, value):
+        self._skill_weights[key] = value
         self._sync_rec()
 
     def _auto_keys(self):
@@ -1611,12 +1650,73 @@ class ManiaScopeWindow(Gtk.Window):
             self._next_action = action
             self._sync_rec()
 
+    def _toggle_overlay(self, item):
+        on = item.get_active()
+        if on == self._overlay:
+            return
+        if on:
+            dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                                    buttons=Gtk.ButtonsType.OK_CANCEL, text="Turn on tosu's in-game overlay?")
+            dlg.format_secondary_text(
+                "tosu draws inside osu! by loading a DLL into the game, so fullscreen works. It downloads its overlay "
+                "program the first time. tosu offers this openly, but osu! has no official statement on it, so use it "
+                "at your own risk.\n\nAfter it starts: in osu!, press Ctrl+Shift+Space, right-click, add ManiaScope, "
+                "then press Ctrl+Shift+Space again.")
+            answer = dlg.run()
+            dlg.destroy()
+            if answer != Gtk.ResponseType.OK:
+                item.set_active(False)
+                return
+        self._overlay = on
+        self._queue_save()
+        if self._tosu_proc and self._tosu_proc.poll() is None:
+            self._tosu_proc.terminate()
+            self._tosu_proc.wait()
+            self._start_tosu()
+            self._overlay_update()
+        else:
+            self._set_status("Restart tosu to apply the overlay setting")
+
+    def _overlay_update(self):
+        """What the main window shows, plus the expected accuracy and the pick, for the overlay page."""
+        if not self._overlay:
+            return
+        shown = self._shown if self._shown and not self._pending else None
+        res, chart = shown and shown[3], shown and shown[2]
+        c, pick = self._card_data, self._rec_views.get(self._rec_mode, {}).get("target_data")
+        state = {}
+        if res:
+            tl, rate = res.get("timeline") or [], shown[1]
+            step = max(1, len(tl) // 120)
+            state = dict(title=chart.title, artist=chart.artist, version=f"[{chart.version}]  {chart.creator}",
+                         rating=res["scores"]["overall"], context=self._context, nps=nps(chart, rate),
+                         ln=round(100 * res["ln_notes"] / max(1, res["notes"])),
+                         skills=[dict(name=e["name"], rating=e["rating"]) for e in skill_calc.card(res)[:self._display["skills"]]],
+                         timeline=[max(tl[i:i + step]) for i in range(0, len(tl), step)])
+        if c and c.get("acc_mid") is not None:
+            state["expected"] = f"~{100 * recdata.shown_acc(c['acc_mid']):.1f}%"
+        if pick:
+            rate = pick["rate"]
+            state["pick"] = dict(title=pick.get("title", ""), expected=f"~{100 * recdata.shown_acc(pick['acc_mid']):.1f}%",
+                                 set=f"{rate:.2f}× " + ("NM" if abs(rate - 1.) < .0005 else "HT" if rate < 1. else "DT"))
+        tools_setup.write_overlay_state(state)
+
+    def _set_keep_above(self, on):
+        self._keep_above = on
+        self.set_keep_above(on)
+        self.recs.set_keep_above(on)
+        self._queue_save()
+
     def _set_nps_focus(self, value):
         self._nps_focus = nps_playlist.normalize_focus(value)
         self._sync_rec()
 
     def _sync_rec(self):
         self._rec_revision += 1
+        # Settings apply at once; this answers "how do I refresh?" (Less, 2026-10-31).
+        view = self._rec_views.get(self._rec_mode)
+        if view and "note" in view:
+            view["note"].set_text("Applied · updating the list…")
         for view in self._rec_views.values():
             for row in view["list"].get_children():
                 row.revision = self._rec_revision
@@ -1624,7 +1724,8 @@ class ManiaScopeWindow(Gtk.Window):
         if hasattr(self, "rec"):
             self.rec.put("configure", self._rec_mode, {k: list(v) for k, v in self._rec_keys.items()},
                          self._next_action, self._rec_revision, list(self._practice_skills), self._nps_focus,
-                         dict(self._acc_targets), dict(self._web_bias), dict(self._pp_settings), dict(self._pp_mix))
+                         dict(self._acc_targets), dict(self._web_bias), dict(self._pp_settings), dict(self._pp_mix),
+                         dict(self._skill_weights))
         self._next_sensitive()
         self._queue_save()
 
@@ -1787,19 +1888,17 @@ class ManiaScopeWindow(Gtk.Window):
         except OSError:
             pass
         try:
-            # tosu only takes this from its config file; without it every start opens a browser tab
-            os.makedirs(os.path.dirname(TOSU_ENV), exist_ok=True)
-            try:
-                with open(TOSU_ENV, "r", encoding="utf-8") as fh:
-                    env = fh.read()
-            except OSError:
-                env = ""
-            quiet = re.sub(r"(?m)^OPEN_DASHBOARD_ON_STARTUP=.*$", "OPEN_DASHBOARD_ON_STARTUP=false", env)
-            if "OPEN_DASHBOARD_ON_STARTUP=" not in quiet:
-                quiet += "OPEN_DASHBOARD_ON_STARTUP=false\n"
-            if quiet != env:
-                with open(TOSU_ENV, "w", encoding="utf-8") as fh:
-                    fh.write(quiet)
+            # tosu only takes these from its config file; without the first every start opens a browser tab
+            env = {"OPEN_DASHBOARD_ON_STARTUP": "false"}
+            if paths.WINDOWS:
+                # Nothing here reads keys or live hit errors: tosu's 100 Hz gameplay loop only costs the game CPU.
+                # Other overlays in the in-game layer may want them (tosu's own defaults).
+                env.update(ENABLE_INGAME_OVERLAY=str(self._overlay).lower(),
+                           ENABLE_KEY_OVERLAY=str(self._overlay).lower(),
+                           PRECISE_DATA_POLL_RATE=10 if self._overlay else 100)
+            tools_setup.set_tosu_env(TOSU_ENV, env)
+            if self._overlay:
+                tools_setup.install_overlay()
             os.makedirs(CACHE_DIR, exist_ok=True)
             out = open(os.path.join(CACHE_DIR, "tosu.log"), "w")
             self._tosu_proc = subprocess.Popen(
@@ -1879,9 +1978,10 @@ class ManiaScopeWindow(Gtk.Window):
             with open(UI_FILE + ".tmp", "w", encoding="utf-8") as fh:
                 json.dump({"mode": "auto" if self._auto else "manual",
                            "recommendation_mode": self._rec_mode, "next_action": self._next_action,
-                           "auto_next": self._auto_next,
+                           "auto_next": self._auto_next, "keep_above": self._keep_above, "overlay": self._overlay,
                            "pp_keys": list(self._rec_keys["pp"]), "nps_keys": None if "nps" in self._keys_auto else list(self._rec_keys["nps"]),
                            "skills_keys": None if "skills" in self._keys_auto else list(self._rec_keys["skills"]), "practice_skills": list(self._practice_skills),
+                           "skill_weights": self._skill_weights,
                            "nps_focus": self._nps_focus, "web_bias": self._web_bias,
                            "nps_acc_target": self._acc_targets["nps"], "skills_acc_target": self._acc_targets["skills"],
                            "pp_settings": self._pp_settings, "pp_mix": self._pp_mix,
@@ -2216,6 +2316,7 @@ class ManiaScopeWindow(Gtk.Window):
         self.others_lbl.set_markup("  ".join(spans[1:self._display["skills"]]) or " ")
         self.tags_lbl.set_text(" · ".join(tags) or " ")
         self._show_rows(chart.keys)
+        self._overlay_update()
         for key in names:
             pb, val, _name = self._bars[key]
             pb.set_fraction(min(1.0, sc[key] / BAR_FULL))

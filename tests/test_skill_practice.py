@@ -186,7 +186,7 @@ def test_builder_retries_incomplete_catalogue(tmp_path, monkeypatch):
     db = recdata.connect(str(tmp_path/'rec.db'))
     monkeypatch.setattr(recdata, 'connect', lambda: db)
     catalog = Mock(side_effect=[RuntimeError('catalogue unavailable'),
-                               ({'a': inst('a')}, {'a': {1.: feature({'ln': 1.})}})])
+                               ({'a': inst('a')}, {'a': recdata.Rates({1.: feature({'ln': 1.})})})])
     monkeypatch.setattr(webmaps, 'catalog', catalog)
     messages = []
     session = R.Session([], 1000)
@@ -215,7 +215,7 @@ def test_builder_failure_is_scoped_preserves_list_and_clears_on_ready(tmp_path):
     from test_nps import publication
     previous = dict(worker.skills_state, candidates=publication([candidate]), mode='skills', total=2, analyzed=1, restored=True)
     worker.skills_state = previous
-    worker.rec = SimpleNamespace(feats=SimpleNamespace(cache={}, key=lambda s, r: s, calc='fixture'), local_shas=set())
+    worker.rec = SimpleNamespace(feats=SimpleNamespace(cache={}, live={}, key=lambda s, r: s, calc='fixture'), local_shas=set())
     saved = {'version': 1, 'choices': [['a', 1.]], 'analyzed': 1}
     recdata.kv_set(worker.db, 'playlist_cache:skills', saved)
     error = dict(generation=3, revision=2, mode='skills', error='BrokenProcessPool: worker exited',
@@ -346,13 +346,14 @@ def test_builder_feature_decode_releases_read_lock_and_defers_new_rows(tmp_path,
         builder._build(db, request)
         assert decoded == list(range(270))
         assert builder._loaded_rowid == upper   # advance past the irrelevant calculator tail
+        stored = lambda rate: loads(dict.__getitem__(builder._analyses['a'], rate))
         assert 2. not in builder._analyses['a']
-        assert builder._analyses['a'][1.]['cache_index'] == 0
+        assert stored(1.)['cache_index'] == 0
         builder.halt.clear()
         builder._build(db, request)
         assert decoded == list(range(272))
-        assert builder._analyses['a'][2.]['cache_index'] == 270
-        assert builder._analyses['a'][1.]['cache_index'] == 271
+        assert stored(2.)['cache_index'] == 270
+        assert stored(1.)['cache_index'] == 271
         assert builder._loaded_rowid == writer.execute('SELECT MAX(rowid) FROM feats').fetchone()[0]
         assert writer.execute("SELECT COUNT(*) FROM events WHERE kind='start'").fetchone()[0] == 272
     finally:
@@ -422,7 +423,7 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
     worker.db, worker.generation, worker._local_request_id, worker.mode = db, 3, 1, 'skills'
     worker.keys['nps'] = worker.keys['skills'] = (7,)
     worker.practice_skills = ()
-    worker.rec = SimpleNamespace(feats=SimpleNamespace(cache={}, calc='fixture', key=lambda s, r: (s, r)))
+    worker.rec = SimpleNamespace(feats=SimpleNamespace(cache={}, live={}, calc='fixture', key=lambda s, r: (s, r)))
     from test_nps import publication
     previous = dict(worker.skills_state, candidates=publication([{'sha': 'previous', 'keys': 7, 'rate': 1.}]), restored=True)
     worker.skills_state = previous
@@ -469,7 +470,7 @@ def test_builder_pauses_cache_decode_during_gameplay_and_preserves_shortlist(tmp
                 builder._build(db, continuation)
             assert decoded == list(range(300)) and builder._loaded_rowid == 300
             assert [nps.materialize(worker.skills_state, i) for i in range(len(worker.skills_state['candidates']))] == [candidate]
-            assert worker.rec.feats.cache[('a', 1.)] is candidate['f']
+            assert worker.rec.feats.live['skills'] is worker.skills_state.get('analyses')
             assert recdata.kv_get(db, 'playlist_cache:skills')['choices'] == [['a', 1.]]
             published.assert_called_with('skills')
     finally:
@@ -489,3 +490,14 @@ def test_builder_rewrites_json_feature_rows_in_binary_once(tmp_path, monkeypatch
     assert all(isinstance(v, bytes) for _k, v in after)
     assert {k: recdata.feats_load(v) for k, v in after} == before
     assert db.execute('SELECT rowid FROM feats ORDER BY rowid').fetchall() == rowids     # the scan cursor stays valid
+
+
+def test_exact_proposed_features_read_from_the_builder_stay_undecoded_until_asked(tmp_path):
+    db = recdata.connect(str(tmp_path/'rec.db'))
+    source = R.FeatureSource(db, {'maps': {}})
+    rates = recdata.Rates()
+    dict.__setitem__(rates, 1.2, recdata.feats_dump({'keys': 7}))
+    source.live['nps'] = {'web': rates}
+    assert source.lookup(source.key('web', 1.2)) == {'keys': 7}
+    assert isinstance(dict.__getitem__(rates, 1.2), bytes) and source.lookup(source.key('web', 1.3)) is None
+    db.close()

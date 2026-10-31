@@ -68,16 +68,40 @@ def song_search(c):
     return str(bid) if bid else str(c.get("title") or "").strip()
 
 
+def _osu_exes():
+    """Full paths of the running osu!.exe processes (Windows). lazer and stable share that file name."""
+    import ctypes
+    from ctypes import wintypes as w
+    k = ctypes.WinDLL("kernel32")
+    k.OpenProcess.restype, k.OpenProcess.argtypes = w.HANDLE, (w.DWORD, w.BOOL, w.DWORD)
+    k.QueryFullProcessImageNameW.argtypes = (w.HANDLE, w.DWORD, w.LPWSTR, w.PDWORD)
+    k.CloseHandle.argtypes = (w.HANDLE,)
+    pids, used = (w.DWORD * 16384)(), w.DWORD()
+    if not k.K32EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(used)):
+        return []
+    found = []
+    for pid in pids[:used.value // ctypes.sizeof(w.DWORD)]:
+        handle = k.OpenProcess(0x1000, False, pid)      # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            name, size = ctypes.create_unicode_buffer(32768), w.DWORD(32768)
+            if k.QueryFullProcessImageNameW(handle, 0, name, ctypes.byref(size)) \
+                    and os.path.basename(name.value).lower() == "osu!.exe":
+                found.append(name.value)
+            k.CloseHandle(handle)
+    return found
+
+
+def client_exe():
+    """The active client's running osu!.exe (Windows); stable's sits beside its osu!.db."""
+    stable = recdata.client() == "stable"
+    return next((e for e in _osu_exes() if os.path.isfile(os.path.join(os.path.dirname(e), "osu!.db")) == stable), None)
+
+
 def lazer_running():
-    """The active client is running (both are osu!.exe on Windows; stable is osu!.exe under Wine)."""
+    """The active client is running (stable is osu!.exe under Wine)."""
     import paths
     if paths.WINDOWS:
-        try:
-            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq osu!.exe", "/NH"], capture_output=True,
-                                 text=True, timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            return "osu!.exe" in out.stdout
-        except (OSError, subprocess.SubprocessError):
-            return False
+        return client_exe() is not None
     import glob
     for path in glob.glob("/proc/[0-9]*/comm"):
         try:
@@ -90,14 +114,20 @@ def lazer_running():
 
 
 def open_url(url):
-    """Hand an osu:// link to the running lazer (a second lazer process only forwards it over IPC)."""
+    """Hand an osu:// link to the running client: a second process of the same exe only forwards it over IPC.
+    On Windows never through os.startfile: osu:// belongs to whichever client registered it, so a lazer player
+    got stable launched (user 2026-10-31)."""
     import paths
     if paths.WINDOWS:
-        os.startfile(url)
-        return
-    flatpak = recdata.client() == "lazer" and os.path.isdir(os.path.expanduser("~/.var/app/sh.ppy.osu"))
-    subprocess.Popen(["flatpak", "run", "sh.ppy.osu", url] if flatpak else ["xdg-open", url],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        exe = client_exe()
+        if not exe:
+            raise OSError("osu! has closed")
+        command = [exe, url]
+    elif recdata.client() == "lazer" and os.path.isdir(os.path.expanduser("~/.var/app/sh.ppy.osu")):
+        command = ["flatpak", "run", "sh.ppy.osu", url]
+    else:
+        command = ["xdg-open", url]
+    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def perform(c, action="auto"):
@@ -118,11 +148,11 @@ def perform(c, action="auto"):
         query = song_search(c)
         if not query:
             return {"copy": None, "msg": "No searchable metadata for this chart", "sent": False}
-        msg = "Copied song-select search — paste in osu! and select the difficulty"
+        msg = "Search copied — press Ctrl+V in song select"
         if not installed:
-            msg = "Copied search; this map is not installed — download it before searching locally"
+            msg = "Search copied, but you don't have this map — download it, then Ctrl+V in song select"
         elif action == "link" and not trusted:
-            msg = "No matching online map — copied local song-select search instead"
+            msg = "No matching online map — search copied, press Ctrl+V in song select"
         return {"copy": query, "msg": msg, "sent": False}
     url = f"osu://b/{bid}"
     if not lazer_running():
@@ -134,4 +164,4 @@ def perform(c, action="auto"):
     # Auto still copies the search, so after downloading it can be pasted in song select (user 2026-10-09).
     query = song_search(c) if action == "auto" else None
     return {"copy": query or None, "msg": "Sent beatmap link to osu! — choose Go to beatmap; mods unchanged"
-            + (" · copied search" if query else ""), "sent": True}
+            + (" · search copied, Ctrl+V in song select" if query else ""), "sent": True}

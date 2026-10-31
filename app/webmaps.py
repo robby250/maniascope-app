@@ -314,37 +314,6 @@ def compact(f):
             "tech_profile": f.get("tech_profile", {})}
 
 
-class Decoded(dict):
-    """Features decoded from web.pkl. `source` (the stored bytes) is the same on every read, so
-    prediction caches recognise the chart without keeping the ~8 KB decoded copy (recdata.identity)."""
-    __slots__ = ("source",)
-
-
-class Rates(dict):
-    """rate → features, stored pickled and decoded on each read (~1.5 KB instead of ~10 KB resident)."""
-    def __getitem__(self, rate):
-        v = dict.__getitem__(self, rate)
-        if not isinstance(v, bytes):
-            return v
-        f = Decoded(pickle.loads(v))
-        f.source = v
-        return f
-
-    def get(self, rate, default=None):
-        return self[rate] if rate in self else default
-
-    def setdefault(self, rate, value=None):
-        if rate not in self:
-            dict.__setitem__(self, rate, value)
-        return self[rate]
-
-    def items(self):
-        return [(r, self[r]) for r in self]
-
-    def values(self):
-        return [self[r] for r in self]
-
-
 def publish(db, calc, stars=None):
     maps, feats = {}, {}
     for r in db.execute("SELECT d.*, f.data FROM diffs d JOIN feats f ON f.sha=d.sha AND f.calc=? "
@@ -413,7 +382,7 @@ def catalog(keys, installed_md5=(), reach=None):
             # (G835LX 2026-10-02, after the 9-rate crawl).
             mid = math.log(lo * hi) / 2
             rates = {r: rates[r] for r in sorted(rates, key=lambda r: abs(math.log(ov[r]) - mid))[:2]}
-        feats[sha] = Rates(rates)
+        feats[sha] = recdata.Rates(rates)
     return out, feats
 
 

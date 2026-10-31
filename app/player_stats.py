@@ -225,7 +225,9 @@ def build(rec):
             if series and groups.get(anchor, {}).get("value") is not None:
                 dan_at[kind] = (anchor, _dan_rating(model, series, calibration.get(anchor)))
         history = _history(model, keys, groups.get("overall", {}))
+        local = [r for r in rows if r.get("src") != "public"]
         result[keys] = {"keys": keys, "groups": groups, "history": history, "now": model.now, "dan_at": dan_at,
+                        "evidence": (len(local), len(rows) - len(local), max((r.get("ts") or 0 for r in rows), default=0)),
                         "peak": max(history, key=lambda h: h[1]) if history else None, "maps": len(charts), "plays": len(rows),
                         "special": {"mash_maps": sum(r["f"].get("sk", {}).get("mash", 0.) >= .3 for r in charts.values())}}
     # Only frozen pre-play predictions can support a model-error diagnosis.

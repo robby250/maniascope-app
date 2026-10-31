@@ -200,6 +200,13 @@ def label(selected):
     return text + (" · exclude " + ", ".join(dict.fromkeys(negative)) if negative else "")
 
 
+def shares(selected, weights):
+    """{included skill: how-often slider} once two included skills differ, else None (plain best-first list)."""
+    positive = [k for k in normalize(selected) if not k.startswith("!")]
+    out = {k: float((weights or {}).get(k, 1.)) for k in positive}
+    return out if len(set(out.values())) > 1 else None
+
+
 def strengths(f):
     return dict(_strengths(f.get('keys', 7), tuple(f.get('sk', {}).items())))
 

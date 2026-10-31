@@ -83,6 +83,31 @@ def test_library_and_scores_import_with_lazer_identity(stable):
     assert db.execute("SELECT COUNT(*) FROM scores").fetchone()[0] == 2
 
 
+@pytest.mark.parametrize("client", ["lazer", "stable"])
+def test_windows_link_goes_to_the_running_client_not_the_osu_url_handler(tmp_path, monkeypatch, client):
+    """osu:// belongs to whichever client registered it last: a lazer player got stable launched (2026-10-31)."""
+    from unittest.mock import patch
+    lazer, game = tmp_path / "osulazer" / "current", tmp_path / "osu!"
+    lazer.mkdir(parents=True); game.mkdir()
+    (game / "osu!.db").write_bytes(b"")
+    exes = [str(game / "osu!.exe"), str(lazer / "osu!.exe")]
+    recdata.set_client(client)
+    monkeypatch.setattr(paths, "WINDOWS", True)
+    monkeypatch.setattr(navigation, "_osu_exes", lambda: exes)
+    try:
+        with patch.object(navigation.os, "startfile", create=True) as handler, \
+             patch.object(navigation.subprocess, "Popen") as run:
+            result = navigation.perform(dict(bid=55, title="T", keys=7, installed=False), "auto")
+        assert result["sent"] and not handler.called
+        assert run.call_args.args[0] == [exes[0 if client == "stable" else 1], "osu://b/55"]
+        exes.pop(0 if client == "stable" else 1)        # only the other client open: nothing is launched
+        with patch.object(navigation.subprocess, "Popen") as run:
+            result = navigation.perform(dict(bid=55, title="T", keys=7, installed=False), "auto")
+        assert not result["sent"] and result["copy"] == "osu://b/55" and not run.called
+    finally:
+        recdata.set_client("lazer")
+
+
 def test_rates_search_and_shown_accuracy(stable):
     assert [nps.snap(r) for r in (.7, .86, .9, 1.2, 1.23, 1.5)] == [.75, .75, 1., 1., 1.5, 1.5]
     assert nps.offerable(1.5) and not nps.offerable(1.1)

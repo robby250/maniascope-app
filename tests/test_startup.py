@@ -31,7 +31,8 @@ def test_prior_calculator_shortlist_uses_only_current_features_and_predictions(t
             worker._restore_local(mode)
             state=getattr(worker,mode+'_state')
             assert state['restored']
-            assert [(c['sha'],c['rate'],c['acc_mid']) for c in state['candidates']]==[('ready',.95,.94)]
+            shown=[R.nps.materialize(state,i) for i in range(len(state['candidates']))]
+            assert [(c['sha'],c['rate'],c['acc_mid']) for c in shown]==[('ready',.95,.94)]
             assert all(key.endswith('|'+source.calc) for key in source.cache)
     db.close()
 
@@ -80,3 +81,20 @@ def test_progress_counts_unanalysable_charts_as_done():
             worker.nps_state = dict(worker.nps_state, total=10, analyzed=9, failed=failed)
             worker._publish()
             assert out[-1]["progress"] == want
+
+
+def test_tosu_env_and_overlay_state(tmp_path, monkeypatch):
+    import json
+    import tools_setup
+    env = tmp_path/'cfg'/'tosu.env'
+    assert tools_setup.set_tosu_env(str(env), {'A': 'false', 'B': 100})
+    env.write_text('A=true\nKEEP=1')
+    assert tools_setup.set_tosu_env(str(env), {'A': 'false', 'B': 100})
+    assert env.read_text() == 'A=false\nKEEP=1\nB=100\n'
+    assert not tools_setup.set_tosu_env(str(env), {'A': 'false'})
+    monkeypatch.setattr(tools_setup, 'tosu_bin', lambda: str(tmp_path/'tosu'/'tosu.exe'))
+    tools_setup.install_overlay()
+    page = tmp_path/'tosu'/'static'/'ManiaScope'
+    assert (page/'index.html').exists() and 'CompatibleWith: tosu' in (page/'metadata.txt').read_text()
+    tools_setup.write_overlay_state({'title': 'x'})
+    assert json.loads((page/'state.json').read_text()) == {'title': 'x'}

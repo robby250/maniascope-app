@@ -601,6 +601,8 @@ def import_website_best(db, username):
     now = time.strftime("%FT%T")
     count = 0
     with db:
+        # A changed username replaces the profile, it doesn't add a second player's bests (re-fetched if changed back).
+        db.execute("DELETE FROM scores WHERE src='public' AND key LIKE 'web|%' AND player_id<>?", (user_id,))
         for s in json.loads(body):
             st, b = s.get("statistics") or {}, s.get("beatmap") or {}
             stats = tuple(int(st.get(k, 0) or 0) for k in ("perfect", "great", "good", "ok", "meh", "miss"))
@@ -705,9 +707,50 @@ SKILLS = ("stream", "jumpstream", "handstream", "jackspeed", "chordjack", "minij
           "quadstream", "sv_fast", "sv_slow", "sv_accel", "sv_stutter", "sv_brake")
 
 
+class Decoded(dict):
+    """Features decoded from stored bytes. `source` is the same on every read, so prediction caches recognise
+    the chart without keeping the ~8 KB decoded copy (identity)."""
+    __slots__ = ("source",)
+
+
+class Rates(dict):
+    """rate → features, stored as bytes and decoded on each read (~1.5 KB instead of ~10 KB resident: the decoded
+    library was 0.8 GB of a 3 GB app, 2026-11-01). Bytes: pickled (web.pkl) or rec.db's form; a dict stays a dict."""
+
+    def __getitem__(self, rate):
+        v = dict.__getitem__(self, rate)
+        if not isinstance(v, bytes):
+            return v
+        f = Decoded(pickle.loads(v) if v[:1] == b"\x80" else feats_load(v))
+        f.source = v
+        return f
+
+    def get(self, rate, default=None):
+        return self[rate] if rate in self else default
+
+    def setdefault(self, rate, value=None):
+        if rate not in self:
+            dict.__setitem__(self, rate, value)
+        return self[rate]
+
+    def items(self):
+        return [(r, self[r]) for r in self]
+
+    def values(self):
+        return [self[r] for r in self]
+
+    def kept(self, keep):
+        """The rates keep(rate) accepts, still undecoded."""
+        out = type(self)()
+        for rate in self:
+            if keep(rate):
+                dict.__setitem__(out, rate, dict.__getitem__(self, rate))
+        return out
+
+
 def identity(f):
-    """What a per-chart cache compares instead of the features object: a website chart's features are
-    decoded afresh on each read (webmaps.Decoded), their stored bytes are not."""
+    """What a per-chart cache compares instead of the features object: stored features are decoded afresh on
+    each read (Decoded), their bytes are not."""
     return getattr(f, "source", f)
 
 

@@ -656,3 +656,12 @@ def test_first_run_learns_the_level_before_suggesting():
             patch.object(R, "play_history", return_value=[]):
         worker.t_imported({"new": 11049, "installed": 52988}, 0, True)
     assert order == ["fill", "refit"] and not worker._first_import
+
+
+def test_stable_player_keeps_mostly_tap_charts_with_some_ln():
+    """Less 2026-11-01: 85 of 100 stable bests were dropped because their charts held any LN."""
+    rows = [dict(key=f'st|{i}', client='stable', keys=7, f={'ln': ln}) for i, ln in enumerate((0., .1, .35, .6))]
+    kept = lambda rs: [r['f']['ln'] for r in R.stable_evidence(rs)]
+    assert kept(rows) == [0., .1, .35]
+    lazer = [dict(key=f'l|{i}', client='osu-lazer', keys=7, f={'ln': .5}) for i in range(R.MIN_LAZER_LN)]
+    assert sum(r['client'] == 'stable' for r in R.stable_evidence(rows + lazer)) == 1

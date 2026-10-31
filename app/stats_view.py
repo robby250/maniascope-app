@@ -3,6 +3,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib
 
+import time
+
 import dans
 import player_stats
 import recdata
@@ -258,8 +260,11 @@ class StatsView(Gtk.Box):
             if len(page.get("history", ())) >= 2:
                 self.body.pack_start(HistoryChart(keys, page["history"], peak or page["history"][-1],
                                                             self.dan_scale.get("rice", 1.)), False, False, 0)
+            local, public, newest = page.get("evidence", (0, 0, 0))
+            based = f"{local:,} local plays · {public:,} website bests" + (
+                f" · newest {time.strftime('%Y-%m-%d', time.localtime(newest))}" if newest else "")
             self.body.pack_start(self.label(
-                f"{page.get('maps', 0):,} charts · {page.get('plays', 0):,} plays. Level = the chart difficulty you "
+                f"{based}. {page.get('maps', 0):,} charts · {page.get('plays', 0):,} plays. Level = the chart difficulty you "
                 f"play at ~{target}, from your own recent completed plays. ≈ dan: the dan whose songs you are predicted to "
                 f"play at ~{target} (one song, not passing the course).", True), False, False, 0)
             shown = [r for r in groups.values() if r.get("value") is not None]

@@ -10,7 +10,7 @@ root = os.path.abspath(os.path.join(SPECPATH, ".."))
 R = lambda *p: os.path.join(root, *p)
 datas = [(R("calc_id.txt"), "."), (R("app", "lazer_scores.js"), "."), (R("assets/icon.png"), "."),
          (R("calib/difficulty.json"), "calib"), (R("calib/dans.json"), "calib"),
-         (R("packaging/selftest.osu"), "packaging"), (R("app", "theme"), "theme"),
+         (R("packaging/selftest.osu"), "packaging"), (R("app", "theme"), "theme"), (R("app", "overlay"), "overlay"),
          (R("native/src/personal.rs"), "native/src")]   # recommend.predictor_id hashes the personal fit
 # Calculator sources stay readable: the analysis helper and diagnostics hash/parse them.
 # Flat bundle: modules beside calib/ and native/ (native_backend.tree_root).
