@@ -542,6 +542,15 @@ def target_markup(c, obs):
             _map_markup(c)]
 
 
+def form_text(c):
+    """'warming up −1.2%': the form reason and what it does to this map's expected accuracy."""
+    reason, shift = c.get("form") or (None, 0.)
+    if not reason:
+        return ""
+    rested = 1 - (1 - c["acc_mid"]) * math.exp(-shift)
+    return f"{reason} {100 * (recdata.shown_acc(c['acc_mid']) - recdata.shown_acc(rested)):+.1f}%".replace("-", "−")
+
+
 def card_markup(c, mode="pp", note=None):
     """The selected map: [numbers, title, details], numbers at a fixed place whatever the title (user 2026-10-30).
     PP gain leads the details line, so the numbers line never wraps. The full card is its tooltip."""
@@ -554,9 +563,14 @@ def card_markup(c, mode="pp", note=None):
     details = GLib.markup_escape_text(" · ".join(x for x in (f"{m}:{sec:02d}", skill, f"{c['nps']:.1f} NPS" if c.get("nps") else "") if x))
     if mode == "pp" and c["ranked"]:
         details = f"<b>+{c['gain']:.1f}pp</b> · {100 * c['p_up']:.0f}% to {'beat' if c['best'] else 'count'} · " + details
+    form = form_text(c)
+    if form:
+        details = f"<b>{form}</b> · " + details
     parts = [line, _map_markup(c), f"<small>{details}</small>"]
     tip = [f"Expected ~{100 * recdata.shown_acc(c['acc_mid']):.1f}%, usually {100 * recdata.shown_acc(c['acc_lo']):.1f}–{100 * recdata.shown_acc(c['acc_hi']):.1f}%",
            f"{c.get('rate', 1.):.2f}× · {m}:{sec:02d} · {skill}"]
+    if form:
+        tip.insert(1, f"Form now: {form} against your rested level on this map")
     if not c["ranked"]:
         tip.append("No pp (unranked or unranked rate)")
     else:
@@ -1362,6 +1376,8 @@ class ManiaScopeWindow(Gtk.Window):
         # The gear sits in the current tab's label (user 2026-10-30) and moves with the tab.
         self.gear_btn = Gtk.ToggleButton(image=Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.MENU),
                                          relief=Gtk.ReliefStyle.NONE, can_focus=False)
+        self.gear_btn.get_style_context().add_class("tab-gear")   # no taller than the tab's text (user 2026-11-01)
+        self.gear_btn.get_image().set_pixel_size(12)
         self.gear_btn.set_tooltip_text("Settings for this tab")
         self.gear_btn.connect("toggled", self._toggle_settings)
         self._tab_labels = []
@@ -1695,6 +1711,7 @@ class ManiaScopeWindow(Gtk.Window):
                          timeline=[max(tl[i:i + step]) for i in range(0, len(tl), step)])
         if c and c.get("acc_mid") is not None:
             state["expected"] = f"~{100 * recdata.shown_acc(c['acc_mid']):.1f}%"
+            state["form"] = form_text(c)
         if pick:
             rate = pick["rate"]
             state["pick"] = dict(title=pick.get("title", ""), expected=f"~{100 * recdata.shown_acc(pick['acc_mid']):.1f}%",
@@ -1829,7 +1846,8 @@ class ManiaScopeWindow(Gtk.Window):
             view["list"].remove(row)
         if msg["shown"]:
             self._rec_pinned.pop("blocker", None)
-        phase = {"warmup": "Warming up", "build": "Warmed up", "push": "Strong form", "recover": "Easing off"}[msg["phase"]]
+        phase = {"warmup": "Warming up", "build": "Warmed up", "push": "Strong form", "recover": "Easing off",
+                 "fading": "Fading"}[msg["phase"]]
         view["note"].set_text(f"{phase}{' · ' + msg['note'] if msg['note'] else ''}")
         view["note"].set_tooltip_text("\n".join(t for t in (view["note"].get_text(), msg["summary"]) if t))
         done, total = msg.get("progress") or (0, 0)

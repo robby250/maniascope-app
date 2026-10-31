@@ -561,11 +561,13 @@ fn rate_transfer(rows: &[Row], u: &[f64], by: &[Vec<usize>], rates_of: &[Vec<(f6
     out
 }
 
-/// warmup.py's constants: transfer[target][played] between FAMILIES, GAP, COOLING, TAUS, CAPACITY_PRIOR, and the
-/// population's rate response {"slope", "curve", "curve_knee", "elasticities"} (Slopes).
-type WarmupArgs<'py> = (Vec<Vec<f64>>, f64, f64, Vec<f64>, f64, Bound<'py, PyDict>);
+/// warmup.py's constants: transfer[target][played] between FAMILIES, GAP, COOLING, TAUS, CAPACITY_PRIOR, (SESSION_TAU,
+/// FATIGUE_ONSET)
+/// and the population's rate response {"slope", "curve", "curve_knee", "elasticities"} (Slopes).
+type WarmupArgs<'py> = (Vec<Vec<f64>>, f64, f64, Vec<f64>, f64, (f64, f64), Bound<'py, PyDict>);
 
-/// One completion in time order: row, session, readiness minutes, exposure minutes, seconds, family.
+/// One completion in time order: row, session, readiness minutes, exposure minutes, seconds, family, minutes
+/// since the session's first map began (any keymode).
 struct Step {
     row: usize,
     session: i64,
@@ -573,6 +575,7 @@ struct Step {
     d: f64,
     seconds: f64,
     family: usize,
+    clock: f64,
 }
 
 /// warmup.timeline: exact local completions (public bests cannot establish session order; imported and live
@@ -591,7 +594,12 @@ fn steps(c: &Consts, rows: &[Row], feats: &[Feats], transfer: &[Vec<f64>], gap: 
     let pick = |f: fn(&(usize, f64, usize), &[Row]) -> f64| done.iter().map(|x| f(x, rows)).collect::<Vec<f64>>();
     let (sessions, minutes, ds) = warmup_timeline(&pick(|x, rows| rows[x.0].ts), &pick(|x, _| x.1),
         &done.iter().map(|x| rows[x.0].keys).collect::<Vec<_>>(), &done.iter().map(|x| x.2).collect::<Vec<_>>(), transfer, gap, cooling);
-    done.iter().enumerate().map(|(j, &(row, seconds, family))| Step { row, session: sessions[j], minutes: minutes[j], d: ds[j], seconds, family }).collect()
+    let mut first: HashMap<i64, f64> = HashMap::default();
+    done.iter().enumerate().map(|(j, &(row, seconds, family))| {
+        let start = rows[row].ts - seconds;
+        let clock = (start - *first.entry(sessions[j]).or_insert(start)).max(0.) / 60.;
+        Step { row, session: sessions[j], minutes: minutes[j], d: ds[j], seconds, family, clock }
+    }).collect()
 }
 
 /// warmup.timeline for Python (tests): (row index, session, minutes, d, seconds, family index) per completion.
@@ -623,10 +631,12 @@ struct Design {
     family: Vec<usize>,
     y: Vec<f64>,
     exposure: Vec<Vec<f64>>, // per tau
+    session_cold: Vec<f64>,  // exposure to the session-long warm-up
+    fatigue: Vec<f64>,       // hours past the fatigue onset
 }
 
 impl Design {
-    fn new(c: &Consts, rows: &[Row], feats: &[Feats], steps: &[Step], taus: &[f64]) -> Design {
+    fn new(c: &Consts, rows: &[Row], feats: &[Feats], steps: &[Step], taus: &[f64], session_tau: f64, onset: f64) -> Design {
         let members: Vec<Vec<usize>> = c.families.iter().map(|fam| {
             c.members.iter().find(|(k, _)| k == fam).map_or(Vec::new(), |(_, m)| m.iter().filter_map(|x| c.idx.get(x).copied()).collect())
         }).collect();
@@ -652,6 +662,8 @@ impl Design {
             family: steps.iter().map(|s| s.family).collect(),
             y: steps.iter().map(|s| rows[s.row].y - rows[s.row].base).collect(),
             exposure: taus.iter().map(|&tau| steps.iter().map(|s| exposure(s.minutes, s.d, tau)).collect()).collect(),
+            session_cold: steps.iter().map(|s| exposure(s.clock, s.d, session_tau)).collect(),
+            fatigue: steps.iter().map(|s| (s.clock - onset).max(0.) / 60.).collect(),
         }
     }
 }
@@ -667,6 +679,8 @@ fn unique<T: Ord + Copy>(v: &[T]) -> (Vec<T>, Vec<usize>) {
 
 struct WarmFit {
     amplitudes: Vec<f64>,
+    session: f64,
+    fatigue: f64,
     theta: Vec<f64>,
     months: Vec<f64>,
     month_effect: Vec<f64>,
@@ -677,7 +691,9 @@ struct WarmFit {
 /// warmup._fit: small mixed ridge model of completions `ix`; nuisance effects are never exposed as ability.
 fn warm_fit(d: &Design, slope: &[f64], speed: bool, ix: &[usize], tau: usize, use_cold: bool, capacity_prior: f64) -> WarmFit {
     let (n, g, nz) = (ix.len(), d.g, d.nz);
-    let p = nz + g;
+    // The last column is the session-long warm-up: same-chart replays stay worse for about six plays, far past
+    // the readiness curve, and it is clock time so 7K warms up a 4K map played later in the session.
+    let p = nz + g + 2;
     let (months, month_at) = unique(&ix.iter().map(|&i| d.month[i]).collect::<Vec<_>>());
     let (charts, chart_at) = unique(&ix.iter().map(|&i| d.chart[i]).collect::<Vec<_>>());
     let (_, session_at) = unique(&ix.iter().map(|&i| d.session[i]).collect::<Vec<_>>());
@@ -687,6 +703,8 @@ fn warm_fit(d: &Design, slope: &[f64], speed: bool, ix: &[usize], tau: usize, us
         x[r * p..r * p + nz].copy_from_slice(&d.z[i * nz..(i + 1) * nz]);
         if use_cold {
             x[r * p + nz + d.family[i]] = d.exposure[tau][i] * slope[i];
+            x[r * p + nz + g] = d.session_cold[i] * slope[i];
+            x[r * p + nz + g + 1] = d.fatigue[i] * slope[i];
         }
     }
     let y: Vec<f64> = ix.iter().map(|&i| d.y[i]).collect();
@@ -711,20 +729,20 @@ fn warm_fit(d: &Design, slope: &[f64], speed: bool, ix: &[usize], tau: usize, us
     // Shrink rare families toward their keymode's curve, not toward perfect cold performance.
     let prior_precision = if speed { 12. } else { 2. };
     for j in 0..p {
-        a[j * p + j] += if j == 0 { 1e-6 } else if j < nz { (0.005 * total).max(1.) } else { 0. };
+        a[j * p + j] += if j == 0 { 1e-6 } else if j < nz { (0.005 * total).max(1.) } else if j >= nz + g { prior_precision } else { 0. };
     }
-    for j in nz..p {
-        for k in nz..p {
+    for j in nz..nz + g {
+        for k in nz..nz + g {
             a[j * p + k] += 12. * (if j == k { 1. } else { 0. } - 1. / g as f64) + if j == k { prior_precision } else { 0. };
         }
     }
     let lower: Vec<f64> = (0..p).map(|j| if j < nz { f64::NEG_INFINITY } else { 0. }).collect();
     let upper: Vec<f64> = (0..p).map(|j| if j < nz { f64::INFINITY } else if speed { 0.4 } else { 2. }).collect();
-    let prior: Vec<f64> = (0..p).map(|j| if j >= nz && speed && use_cold { prior_precision * capacity_prior } else { 0. }).collect();
+    let prior: Vec<f64> = (0..p).map(|j| if j >= nz && j < nz + g && speed && use_cold { prior_precision * capacity_prior } else { 0. }).collect();
     // Coordinate projection (non-negative cold losses) alternating with month/chart/session effects.
     let groups = [(month_at, months.len(), 4.), (chart_at, charts.len(), 5.), (session_at, sessions, 8.)];
     let (coeff, effects) = ridge_alternation(&x, &y, &w, &a, &lower, &upper, &prior, &groups, 16);
-    WarmFit { amplitudes: coeff[nz..].to_vec(), theta: coeff[..nz].to_vec(), months: months.iter().map(|&m| m as f64).collect(),
+    WarmFit { amplitudes: coeff[nz..nz + g].to_vec(), session: coeff[nz + g], fatigue: coeff[nz + g + 1], theta: coeff[..nz].to_vec(), months: months.iter().map(|&m| m as f64).collect(),
               month_effect: effects[0].clone(), charts, chart_effect: effects[1].clone() }
 }
 
@@ -758,7 +776,7 @@ fn evaluate(fit: &WarmFit, d: &Design, slope: &[f64], ix: &[usize], tau: usize) 
         let month = interp(d.t[i], &fit.months, &fit.month_effect);
         let chart = fit.charts.binary_search(&d.chart[i]).map_or(0., |at| fit.chart_effect[at]); // unseen: no effect
         let theta: f64 = d.z[i * d.nz..(i + 1) * d.nz].iter().zip(&fit.theta).map(|(a, b)| a * b).sum();
-        let error = d.y[i] - (theta + month + chart + fit.amplitudes[d.family[i]] * d.exposure[tau][i] * slope[i]);
+        let error = d.y[i] - (theta + month + chart + (fit.amplitudes[d.family[i]] * d.exposure[tau][i] + fit.session * d.session_cold[i] + fit.fatigue * d.fatigue[i]) * slope[i]);
         sq += error * error;
         if d.activation[i] < 1. {
             cold += error * error;
@@ -772,6 +790,8 @@ struct ModeFit {
     keys: i64,
     tau: f64,
     amplitudes: Vec<f64>,
+    session: f64,
+    fatigue: f64,
     sessions: usize,
     obs: Vec<usize>,
     cold_rows: usize,
@@ -805,9 +825,9 @@ fn warm_modes(d: &Design, slope: &[f64], speed: bool, taus: &[f64], capacity_pri
         let (_, t, dev_stats) = best.unwrap();
         let no_cold = evaluate(&warm_fit(d, slope, speed, &train, t, false, capacity_prior), d, slope, &dev, t);
         let last = warm_fit(d, slope, speed, &obs, t, true, capacity_prior);
-        let adjust = obs.iter().map(|&i| last.amplitudes[d.family[i]] * d.exposure[t][i] * slope[i]).collect();
+        let adjust = obs.iter().map(|&i| (last.amplitudes[d.family[i]] * d.exposure[t][i] + last.session * d.session_cold[i] + last.fatigue * d.fatigue[i]) * slope[i]).collect();
         Some(ModeFit { keys: k, tau: taus[t], sessions: sessions.len(), cold_rows: obs.iter().filter(|&&i| d.activation[i] < 1.).count(),
-                       amplitudes: last.amplitudes, obs, dev: dev_stats, no_cold, adjust })
+                       amplitudes: last.amplitudes, session: last.session, fatigue: last.fatigue, obs, dev: dev_stats, no_cold, adjust })
     }).collect()
 }
 
@@ -816,9 +836,9 @@ fn warm_modes(d: &Design, slope: &[f64], speed: bool, taus: &[f64], capacity_pri
 /// only when its own earlier-session DEV check wins: sparse modes must not inherit a large rate deficit.
 fn warmup_models<'py>(py: Python<'py>, c: &Consts, rows: &[Row], feats: &[Feats], args: &WarmupArgs<'py>)
                       -> PyResult<(Bound<'py, PyTuple>, HashMap<Best, f64>)> {
-    let (transfer, gap, cooling, taus, capacity_prior, population) = args;
+    let (transfer, gap, cooling, taus, capacity_prior, (session_tau, onset), population) = args;
     let steps = steps(c, rows, feats, transfer, *gap, *cooling);
-    let d = Design::new(c, rows, feats, &steps, taus);
+    let d = Design::new(c, rows, feats, &steps, taus, *session_tau, *onset);
     let slopes = Slopes::of(population, &c.families)?;
     let speed: Vec<f64> = steps.iter().map(|s| {
         let f = &feats[rows[s.row].f];
@@ -831,6 +851,8 @@ fn warmup_models<'py>(py: Python<'py>, c: &Consts, rows: &[Row], feats: &[Feats]
         let v = PyDict::new(py);
         v.set_item("tau", m.tau)?;
         v.set_item("amplitudes", &m.amplitudes)?;
+        v.set_item("session", m.session)?;
+        v.set_item("fatigue", m.fatigue)?;
         v.set_item("support", "local completed sessions")?;
         v.set_item("units", units)?;
         Ok(v)
@@ -841,6 +863,8 @@ fn warmup_models<'py>(py: Python<'py>, c: &Consts, rows: &[Row], feats: &[Feats]
         v.set_item("completed_rows", m.obs.len())?;
         v.set_item("cold_rows", m.cold_rows)?;
         v.set_item("selected_tau", m.tau)?;
+        v.set_item("session_amplitude", m.session)?;
+        v.set_item("fatigue_per_hour", m.fatigue)?;
         v.set_item("dev", m.dev.dict(py)?)?;
         v.set_item("no_cold_dev", m.no_cold.dict(py)?)?;
         let amplitudes = PyDict::new(py);

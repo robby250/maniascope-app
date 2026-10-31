@@ -6,7 +6,7 @@ Both are fitted from the same saved counts; neither changes the recorded score.
 """
 import math
 
-FIELDS=('mu','base_mu','cold_penalty','cold_scale','sdm','sda','sd')
+FIELDS=('mu','base_mu','cold_penalty','sdm','sda','sd')
 
 
 def log_loss(accuracy):
@@ -50,12 +50,7 @@ def session_view(session, warmup_model):
     for event in session.all:
         info=dict(event['info'])
         if event['kind']=='start':
-            legacy_scale=info.get('cold_scale')
             for field in FIELDS:info[field]=info.get('display_'+field)
-            if info['cold_scale'] is None:
-                # The old paired writer saved the display scale in the common
-                # field. Its PP scale is unknown, but this target can retain it.
-                info['cold_scale']=legacy_scale
             info['shown_mu']=info['mu']
         elif event['kind']=='finish':
             info['y']=info.get('y_lazer')

@@ -508,7 +508,7 @@ def test_watcher_keeps_polling_during_index_scan():
     w.on_attempt = lambda *a: attempts.append(a)
     w._play = {"sha": "a", "t": time.time() - 100, "progress": .7}
     w._disconnected = True
-    w._track("songselect", {"files": {"beatmap": "a"}, "beatmap": {"time": {}}})
+    w._track("songselect", {"files": {"beatmap": "a"}, "beatmap": {"time": {}}}, "/unused.osu")
     assert attempts[0][0] == "void"               # an outage is not evidence of a failed play
 
 
@@ -518,16 +518,16 @@ def test_autoplay_is_not_an_attempt():
     w = skillsets.LazerWatcher(*[lambda *_: None] * 4, lambda *a: attempts.append(a))
     d = {"files": {"beatmap": "a"}, "beatmap": {"time": {"live": 1000, "firstObject": 0, "lastObject": 9000}},
          "play": {"mods": {"array": []}}, "folders": {}}
-    w._track("play", d)                            # tosu's first gameplay poll, before Autoplay's mods
+    w._track("play", d, "/unused.osu")                            # tosu's first gameplay poll, before Autoplay's mods
     d["play"]["mods"]["array"] = [{"acronym": "AT"}]
-    w._track("play", d)
-    w._track("songselect", d)
-    w._track("play", d)
-    w._track("songselect", d)
+    w._track("play", d, "/unused.osu")
+    w._track("songselect", d, "/unused.osu")
+    w._track("play", d, "/unused.osu")
+    w._track("songselect", d, "/unused.osu")
     assert [a[0] for a in attempts] == ["start", "void"]
     d["play"]["mods"]["array"] = [{"acronym": "DT"}]
-    w._track("play", d)
-    w._track("songselect", d)
+    w._track("play", d, "/unused.osu")
+    w._track("songselect", d, "/unused.osu")
     assert [a[0] for a in attempts] == ["start", "void", "start", "abort"]
 
 

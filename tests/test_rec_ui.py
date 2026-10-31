@@ -391,3 +391,16 @@ def test_unchosen_playlist_keymodes_follow_what_the_player_plays():
                 assert w._rec_keys["nps"] == w._rec_keys["skills"] == (4,) and not w._keys_auto
                 assert [k for k, b in w._key_checks["skills"].items() if b.get_active()] == [4]
                 w.destroy(); w.recs.destroy()
+
+
+def test_form_chart_and_text_show_the_session():
+    import skillsets
+    import stats_view
+    form = {"sessions": [{"t": 1e9, "hours": .5, "plays": [(0., -2., "warm-up"), (5., .4, "peak"), (10., -.1, "")]},
+                         {"t": 2e9, "hours": 3., "plays": [(150., -1., "fading"), (170., -2.5, "bad")]}],
+            "warmup": -1.4, "fatigue": -.3}
+    chart = stats_view.FormChart(form)
+    assert len(chart.dots) == 5 and chart.top == 2.5
+    assert "warm-up" in chart.dots[0][3] and chart.dots[1][3].endswith("+0.4% · peak")
+    c = {"form": ("warming up", .3), "acc_mid": .95}
+    assert skillsets.form_text(c).startswith("warming up −") and skillsets.form_text({"acc_mid": .95}) == ""

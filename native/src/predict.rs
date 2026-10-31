@@ -584,12 +584,11 @@ impl Prediction {
         let d = PyDict::new(py);
         for (k, v) in [
             (intern!(py, "display_mu"), self.mu), (intern!(py, "display_base_mu"), self.base_mu),
-            (intern!(py, "display_cold_penalty"), self.cold), (intern!(py, "display_cold_scale"), self.cold_scale),
+            (intern!(py, "display_cold_penalty"), self.cold),
             (intern!(py, "display_sdm"), self.sdm), (intern!(py, "display_sda"), self.sda), (intern!(py, "display_sd"), self.sd),
             (intern!(py, "acc_mid"), self.acc_mid), (intern!(py, "acc_lo"), self.acc_lo), (intern!(py, "acc_hi"), self.acc_hi),
             (intern!(py, "opening_acc"), self.opening_acc), (intern!(py, "activation_minutes"), self.activation),
             (intern!(py, "rate_slope"), self.slope), (intern!(py, "sd_model"), self.sdm), (intern!(py, "warmup_tau"), self.tau),
-            (intern!(py, "cold_scale"), self.cold_scale),
         ] {
             d.set_item(k, v)?;
         }
@@ -958,9 +957,11 @@ pub struct PredSession {
 }
 
 struct KeyState {
-    cold_scale: f64,
     form: Vec<f64>,       // session_form posterior mean: shared + per family
     penalty: Vec<f64>,    // warmup penalty(keys, family, activation, 0, 1) per family
+    session: f64,         // warmup session_cold(keys, session_clock)
+    session_tau: f64,
+    fatigue: f64,         // warmup fatigue(keys, session_clock)
     activation: Vec<f64>, // activation(keys, family) per family
 }
 
@@ -972,9 +973,11 @@ impl PredSession {
         for (k, v) in get(d, "keys")?.cast::<PyDict>()?.iter() {
             let v = v.cast::<PyDict>()?;
             by_keys.insert(k.extract()?, KeyState {
-                cold_scale: fl(v, "cold_scale")?,
                 form: get(v, "form")?.extract()?,
                 penalty: get(v, "penalty")?.extract()?,
+                session: fl(v, "session")?,
+                session_tau: fl(v, "session_tau")?,
+                fatigue: fl(v, "fatigue")?,
                 activation: get(v, "activation")?.extract()?,
             });
         }
@@ -988,7 +991,6 @@ pub(crate) struct Prediction {
     base_mu: f64,
     shift: f64, // session correction + cold penalty (mu − base_mu)
     cold: f64,
-    cold_scale: f64,
     sdm: f64,
     sda: f64,
     sd: f64,
@@ -1273,13 +1275,15 @@ impl PredModel {
         let mode = self.mode(k);
         let st = s.by_keys.get(&k).ok_or_else(|| err(&format!("predictor session lacks {k}K")))?;
         let dominant = || self.dominant(f);
-        // Session._historical_cold at `seconds` (× cold_scale outside)
+        // Session._historical_cold at `seconds`
         let historical = |seconds: f64| -> f64 {
             if s.warm {
                 return 0.;
             }
             let d = 0f64.max(10f64.min(seconds / 60.));
-            let mean = if d > 0.001 { -(-d / mode.tau).exp_m1() * mode.tau / d } else { 1. };
+            let over = |tau: f64| if d > 0.001 { -(-d / tau).exp_m1() * tau / d } else { 1. };
+            let mean = over(mode.tau);
+            let session = st.session * over(st.session_tau) + st.fatigue;
             if mode.log_rate {
                 let mut loss = 0.;
                 for (i, &w) in weights.iter().enumerate() {
@@ -1287,13 +1291,13 @@ impl PredModel {
                         loss += w * st.penalty[i];
                     }
                 }
-                self.rate_loss(f, chart, b, rate, loss * mean, &weights)
+                self.rate_loss(f, chart, b, rate, loss * mean + session, &weights)
             } else {
-                st.penalty[dominant()] * mean
+                st.penalty[dominant()] * mean + session
             }
         };
         let seconds = f.length / 1000. / rate.max(0.01);
-        let cold = historical(seconds) * st.cold_scale;
+        let cold = historical(seconds);
         let mut correction = st.form[0];
         let total: f64 = weights.iter().sum();
         for (i, &w) in weights.iter().enumerate() {
@@ -1304,7 +1308,7 @@ impl PredModel {
         let (a, bb) = self.shown;
         let shown = |y: f64| 0f64.max(1f64.min(1. - (20f64.min(a + bb * y)).exp()));
         let spread = sda.hypot(sdm);
-        let opening = historical(0.) * st.cold_scale;
+        let opening = historical(0.);
         let activation = if s.warm {
             10.
         } else if !mode.log_rate {
@@ -1317,7 +1321,6 @@ impl PredModel {
             base_mu,
             shift,
             cold,
-            cold_scale: st.cold_scale,
             sdm,
             sda,
             sd: (sda * sda + sdm * sdm).sqrt(),

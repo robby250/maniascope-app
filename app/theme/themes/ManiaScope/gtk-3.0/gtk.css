@@ -6,5 +6,6 @@
 
 /* Skills chips (skill_picker.py) */
 button.skill-chip { padding: 2px 10px; }
+notebook > header > tabs > tab button.tab-gear, notebook > header > tabs > tab:checked button.tab-gear { min-height: 0; min-width: 0; padding: 0; margin: 0; border-width: 0; }
 button.skill-on { border-color: #57c26e; background-image: none; background-color: alpha(#57c26e, .16); }
 button.skill-off { border-color: #e5534b; background-image: none; background-color: alpha(#e5534b, .16); }

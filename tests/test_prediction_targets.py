@@ -39,16 +39,15 @@ def completed_loss(info,pp_error,display_error,i=0):
                  info=dict(start_id=2*i+1,y=-3.+pp_error,y_lazer=-3.1+display_error,played_seconds=120.))]
 
 
-def test_paired_scale_survives_real_prediction_start_and_next_forecast(tmp_path):
+def test_paired_forecast_survives_real_prediction_and_start(tmp_path):
     rec,f=paired_personal()
-    seed=dict(cold_scale=1.,display_cold_scale=1.,display_base_mu=-3.1,
+    seed=dict(display_base_mu=-3.1,
               display_mu=-2.95,display_cold_penalty=.15,display_sd=.3,display_sdm=.1,display_sda=.2)
     events=sum((completed_loss(seed,.15,.18,i) for i in range(8)),[])
     predictor=R.Predictor(rec);now=10000.
     pp=predictor._predict(f,'a'*32,None,1.,R.Session(events,now))
     display=predictor.display._predict(f,'a'*32,None,1.,R.Session(events,now).for_accuracy(rec.accuracy_model.warmup))
     expected=predictor.predict(f,'a'*32,None,1.,R.Session(events,now))
-    assert pp['cold_scale']!=display['cold_scale']
 
     db=R.recdata.connect(str(tmp_path/'rec.db'))
     for event in events:
@@ -65,79 +64,16 @@ def test_paired_scale_survives_real_prediction_start_and_next_forecast(tmp_path)
     worker.t_start(dict(t=now,sha=sha,path='/unused-fixture.osu',rate=1.,mods=[]))
     row=db.execute("SELECT * FROM events WHERE kind='start' ORDER BY id DESC LIMIT 1").fetchone()
     saved=dict(row,info=json.loads(row['info']));db.close()
-    assert saved['info']['cold_scale']==pp['cold_scale']
-    assert saved['info']['display_cold_scale']==display['cold_scale']
-    assert expected['cold_scale']==pp['cold_scale']
-    assert expected['display_cold_scale']==display['cold_scale']
+    assert saved['info']['cold_penalty']==pp['cold_penalty']
+    assert saved['info']['display_cold_penalty']==display['cold_penalty']
     assert {k:expected[k] for k in A.FIELDS}=={k:pp[k] for k in A.FIELDS}
     assert {k:expected['display_'+k] for k in A.FIELDS}=={k:display[k] for k in A.FIELDS}
     preview=predictor.predict(f,'a'*32,None,1.,R.Session(events,now),accuracy_only=True)
-    assert preview['cold_scale']==preview['display_cold_scale']==display['cold_scale']
     assert 'mu' not in preview and preview['acc_mid']==expected['acc_mid']
-    terminal=dict(id=row['id']+1,t=now+120.,kind='finish',beatmap=saved['beatmap'],info=dict(
-        start_id=row['id'],y=pp['base_mu']+pp['cold_penalty'],
-        y_lazer=display['base_mu']+display['cold_penalty'],played_seconds=120.))
-    completed=events+[saved,terminal]
-    session=R.Session(completed,now+120.)
-    assert session.cold_scale(7)==pytest.approx(pp['cold_scale'],abs=1e-12)
-    assert session.for_accuracy(rec.accuracy_model.warmup).cold_scale(7)==pytest.approx(display['cold_scale'],abs=1e-12)
-    wrong=copy.deepcopy(completed)
-    wrong[-2]['info']['cold_scale']=display['cold_scale']  # old mixed-target defect
-    later=now+120.+R.SESSION_GAP+1
-    actual=predictor._predict(f,'c'*32,None,1.,R.Session(completed,later))
-    mixed=predictor._predict(f,'c'*32,None,1.,R.Session(wrong,later))
-    assert abs(actual['mu']-mixed['mu'])>1e-4
-
-
-def test_legacy_paired_scale_is_display_metadata_without_losing_pp_evidence():
-    rec,f=paired_personal()
-    events=completed_loss(dict(cold_scale=2.,features=f,display_base_mu=-3.1,
-        display_mu=-2.8,display_cold_penalty=.3,display_sd=.3,display_sdm=.1,display_sda=.2),.3,.3)
-    original=copy.deepcopy(events)
-    session=R.Session(events,1120,warmup_model=rec.model.warmup)
-    assert session.cold_scale(7)==1.  # its old PP scale is unidentified
-    view=session.for_accuracy(rec.accuracy_model.warmup)
-    assert view.cold_scale(7)==pytest.approx((.15*.3+R.COLD_PRIOR)/(.15**2+R.COLD_PRIOR))
-    no_scale=copy.deepcopy(events);no_scale[0]['info'].pop('cold_scale')
-    control=R.Session(no_scale,1120,warmup_model=rec.model.warmup)
-    assert session.correction(7,'chordstream',f)==control.correction(7,'chordstream',f)>0
-    assert session.chart_correction('chart',1.,f,rec.model,.04)==control.chart_correction('chart',1.,f,rec.model,.04)>0
-    assert session.activation(7,'chordstream')==control.activation(7,'chordstream')>0
-    assert len(session.attempts)==1 and session.attempts[0]['ability_evidence']
-    assert session.attempts[0]['y']==-2.7 and events==original
-
-
-@pytest.mark.parametrize('paired',[False,True])
-def test_legacy_without_scale_keeps_unscaled_observations(paired):
-    info=dict(display_base_mu=-3.1,display_mu=-2.8,display_cold_penalty=.3) if paired else {}
-    session=R.Session(completed_loss(info,.3,.3),1120)
-    assert session.cold_scale(7)==pytest.approx((.2*.3+R.COLD_PRIOR)/(.2**2+R.COLD_PRIOR))
-    view=session.for_accuracy(model(-3.).warmup)
-    assert view.cold_scale(7)==pytest.approx(1.) and view.activation(7,'chordstream')>0
-
-
-@pytest.mark.parametrize('target',['pp','display'])
-def test_zero_scale_is_not_an_observed_unscaled_warm_curve(target):
-    zeros=dict(cold_scale=0. if target=='pp' else 1.,cold_penalty=0. if target=='pp' else .2,
-        display_cold_scale=0. if target=='display' else 1.,display_base_mu=-3.1,
-        display_mu=-3.1,display_cold_penalty=0. if target=='display' else .2)
-    events=sum((completed_loss(zeros,.3,.3,i) for i in range(5)),[])
-    events+=completed_loss(dict(cold_scale=1.,display_cold_scale=1.,display_base_mu=-3.1,
-        display_mu=-2.9,display_cold_penalty=.2),.2,.2,5)
-    session=R.Session(events,1870)
-    view=session.for_accuracy(model(-3.).warmup)
-    owner=session if target=='pp' else view
-    assert owner.cold_scale(7)==pytest.approx(1.)
-    assert len(owner.history_attempts)==6 and owner.activation(7,'chordstream')>0
-    assert all(a['cold_scale']==0. for a in owner.history_attempts[:5])
-    if target=='display':
-        # Explicit display zero identifies the modern paired contract; it
-        # neither falls back to the PP scale nor discards PP observations.
-        assert session.cold_scale(7)>1.
 
 
 def test_lazer_models_exclude_combined_or_unknown_hold_judgements_before_fitting(monkeypatch):
-    rows=[dict(key=key,client=client,f={'ln':ln}) for key,client,ln in (
+    rows=[dict(key=key,keys=7,client=client,f={'ln':ln}) for key,client,ln in (
         ('stable-hold','stable',.5), ('unknown-hold',None,.5),
         ('native-hold','2026.921.0-lazer',.5), ('live-hold','lazer-live',.5),
         ('legacy|42','2026.921.0-lazer',.5), ('stable-rice','stable',0.))]
@@ -175,7 +111,7 @@ def test_direct_display_head_does_not_change_pp_mean_or_spread():
     preview = predictor.predict(f,'chart',None,1.,session,accuracy_only=True)
     assert not pp.predict.called and session._warmup_model is pp.warmup
     numbers = lambda values: {k:v for k,v in values.items() if k!='accuracy_forecast'}
-    assert numbers(preview) == dict({k:v for k,v in numbers(result).items() if k not in A.FIELDS},cold_scale=result['display_cold_scale'])
+    assert numbers(preview) == {k:v for k,v in numbers(result).items() if k not in A.FIELDS}
     assert numbers(predictor.predict(f,'chart',None,1.,session)) == numbers(result)
     assert pp.predict.call_count == 1
 
@@ -439,6 +375,7 @@ def native_fixture():
         m.aff={'md5:x':(-.05,3.)}; m.aff['other']=(.08,4.)
         m.rate_aff={'other':[(1.,.08,4.),(1.2,.15,2.)]}; m.rate_support={'other':(1.,1.2)}
         m.warmup.elasticities={'7':1.1,'7:chords':1.3}
+        m.warmup.modes[7].update(session=.1,fatigue=.05)
     events=completed_loss({},.2,.3)+completed_loss({},.1,-.1,1)
     variants=[f,dict(f,sk=dict(jack=.9,minijack=.95,stamina=.99),ln=0.),dict(f,sk={},keys=7),
               dict(f,overall=9.,od=6.,endurance={'load':.4},nps={'chord':2.,'overlap':.3},
@@ -466,7 +403,8 @@ def test_native_pp_session_shift_matches_the_python_terms():
             assert fast is not None and fast.tolist()==pytest.approx(slow,rel=1e-12,abs=1e-12)
 
 
-def test_native_bulk_predictions_match_the_python_predictor():
+def test_native_bulk_predictions_match_the_python_predictor(monkeypatch):
+    monkeypatch.setattr(W,'FATIGUE_ONSET',1.)       # the fixture session is minutes long
     rec,events,items=native_fixture()
     pred=R.Predictor(rec,source_id='fixture')
     for warm in (False,True):

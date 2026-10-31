@@ -14,8 +14,10 @@ import dans
 import recdata
 import skill_practice
 import score_units
+import warmup
 
 TARGET = .94
+FORM_SESSIONS = 12
 
 
 def _quantile(values, weights, q=.5):
@@ -138,6 +140,46 @@ def _history(model, keys, overall, support=20.):
     return [(int(start) + i, overall["value"] * math.exp((now - level[i]) / overall["slope"])) for i in months]
 
 
+def _form_history(model, keys, rows):
+    """The last sessions play by play: accuracy points against the model's rested expectation (at 95 %), each play
+    marked warm-up, peak, bad or fading; the fitted warm-up cost and fatigue per hour beside them."""
+    if keys not in model.keys or not hasattr(model, 'warmup'):
+        return None
+    # rec.rows carry no population base and the session timeline only needs the clock.
+    steps = warmup.timeline([dict(r, base=0.) for r in rows])
+    points = lambda shift: 100*.05*(1-math.exp(max(-3., min(3., shift))))
+    ids = sorted({s[1] for s in steps})[-FORM_SESSIONS:]
+    picked = [s for s in steps if s[1] in set(ids)]
+    if not picked:
+        return None
+    mu = model.predict_many([(s[0]['f'], s[0]['chart'], s[0].get('b'), round(s[0]['rate'], 3)) for s in picked])
+    sessions = {}
+    for (r, session, minutes, _d, seconds, fam), (m, *_rest) in zip(picked, mu):
+        sessions.setdefault(session, []).append((r, minutes, seconds, fam, m))
+    out = []
+    for plays in sessions.values():
+        first = plays[0][0]['ts'] - plays[0][2]
+        rows_ = []
+        for r, minutes, seconds, fam, m in plays:
+            clock = (r['ts'] - seconds - first)/60
+            y = r.get('yfit', r.get('y_lazer', r['y']))
+            rows_.append((clock, points(y - m), model.warmup.penalty(keys, fam, minutes, seconds, None, clock)
+                          - model.warmup.fatigue(keys, clock)*(3. if model.warmup.parameters(keys).get('units') == 'log_rate' else 1.)))
+        values = [v for _c, v, _p in rows_]
+        centre, spread = float(np.mean(values)), max(.3, float(np.std(values)))
+        marked = []
+        for clock, value, cold in rows_:
+            mark = ("warm-up" if cold > .08 else "bad" if value < centre - spread else
+                    "fading" if clock >= warmup.FATIGUE_ONSET and value < centre else
+                    "peak" if value > centre + spread else "")
+            marked.append((round(clock, 1), round(value, 2), mark))
+        out.append({"t": first, "hours": marked[-1][0]/60, "plays": marked})
+    p = model.warmup.parameters(keys)
+    unit = 3. if p.get('units') == 'log_rate' else 1.
+    return {"sessions": out, "warmup": -points(unit*(p.get('session', 0.) + float(np.mean(p['amplitudes'])))),
+            "fatigue": -points(unit*p.get('fatigue', 0.))}
+
+
 def build(rec):
     from recommend import play_history
     a, b = rec._shown
@@ -226,7 +268,8 @@ def build(rec):
                 dan_at[kind] = (anchor, _dan_rating(model, series, calibration.get(anchor)))
         history = _history(model, keys, groups.get("overall", {}))
         local = [r for r in rows if r.get("src") != "public"]
-        result[keys] = {"keys": keys, "groups": groups, "history": history, "now": model.now, "dan_at": dan_at,
+        form = _form_history(model, keys, local)
+        result[keys] = {"keys": keys, "groups": groups, "history": history, "now": model.now, "dan_at": dan_at, "form": form,
                         "evidence": (len(local), len(rows) - len(local), max((r.get("ts") or 0 for r in rows), default=0)),
                         "peak": max(history, key=lambda h: h[1]) if history else None, "maps": len(charts), "plays": len(rows),
                         "special": {"mash_maps": sum(r["f"].get("sk", {}).get("mash", 0.) >= .3 for r in charts.values())}}

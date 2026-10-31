@@ -108,21 +108,6 @@ def test_fresh_calculation_and_feature_transform_share_structural_inputs():
     assert C.compute(c,rate)['scores']['overall']==r['scores']['overall']
 
 
-def test_tracked_openings_that_play_warm_shrink_the_cold_curve():
-    def history(cold_result):
-        ev=events([0]*12)
-        for i in range(6):          # six openings forecast .15 worse than warm
-            ev[2*i]['info'].update(cold_penalty=.15)
-            ev[2*i+1]['info']['y']=-3.+cold_result
-        return R.Session(ev,99999,warmup_model=cold_model())
-    assert history(.15).cold_scale(7)==pytest.approx(1.,abs=.01)     # they were as cold as forecast
-    warm=history(0.)                                                  # they played like warm maps
-    assert warm.cold_scale(7)<.5
-    assert warm.warmup_penalty(7,'chordjack')==pytest.approx(
-        warm._historical_cold(7,'chordjack')*warm.cold_scale(7))
-    assert R.Session([],1200,warmup_model=cold_model()).cold_scale(7)==1.
-
-
 def test_native_family_weights_and_dominant_match_the_python_definition():
     def weights(f):
         sk=f.get('sk',{});values=[]
@@ -167,3 +152,60 @@ def test_native_warmup_ridge_matches_the_numpy_alternation():
     assert np.allclose(native,coeff,rtol=0,atol=1e-12)
     for a,b in zip(native_effects,effects):
         assert np.allclose(a,b,rtol=0,atol=1e-12)
+
+
+def _played(cold=0., fatigue=0., first_cold=None, seed=1):
+    """40 three-hour sessions of two-minute maps with a known warm-up and fatigue; the same maps recur."""
+    rng=np.random.default_rng(seed);rows=[]
+    f={'keys':7,'length':120000,'overall':6.,'sk':{'chordstream':1.},'ln':0.,'stam':1.,'od':8.,'stars':6.}
+    for s in range(40):
+        for i in range(36):
+            clock=i*5.
+            y=cold*math.exp(-clock/W.SESSION_TAU)+fatigue*max(0.,clock-W.FATIGUE_ONSET)/60+rng.normal(0,.03)
+            ts=86400.*s+clock*60+120
+            rows.append(dict(key=f'{s}.{i}',chart=f'{(s*7+i)%300:032x}',ts=ts,t=299+s/30,rate=1.,f=f,keys=7,src='realm',client='lazer',
+                             y=-3.+y,yfit=-3.+y,y_lazer=-3.+y,base=-3.,b=None,rd=False,completed=True))
+    pop=dict(slope={0:3.},window={0:-3.},mb={},mbr={},tau2=.02,kappa=3.,curve={},curve_knee=4.)
+    return R.Personal(dict(calc='fixture',pop=pop,feats={},maps={}),rows,now=301.)
+
+
+def test_the_fit_recovers_a_session_long_warm_up_and_fatigue():
+    mode=_played(cold=.3,fatigue=.1).warmup.modes[7]
+    scale=3. if mode['units']=='log_rate' else 1.
+    assert mode['session']*scale>.1                      # shared with the readiness curve early in a session
+    assert mode['fatigue']*scale==pytest.approx(.1,abs=.03)
+    none=_played().warmup.modes[7]                       # nothing to find: neither term invents one
+    assert none['session']*scale<.03 and none['fatigue']*scale<.015
+
+
+def test_session_clock_counts_every_keymode_and_restarts_after_a_gap():
+    a=lambda end,keys=7,kind='finish':dict(key=str(end),t=end-120,end=end,keys=keys,played_seconds=120,kind=kind)
+    history=[a(1120),a(1300,4),a(1500)]
+    assert W.session_minutes(history,1600)==pytest.approx(10.)
+    assert W.session_minutes(history+[a(1550,7,'abort')],1600)==pytest.approx(10.)
+    assert W.session_minutes(history,1500+W.GAP+1)==0
+    later=history+[a(1500+W.GAP+200)]
+    assert W.session_minutes(later,1500+W.GAP+200)==pytest.approx(2.)
+
+
+def test_session_warm_up_and_fatigue_reach_the_live_penalty():
+    model=W.Model({7:{'tau':6.,'amplitudes':[0.]*len(W.FAMILIES),'session':.2,'fatigue':.1,'units':'log_rate'}})
+    assert model.penalty(7,'chordjack',0.,0.,1.,0.)==pytest.approx(.2)
+    assert model.penalty(7,'chordjack',0.,0.,1.,W.SESSION_TAU)==pytest.approx(.2/math.e)
+    assert model.penalty(7,'chordjack',30.,0.,1.,W.FATIGUE_ONSET+60)==pytest.approx(.1,abs=1e-3)
+    old=W.Model({7:{'tau':6.,'amplitudes':[0.]*len(W.FAMILIES),'units':'log_rate'}})
+    assert old.penalty(7,'chordjack',0.,0.,1.,0.)==0
+    s=R.Session([],1200,warmup_model=model)
+    assert s.warmup_penalty(7,'chordjack')==pytest.approx(.2*3)
+
+
+def test_form_readout_names_the_reason():
+    model=W.Model({7:{'tau':6.,'amplitudes':[0.]*len(W.FAMILIES),'session':.2,'fatigue':.2,'units':'log_error'}})
+    a=lambda end:dict(key=str(end),t=end-300,end=end,keys=7,played_seconds=300,kind='finish',skill='chordjack')
+    model.history=[a(1000+600*i) for i in range(16)]
+    assert R.Session([],1100,warmup_model=model).form_state(7)[0]=='warming up'
+    assert R.Session([],1000+600*15+60,warmup_model=model).form_state(7)[0]=='fading'
+    calm=R.Session([],1000+600*5,warmup_model=model)
+    assert calm.form_state(7)==(None,pytest.approx(calm.form_state(7)[1])) and calm.form_state(7)[1]<.08
+    warm=R.Session([],1100,warmup_model=model);warm.warm_flag=True
+    assert warm.form_state(7)==(None,0.)

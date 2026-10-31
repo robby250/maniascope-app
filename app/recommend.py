@@ -44,6 +44,7 @@ LOCAL_MODES = ("nps", "skills")
 MODE_NAMES = {"pp": "PP", "nps": "NPS", "skills": "Skills"}
 
 SESSION_GAP = 50 * 60          # seconds without gameplay that start a new session
+FORM_NOTICE = .08   # log error: about .4 point at 95 %, under it the readout says nothing
 NPS_CLOCK = 300                # s: NPS/Skills predictions follow warm-up cooling without plays this often
 HISTORY_S = 3 * 86400          # events that shape form/predictions
 EXPOSURE_S = 14 * 86400        # offers/plays that keep a map back (3 days let PP repeats return daily, G835LX 2026-10)
@@ -81,7 +82,6 @@ RECENT_FAMILIES = ('stream', 'chordstream', 'delay', 'bracket', 'ln', 'minijack'
 LEVEL_BW = 4.0                 # months: level drift kernel
 HISTORY_ZONE = .15             # Stats history counts plays at most this far (log stars) below the competence level
 WARMUP_MAX = 3
-COLD_PRIOR = .1     # Σ penalty² the historical cold curve is worth against tracked results (~40 openings at .05)
 EVIDENCE_MODS = {"NF", "HD", "FI", "FL", "MR", "SD", "PF", "DT", "NC", "HT", "DC", "CL", "RD"}
 import paths  # noqa: E402
 LAZER_FILES = os.path.join(paths.lazer_data(), "files")
@@ -811,6 +811,29 @@ class Session:
             minutes += min(300., seconds) / 60 * transfer * math.exp(-max(0., self.now-a["end"])/2400.)
         return minutes
 
+    def session_clock(self):
+        """Minutes into the session (warmup.session_minutes), any keymode."""
+        key=('session-clock',)
+        if key not in self._corrections:
+            import warmup
+            history=list(self._warmup_model.history)+self.attempts
+            resets=[e['t'] for e in self.all if e['kind']=='reset']
+            if resets:history=[a for a in history if a['end']>max(resets)]
+            self._corrections[key]=warmup.session_minutes(history,self.now)
+        return self._corrections[key]
+
+    def form_state(self, keys):
+        """What moves results right now: (reason or None, log-error shift, positive = worse)."""
+        if self._warmup_model is None or self.warm_flag:
+            return None, 0.
+        model = self._warmup_model
+        fatigue = model.fatigue(keys, self.session_clock()) * (3. if model.parameters(keys).get('units') == 'log_rate' else 1.)
+        cold = self.warmup_penalty(keys, None) - fatigue
+        form = self.correction(keys, None)
+        reason = ("warming up" if cold > FORM_NOTICE else "fading" if fatigue > FORM_NOTICE / 2 else
+                  "on form" if form < -FORM_NOTICE else "off form" if form > FORM_NOTICE else None)
+        return reason, cold + fatigue + form
+
     def zs(self):
         return [(a, a["z"], a.get("wz", 1.0)) for a in self.attempts
                 if a.get("z") is not None and a.get("ability_evidence", True)]
@@ -920,37 +943,8 @@ class Session:
         values = self._corrections[key]
         return sum(w*values[fam] for fam,w in (profile or warmup.family_weights(f)))
 
-    def cold_scale(self, keys):
-        """Share of the historical cold curve that tracked results still show (user 2026-10-01: first
-        maps ~.05–.1× too easy; G835LX 7K forecasts with .045 / .124 cold penalty came out .15 / .26
-        better than predicted, warm ones .04). Least squares of result on penalty through the warm
-        baseline, prior 1 worth COLD_PRIOR. Recorded penalties are unscaled by their own scale."""
-        key = ('cold_scale', keys)
-        if key not in self._corrections:
-            obs = []
-            for a in self.history_attempts:
-                if a.get('keys') != keys or a['kind'] != 'finish' or not a.get('ability_evidence', True) \
-                        or a.get('y') is None or a.get('base_mu') is None or a.get('cold_penalty') is None:
-                    continue
-                scale = a.get('cold_scale')
-                if scale is None:
-                    scale = 1.  # older forecasts used the unscaled curve
-                if scale <= 0:
-                    continue    # a zero-scaled penalty cannot identify its original curve
-                if not getattr(self, '_display_target', False) and a.get('cold_scale') is not None \
-                        and a.get('display_cold_scale') is None and a.get('display_base_mu') is not None \
-                        and a.get('display_cold_penalty') is not None:
-                    continue    # old paired records saved the display scale, not this PP scale
-                obs.append((a['cold_penalty'] / scale, a['y'] - a['base_mu']))
-            warm = [e for c, e in obs if c < .02]
-            base = sum(warm) / len(warm) if len(warm) >= 5 else 0.
-            num = sum(c * (e - base) for c, e in obs) + COLD_PRIOR
-            den = sum(c * c for c, _e in obs) + COLD_PRIOR
-            self._corrections[key] = max(0., min(1.5, num / den))
-        return self._corrections[key]
-
     def warmup_penalty(self, keys, skill, seconds=0., f=None, speed_slope=None, response=None, profile=None):
-        return self._historical_cold(keys, skill, seconds, f, speed_slope, response, profile) * self.cold_scale(keys)
+        return self._historical_cold(keys, skill, seconds, f, speed_slope, response, profile)
 
     def _historical_cold(self, keys, skill, seconds=0., f=None, speed_slope=None, response=None, profile=None):
         """Historical completed-score curve; no target changes or rate-up bans.
@@ -968,7 +962,7 @@ class Session:
                 # changing the player's hands. Blend cold loss over the mix,
                 # rather than jump from one family curve to another at that tie.
                 if f is None:
-                    loss = self._warmup_model.penalty(keys,skill,self.activation(keys,skill),seconds,1.)
+                    loss = self._warmup_model.penalty(keys,skill,self.activation(keys,skill),seconds,1.,self.session_clock())
                 else:
                     # Family readiness is constant across the catalogue in this
                     # frozen Session. Compute its exponentials once, not once per
@@ -982,10 +976,11 @@ class Session:
                     tau = self._warmup_model.parameters(keys)['tau']
                     d = max(0.,min(10.,seconds/60))
                     loss *= -math.expm1(-d/tau)*tau/d if d>.001 else 1.
+                    loss += self._warmup_model.session_cold(keys,self.session_clock(),seconds)
                 return response(loss) if response is not None else loss*(3. if slope is None else slope)
             if f is not None:
                 skill = warmup.dominant(f)
-            return self._warmup_model.penalty(keys,skill,self.activation(keys,skill),seconds,slope)
+            return self._warmup_model.penalty(keys,skill,self.activation(keys,skill),seconds,slope,self.session_clock())
         cache_key = ("warmup", keys, skill)
         if cache_key not in self._corrections:
             minutes = self.activation(keys, skill)
@@ -1022,6 +1017,9 @@ class Session:
         strong = any(z >= 0.5 and a.get("purpose") != "warmup" for a, z, _w in zs)
         if not (self.warm_flag or strong or n >= 3 or warmups >= WARMUP_MAX or minutes >= 8):
             return "warmup"
+        keys = self.current_keys()
+        if keys is not None and self.form_state(keys)[0] == "fading":
+            return "fading"
         recent = [z for _a, z, _w in zs[-2:]]
         if len(zs) >= 2 and np.mean(recent) < -1.0:
             return "recover"
@@ -1770,6 +1768,7 @@ class Recommender:
         import hashlib
         with open(path, "rb") as fh:
             sha = hashlib.sha256(fh.read()).hexdigest()
+        session = session or Session(load_events(self.db))
         e = self.expectation(sha, path, rate, compute=compute, session=session)
         if "mu" not in e:
             return None
@@ -1784,7 +1783,7 @@ class Recommender:
         c = {"bid": b, "md5": e["md5"], "keys": f["keys"], "title": f'{inst["artist"]} - {inst["title"]} [{inst["version"]}]'
              if inst else os.path.basename(path), "var": rate_label(rate), "rate": rate, "ranked": ranked,
              "search_meta": {"Artist": inst["artist"], "Title": inst["title"], "Version": inst["version"]} if inst else {},
-             "acc_mid": e["acc_mid"], "acc_lo": e["acc_lo"],
+             "acc_mid": e["acc_mid"], "acc_lo": e["acc_lo"], "form": session.form_state(f["keys"]),
             "acc_hi": e["acc_hi"], "length": e["length"], "skill": e["skill"],
             "nps": f.get("nps", {}).get("nps")}
         if metadata:
@@ -2006,8 +2005,10 @@ def _native_session(view, keys):
     tables = {}
     for k in keys:
         view.correction(k, None, loading=_NO_LOADING)        # fills the posterior cache
-        tables[k] = {"cold_scale": view.cold_scale(k), "form": [float(x) for x in view._corrections[("posterior", k)][0]],
+        tables[k] = {"form": [float(x) for x in view._corrections[("posterior", k)][0]],
                      "penalty": [model.penalty(k, fam, view.activation(k, fam), 0., 1.) for fam in warmup.FAMILIES],
+                     "session": model.session_cold(k, view.session_clock())-model.fatigue(k, view.session_clock()),
+                     "session_tau": warmup.SESSION_TAU, "fatigue": model.fatigue(k, view.session_clock()),
                      "activation": [view.activation(k, fam) for fam in warmup.FAMILIES]}
     return native_backend.load().PredSession({"warm": bool(view.warm_flag), "keys": tables})
 
@@ -2057,8 +2058,6 @@ class Predictor:
             # intervals use the directly fitted display target.
             out.update({k:expected[k] for k in ('acc_mid','acc_lo','acc_hi','opening_acc','activation_minutes',
                                                'rate_slope','sd_model','warmup_tau')})
-            if accuracy_only:
-                out['cold_scale']=expected['cold_scale']
         out['accuracy_forecast'] = accuracy_targets.forecast_state(out, generated_at=time.time(),
             calculator=self.calc, predictor=self.predictor_id, rate=rate, band_z=BAND_Z,
             sha256=chart if isinstance(chart,str) and len(chart)==64 else None,
@@ -2135,7 +2134,7 @@ class Predictor:
         # the full-map prediction, but also expose the opening-state estimate
         # so the playlist can reject an overly hard cold opening.
         opening = session.warmup_penalty(f['keys'], skill, 0., f,slope,response,cached[3])
-        return {"mu": mu, "base_mu": base_mu, "cold_penalty": cold, "cold_scale": session.cold_scale(f['keys']),
+        return {"mu": mu, "base_mu": base_mu, "cold_penalty": cold,
                 "activation_minutes":session.activation_for(f,cached[3]),
                 "warmup_tau":self.model.warmup.parameters(f['keys'])['tau'] if hasattr(self.model,'warmup') else 6.,
                 "opening_acc": shown(mu + max(0., opening-cold)),
@@ -2846,7 +2845,7 @@ class Worker(threading.Thread):
             self.playlists[mode] = [p for p in self.playlists[mode] if event_key(p) != key]
         import accuracy_targets
         forecast = accuracy_targets.forecast_chart(exp.get('accuracy_forecast'), play['sha'], exp.get('md5'))
-        forecast_fields=("mu", "base_mu", "cold_penalty", "cold_scale", "activation_minutes", "opening_acc", "rate_slope", "sd", "sdm", "keys", "skill", "ranked", "length", "md5") + tuple(
+        forecast_fields=("mu", "base_mu", "cold_penalty", "activation_minutes", "opening_acc", "rate_slope", "sd", "sdm", "keys", "skill", "ranked", "length", "md5") + tuple(
             'display_'+k for k in accuracy_targets.FIELDS)
         recdata.log_event(self.db, "start", key, t=play["t"], sha=play["sha"], rate=play["rate"], purpose=purpose,
                           mode=c.get("mode") if matched else "manual", offer_id=c.get("offer_id") if matched else None,

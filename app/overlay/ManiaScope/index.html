@@ -34,7 +34,7 @@
   </div>
   <div class="line" id="skills"></div>
   <canvas id="graph" width="380" height="42"></canvas>
-  <div class="row"><div class="dim">Expected accuracy</div><div id="expected"></div></div>
+  <div class="row"><div class="dim">Expected accuracy<span id="form"></span></div><div id="expected"></div></div>
   <div class="row" id="pick"><div class="line" id="pick_title"></div><b id="pick_rate"></b></div>
 </div>
 <script>
@@ -77,6 +77,7 @@
       return e;
     }));
     $('expected').textContent = s.expected || '–';
+    $('form').textContent = s.form ? `  ·  ${s.form}` : '';
     $('pick').style.display = s.pick ? '' : 'none';
     $('pick_title').textContent = s.pick ? s.pick.title : '';
     $('pick_rate').textContent = s.pick ? `${s.pick.set}  ${s.pick.expected}` : '';

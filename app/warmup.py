@@ -17,6 +17,8 @@ GAP = 50*60
 # G835LX history 2026-10-30 (rolling DEV, later 30% of plays): 10 min beat 20–120 on cold plays
 # (7K cold RMSE −.0035, CI −.006…−.001; 4K all −.011); GAP 50 beat 30/60/90/120/180.
 COOLING = 10*60
+SESSION_TAU = 8.   # minutes of clock time since the session's first map
+FATIGUE_ONSET = 120.   # minutes; the user feels it at 2–3 h and the fit needs only its slope
 TAUS = (.5, 1., 2., 4., 8., 16.)
 FAMILIES = ('rice','chords','chordjack','jack','ln','trill','technical','sv')
 MEMBERS = {
@@ -134,7 +136,7 @@ def native_args(population, elasticities):
     FAMILIES, GAP, COOLING, TAUS, CAPACITY_PRIOR and the population's rate response (score_rate_slope)."""
     pop = population or {}
     return ([[transfer(target, played) for played in FAMILIES] for target in FAMILIES], float(GAP), float(COOLING),
-            list(TAUS), CAPACITY_PRIOR, {"slope": pop.get("slope", {}), "curve": pop.get("curve", {}),
+            list(TAUS), CAPACITY_PRIOR, (SESSION_TAU, FATIGUE_ONSET), {"slope": pop.get("slope", {}), "curve": pop.get("curve", {}),
                                          "curve_knee": pop.get("curve_knee", 4.), "elasticities": elasticities})
 
 
@@ -172,12 +174,31 @@ def activation(history, now, keys, skill=None):
     return state*math.exp(-max(0.,now-last_end)/COOLING)
 
 
+def session_minutes(history, now):
+    """Minutes since the current session's first completed map began, any keymode; 0 when no session is running."""
+    start=last_end=None;seen=set()
+    for a in sorted(history,key=lambda a:a['end']):
+        if a.get('kind')!='finish' or not a.get('ability_evidence',True) or a['end']>now:
+            continue
+        identity=a.get('key') or (a.get('beatmap'),round(a['end'],1))
+        if identity in seen:continue
+        seen.add(identity)
+        seconds=max(0.,min(1800.,a.get('played_seconds') or a.get('length') or 0.))
+        begun=a.get('t',a['end']-seconds)
+        if last_end is None or begun-last_end>GAP:start=begun
+        last_end=a['end']
+    if last_end is None or now-last_end>GAP:return 0.
+    return max(0.,now-start)/60
+
+
 class Model:
     def __init__(self, modes=None, history=(), report=None, population=None, elasticities=None):
         self.modes=modes or {};self.history=list(history);self.report=report or {}
         self.population=population or {};self.elasticities=elasticities or {}
         self.fallback = ({'tau':float(np.median([v['tau'] for v in self.modes.values()])),
                           'amplitudes':np.median([v['amplitudes'] for v in self.modes.values()],axis=0).tolist(),
+                          'session':float(np.median([v.get('session',0.) for v in self.modes.values()])),
+                          'fatigue':float(np.median([v.get('fatigue',0.) for v in self.modes.values()])),
                           'units':next(iter(self.modes.values())).get('units','log_error'),
                           'support':'pooled'} if self.modes else
                          {'tau':8.,'amplitudes':[CAPACITY_PRIOR]*len(FAMILIES),
@@ -199,14 +220,25 @@ class Model:
             amplitude /= 3.  # legacy diagnostic models only
         return math.exp(-amplitude*math.exp(-max(0.,minutes)/p['tau']))
 
-    def penalty(self, keys, skill, minutes, seconds=0., slope=None):
+    def session_cold(self, keys, clock, seconds=0.):
+        """The session-long warm-up over a map starting `clock` minutes into the session, before any rate slope."""
+        d=max(0.,min(10.,seconds/60))
+        mean=(-math.expm1(-d/SESSION_TAU))*SESSION_TAU/d if d>.001 else 1.
+        p=self.parameters(keys)
+        return p.get('session',0.)*math.exp(-max(0.,clock)/SESSION_TAU)*mean+self.fatigue(keys,clock)
+
+    def fatigue(self, keys, clock):
+        return self.parameters(keys).get('fatigue',0.)*max(0.,clock-FATIGUE_ONSET)/60
+
+    def penalty(self, keys, skill, minutes, seconds=0., slope=None, clock=0.):
         p=self.parameters(keys);tau=p['tau'];a=p['amplitudes']
         amplitude=float(np.mean(a)) if skill is None else a[FAMILIES.index(family(skill))]
         d=max(0.,min(10.,seconds/60))
         mean=(-math.expm1(-d/tau))*tau/d if d>.001 else 1.
+        loss=amplitude*math.exp(-max(0.,minutes)/tau)*mean+self.session_cold(keys,clock,seconds)
         if p.get('units') == 'log_rate':
-            amplitude *= 3. if slope is None else slope
-        return amplitude*math.exp(-max(0.,minutes)/tau)*mean
+            loss *= 3. if slope is None else slope
+        return loss
 
 
 def models(fitted, population, elasticities):

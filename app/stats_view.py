@@ -144,6 +144,53 @@ class HistoryChart(Gtk.DrawingArea):
         return False
 
 
+FORM_COLOURS = {"warm-up": (.35, .66, .9), "peak": (.34, .76, .43), "bad": (.9, .33, .29), "fading": (.9, .63, .23)}
+
+
+class FormChart(Gtk.DrawingArea):
+    """The last sessions play by play, against the rested expectation; hover a dot for its session and mark."""
+    def __init__(self, form):
+        super().__init__(hexpand=True, has_tooltip=True)
+        self.dots, self.top, self.count, self.gaps = [], 1., 0, []
+        for session in form["sessions"]:
+            self.gaps.append(self.count)
+            day = time.strftime("%d %b %H:%M", time.localtime(session["t"]))
+            for clock, value, mark in session["plays"]:
+                self.dots.append((self.count, value, mark, f"{day} · {clock:.0f} min in · {value:+.1f}%" + (f" · {mark}" if mark else "")))
+                self.count += 1
+            self.count += 2
+        self.top = max([abs(d[1]) for d in self.dots] + [.5])
+        self.set_size_request(200, 90)
+        self.connect("draw", self.draw)
+        self.connect("query-tooltip", self.tip)
+
+    def x(self, i):
+        return 6 + (self.get_allocated_width() - 12) * i / max(1, self.count)
+
+    def y(self, value):
+        height = self.get_allocated_height()
+        return height / 2 - (height / 2 - 6) * value / self.top
+
+    def tip(self, _w, x, _y, _keyboard, tooltip):
+        if not self.dots:
+            return False
+        dot = min(self.dots, key=lambda d: abs(self.x(d[0]) - x))
+        tooltip.set_text(dot[3])
+        return True
+
+    def draw(self, widget, cr):
+        cr.set_source_rgba(*_ink(self, .15)); cr.set_line_width(1)
+        cr.move_to(0, self.y(0)); cr.line_to(self.get_allocated_width(), self.y(0)); cr.stroke()
+        for start in self.gaps[1:]:
+            cr.move_to(self.x(start - 1), 2); cr.line_to(self.x(start - 1), self.get_allocated_height() - 2); cr.stroke()
+        for i, value, mark, _text in self.dots:
+            colour = FORM_COLOURS.get(mark)
+            cr.set_source_rgba(*(colour + (1.,) if colour else _ink(self, .45)))
+            cr.arc(self.x(i), self.y(value), 3 if colour else 2, 0, 2 * math.pi)
+            cr.fill()
+        return False
+
+
 class WaitBanner(Gtk.Box):
     """What a tab still waits for, with a bar: a first run must never look finished or stuck."""
     def __init__(self):
@@ -260,6 +307,16 @@ class StatsView(Gtk.Box):
             if len(page.get("history", ())) >= 2:
                 self.body.pack_start(HistoryChart(keys, page["history"], peak or page["history"][-1],
                                                             self.dan_scale.get("rice", 1.)), False, False, 0)
+            form = page.get("form")
+            if form and form["sessions"]:
+                self.body.pack_start(self.label("Form, play by play (last sessions)"), False, False, 0)
+                self.body.pack_start(FormChart(form), False, False, 0)
+                legend = "  ".join(f'<span foreground="#{"%02x%02x%02x" % tuple(int(255 * c) for c in rgb)}">●</span> {name}'
+                                   for name, rgb in FORM_COLOURS.items())
+                note = Gtk.Label(xalign=0, wrap=True)
+                note.set_markup(f"<small>{legend}\nThe first minutes of a session cost up to {abs(form['warmup']):.1f}%. After 2 hours "
+                                + (f"you lose about {abs(form['fatigue']):.1f}% an hour." if form["fatigue"] else "no drop shows yet.") + "</small>")
+                self.body.pack_start(note, False, False, 0)
             local, public, newest = page.get("evidence", (0, 0, 0))
             based = f"{local:,} local plays · {public:,} website bests" + (
                 f" · newest {time.strftime('%Y-%m-%d', time.localtime(newest))}" if newest else "")
