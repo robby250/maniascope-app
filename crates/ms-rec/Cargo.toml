@@ -1,0 +1,22 @@
+[package]
+name = "ms-rec"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+libm = "0.2"
+md5 = "0.7"
+ms-calc = { path = "../ms-calc" }
+ms-convert = { path = "../ms-convert" }
+ureq = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+ms-data = { path = "../ms-data" }
+ms-model = { path = "../ms-model" }
+rosu-pp = "4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

@@ -1,12 +1,13 @@
 # Releasing
 
-1. Windows build without CI: `packaging/build_windows_wine.sh ../maniascope-app /tmp/winbuild`, then upload
-   the zip to the release (this is how v0.1.0 was built). With CI (public repo; `packaging/windows-workflow.yml` is exported as `.github/workflows/windows.yml`):
-   push a `v*` tag or run the `windows` workflow. The artifact is
-   `ManiaScope-windows.zip`; the job runs `--self-test` both from source and frozen.
-2. Population evidence for friends (derived statistics only, owner's scores stripped):
-   `python3 -c "import recdata,pickle; p=recdata.load_public(); pickle.dump(recdata.release_public(p), open(f'public-{p[\"calc\"]}.pkl','wb'))"`
-   Attach `public-<calc>.pkl` and the zip to a GitHub release of `recdata.RELEASE_REPO`.
-3. Public source: `python3 packaging/export_public.py ../maniascope-app`, commit, push.
+Everything lands in `dist/` (gitignored). Nothing here uploads.
 
-Every calculator change needs a new `public-<calc>.pkl` (and `calib/dan_table.py` rerun).
+1. Linux: `cargo build --release -p ms-app`, copy `target/release/maniascope` to `dist/maniascope-linux-x86_64`.
+2. Windows: `cargo build --release -p ms-app --target x86_64-pc-windows-gnu` (needs `gcc-mingw-w64-x86-64`), copy the exe
+   to `dist/ManiaScope.exe`. CI does the same: `packaging/windows-workflow.yml`, exported as `.github/workflows/windows.yml`.
+3. Population data: `cargo run --release -p ms-tools --bin release_public -- <public.msp> dist` writes
+   `dist/public-<calc>.msp` without the builder's own scores.
+4. Public source: `cargo run --release -p ms-tools --bin export_public -- <a clone of the public repo>`.
+
+Attach the two exes and `public-<calc>.msp` to a release of `robby250/maniascope`. Every calculator change needs a new
+`public-<calc>.msp`.

@@ -1,0 +1,11 @@
+[package]
+name = "ms-convert"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Keymode conversion, from Torosu (MIT, see LICENSE-Torosu), commit d4d97c9"
+
+[dependencies]
+anyhow = "1"
+rosu-map = "0.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

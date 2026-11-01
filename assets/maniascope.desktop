@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=ManiaScope
+GenericName=osu!mania Skillset Viewer
+Comment=Skillset difficulty of the selected map, and what to play next
+Exec="{exe}"
+Icon={icon}
+Terminal=false
+Categories=Game;
+Keywords=osu;mania;skillset;difficulty;lazer;
+StartupNotify=true
+StartupWMClass=maniascope

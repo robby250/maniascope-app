@@ -1,0 +1,10 @@
+[package]
+name = "ms-model"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+ms-calc = { path = "../ms-calc" }
+ms-data = { path = "../ms-data" }
+serde_json = "1"
+sha2 = "0.10"

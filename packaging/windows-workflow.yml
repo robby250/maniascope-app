@@ -1,76 +1,25 @@
-# Windows one-folder build + headless self-test. Artifacts: ManiaScope-windows.zip,
-# public-<calc>.pkl is attached by hand at release time (see packaging/README.md).
+# The Windows exe on a v* tag or by hand; public-<calc>.msp is attached by hand (see packaging/README.md).
 name: windows
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
 permissions:
-  contents: write              # a v* tag publishes the zip to its release
-
+  contents: write
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"        # gvsbuild's PyGObject/pycairo wheels are cp314
-      - name: GTK3 runtime (gvsbuild)
-        shell: pwsh
-        run: |
-          $v = "2026.8.0"
-          Invoke-WebRequest "https://github.com/wingtk/gvsbuild/releases/download/$v/GTK3_Gvsbuild_${v}_x64.zip" -OutFile gtk.zip
-          Expand-Archive gtk.zip C:\gtk
-          "C:\gtk\bin" | Out-File -Append $env:GITHUB_PATH
-      - name: Python packages
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install (Resolve-Path C:\gtk\wheels\pycairo*.whl) (Resolve-Path C:\gtk\wheels\pygobject*.whl)
-          python -m pip install numpy rosu-pp-py pyinstaller
-      - name: Node + realm for lazer score import
-        shell: pwsh
-        run: |
-          $n = "v22.20.0"
-          Invoke-WebRequest "https://nodejs.org/dist/$n/node-$n-win-x64.zip" -OutFile node.zip
-          Expand-Archive node.zip nodetmp
-          New-Item -ItemType Directory node | Out-Null
-          Copy-Item "nodetmp\node-$n-win-x64\node.exe" node\
-          New-Item -ItemType Directory realmjs | Out-Null
-          Push-Location realmjs
-          & "..\nodetmp\node-$n-win-x64\npm.cmd" init -y | Out-Null
-          & "..\nodetmp\node-$n-win-x64\npm.cmd" install realm@12
-          Remove-Item -Recurse -Force node_modules\realm\prebuilds\android, node_modules\realm\prebuilds\apple
-          Pop-Location
-      - name: Source self-test
-        run: |
-          python -c "import sys; sys.path.insert(0, 'app'); import recdata; print(recdata.calc_id())" > calc_id.txt
-          # The released population evidence is keyed by this identity (public-<calc>.pkl).
-          python -c "import sys; sys.path.insert(0, 'app'); import recdata; c, e = recdata.calc_id(), open('packaging/calc_id.expected').read().strip(); assert c == e, (c, e)"
-          python app/maniascope_app.py --self-test
-      - name: Freeze
-        run: |
-          # The GTK runtime's typelibs/schemas are collected by PyInstaller's gi hooks from C:\gtk.
-          $env:GI_TYPELIB_PATH = "C:\gtk\lib\girepository-1.0"
-          pyinstaller --noconfirm packaging/maniascope.spec
-        shell: pwsh
-      - name: Frozen self-test
-        shell: pwsh
-        run: |
-          # A windowed (GUI-subsystem) exe does not block the shell: wait for its exit code.
-          $p = Start-Process dist\ManiaScope\ManiaScope.exe -ArgumentList "--self-test" -Wait -PassThru `
-               -RedirectStandardOutput selftest.txt -RedirectStandardError selftest.err
-          Get-Content selftest.txt, selftest.err
-          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
-      - name: Package
-        shell: pwsh
-        run: Compress-Archive dist\ManiaScope ManiaScope-windows.zip
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - run: rustup target add x86_64-pc-windows-gnu
+      - run: cargo build --release -p ms-app --target x86_64-pc-windows-gnu
+      - run: mv target/x86_64-pc-windows-gnu/release/maniascope.exe ManiaScope.exe
       - uses: actions/upload-artifact@v4
         with:
           name: ManiaScope-windows
-          path: ManiaScope-windows.zip
-      - if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ManiaScope-windows.zip
+          path: ManiaScope.exe
+      - if: startsWith(github.ref, 'refs/tags/')
+        run: gh release upload "$GITHUB_REF_NAME" ManiaScope.exe --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

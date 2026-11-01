@@ -1,0 +1,12 @@
+[package]
+name = "ms-calc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rosu-pp = "4"
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

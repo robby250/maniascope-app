@@ -1,5 +1,7 @@
 # ManiaScope
 
+> **Warning:** untested on Windows, osu!stable and 4K. There could be a lot of bugs, especially in those cases.
+
 osu!mania difficulty viewer and practice playlists for **osu!lazer** and **osu!stable**. It follows the map
 and rate you select in the game and shows its difficulty, skills, dan equivalent and NPS. Its playlists suggest
 what to play next:
@@ -10,11 +12,14 @@ what to play next:
   don't have yet (download suggested).
 - **Skills**: practice for chosen skills (jacks, LN, tech, …).
 
+NPS and Skills can also offer maps converted to the keymode you are playing (⚙ → **Converts**): off by default, built
+with [Torosu](https://github.com/Manolo-dl/Torosu) and imported into the game when one comes up.
+
 ## Windows
 
-1. Download `ManiaScope-windows.zip` from Releases and unzip it anywhere.
-2. Run `ManiaScope.exe`. On first start it downloads **tosu** (to follow lazer's rate) and the
-   population data for predictions (~175 MB).
+1. Download `ManiaScope.exe` from Releases and put it anywhere.
+2. Run it. On first start it downloads **tosu** (to follow lazer's rate) and the
+   population data for predictions (~200 MB).
 3. Optional: in ⋯ → **osu! profile…**, enter your username. Your public top-100 plays are then used as
    bests (no password or API key).
 4. Optional: in the playlist window, NPS tab → ⚙ → **Website charts**, pick a ★ range and press Download. This
@@ -34,51 +39,29 @@ ManiaScope switches to whichever osu! tosu sees running. With stable:
   them when it closes, so they are picked up the next time it starts);
 - a chart has the same identity in both games, so your lazer history keeps counting.
 
-Stable is found in `%LOCALAPPDATA%\osu!` (Windows) or osu-winello's folder (Linux); elsewhere, start ManiaScope
-with `STABLE_DATA=<folder with osu!.db>`. On Linux tosu needs `kernel.yama.ptrace_scope=0` (Fedora's default) to
-read a Wine game.
+Stable's folder is found from the running game, whatever its location. On Linux tosu needs
+`kernel.yama.ptrace_scope=0` (Fedora's default) to read a Wine game.
 
 ## Linux
 
-Runs from source with your system's Python. Open a terminal and do these steps once.
+1. Download `maniascope-linux-x86_64` from Releases and put it where it can stay.
+2. Make it runnable and add it to the application menu:
 
-**1. Install the system packages** (pick your distro):
+   ```
+   chmod +x maniascope-linux-x86_64
+   ./maniascope-linux-x86_64 --install-desktop
+   ```
 
-| Distro | Command |
-|---|---|
-| Fedora | `sudo dnf install git python3-gobject gtk3 python3-cairo python3-numpy python3-pip unzip` |
-| Debian / Ubuntu / Mint / Pop!_OS | `sudo apt install git python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-numpy python3-pip unzip` |
-| Arch / Manjaro / EndeavourOS | `sudo pacman -S git python-gobject gtk3 python-cairo python-numpy python-pip unzip` |
+3. Start **ManiaScope** from the menu. The first start downloads **tosu** (it lets ManiaScope see the rate you pick in
+   lazer) and the population data for predictions (~200 MB, progress shown at the bottom of the Playlist window), then
+   analyses your maps once in the background (it shows how many and how long).
 
-**2. Download ManiaScope and set it up:**
+osu!lazer is found automatically whether it is the AppImage (`~/.local/share/osu`) or the Flatpak. For another location
+start it as `LAZER_DATA=/path/to/osu ./maniascope-linux-x86_64`.
 
-```
-git clone https://github.com/robby250/maniascope-app.git
-cd maniascope-app
-./setup.sh
-```
+**Update later:** replace the file with the new one from Releases.
 
-`setup.sh` installs everything else for your user only (no sudo) and says what it is doing:
-
-- the pp calculator (rosu-pp-py);
-- the score reader, which reads your lazer scores and installed maps (Node.js and Realm; downloaded if
-  you don't have Node);
-- the difficulty calculator (prebuilt for each release; on a newer `git pull` it is built with
-  [Rust](https://rustup.rs) if you have it);
-- tosu (it asks; say yes), which lets ManiaScope see the rate you pick in lazer;
-- the application-menu entry.
-
-**3. Start it** from the application menu (ManiaScope), or with `./run.sh` in that folder. The first
-start downloads the population data for predictions (~175 MB, progress shown at the bottom of the Playlist
-window) and analyses your maps once in the background (it shows how many and how long).
-
-osu!lazer is found automatically whether it is the AppImage (`~/.local/share/osu`) or the Flatpak. For
-another location start it as `LAZER_DATA=/path/to/osu ./run.sh`.
-
-**Update later:** `cd maniascope-app && git pull && ./setup.sh`, then restart ManiaScope.
-
-**If it doesn't start:** the log is `~/.cache/maniascope/run.log`. Run `./setup.sh` again: it checks
-every requirement and says which one is missing.
+**If it doesn't start:** the log is `~/.cache/maniascope/maniascope.log`.
 
 ## Notes
 

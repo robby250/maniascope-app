@@ -1,0 +1,18 @@
+[package]
+name = "ms-data"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ms-calc = { path = "../ms-calc" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+md5 = "0.7"
+memmap2 = "0.9"
+libc = "0.2"
+regex-lite = "0.1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+ureq = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

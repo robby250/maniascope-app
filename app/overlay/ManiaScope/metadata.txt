@@ -1,8 +1,0 @@
-Usecase: ingame, obs-overlay
-Name: ManiaScope
-Version: 1
-Author: robby250
-CompatibleWith: tosu
-Resolution: 420 x 250
-authorLinks: https://github.com/robby250/maniascope-app
-Notes: The selected map and your current pick from ManiaScope, with predicted accuracy. ManiaScope must be running.
