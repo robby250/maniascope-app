@@ -365,7 +365,7 @@ fn osu_file(dir: &std::path::Path, name: &str) -> PathBuf {
 }
 
 fn observed(path: &std::path::Path, rate: f64) -> Obs {
-    Obs { source: Some("tosu"), path: Some(path.to_path_buf()), rate: Some(rate), ..Obs::default() }
+    Obs { source: Some("game"), path: Some(path.to_path_buf()), rate: Some(rate), ..Obs::default() }
 }
 
 #[test]

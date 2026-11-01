@@ -445,7 +445,11 @@ impl App {
     fn list_page(&mut self, ui: &mut Ui, mode: &'static str) {
         let v = &self.views[mode];
         if let Some(c) = &v.target {
-            theme::block(ui, &[(fmt::target_lines(c, &self.obs, &self.units)[0].clone(), 1), (fmt::target_lines(c, &self.obs, &self.units)[1].clone(), 2)], v.target_tip.as_deref());
+            let block = |ui: &mut Ui| { theme::block(ui, &[(fmt::target_lines(c, &self.obs, &self.units)[0].clone(), 1), (fmt::target_lines(c, &self.obs, &self.units)[1].clone(), 2)], v.target_tip.as_deref()); };
+            egui::Frame::new().fill(theme::ROW_CURRENT).inner_margin(egui::Margin::symmetric(6, 5)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                block(ui);
+            });
         } else if !v.target_msg.is_empty() {
             theme::block(ui, &[(vec![fmt::plain(v.target_msg.clone())], 1)], v.target_tip.as_deref());
         }

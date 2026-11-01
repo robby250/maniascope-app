@@ -1,6 +1,6 @@
 [package]
 name = "ms-app"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 
 [[bin]]
@@ -11,11 +11,11 @@ path = "src/main.rs"
 ms-calc = { path = "../ms-calc" }
 ms-data = { path = "../ms-data" }
 ms-model = { path = "../ms-model" }
+ms-osumem = { path = "../ms-osumem" }
 ms-rec = { path = "../ms-rec" }
 serde_json = "1"
 sha2 = "0.10"
 ureq = "2"
-tungstenite = "0.26"
 rusqlite = { version = "0.32", features = ["bundled"] }
 eframe = { version = "0.37", default-features = false, features = ["glow", "x11", "wayland", "accesskit", "clipboard", "default_fonts", "system_fonts"] }
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
@@ -24,4 +24,5 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 egui_kittest = "0.37"
 
 [target.'cfg(windows)'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["wgpu"] }
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

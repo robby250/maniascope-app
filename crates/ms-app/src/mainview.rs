@@ -223,7 +223,9 @@ impl App {
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.horizontal(|ui| {
-                let foot = self.foot.clone();
+                // Drawn here: the watcher replaces self.foot on every status, which erased a stored notice.
+                let continuing = self.web.continued && self.web.info.as_ref().is_some_and(|i| i.running);
+                let foot = [self.foot.as_str(), if continuing { "website charts continuing" } else { "" }].iter().filter(|t| !t.is_empty()).copied().collect::<Vec<_>>().join(" · ");
                 if self.local.is_some() && ui.button("Follow osu!").clicked() {
                     self.local = None;
                     self.refresh();

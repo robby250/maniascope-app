@@ -8,7 +8,6 @@ mod public;
 mod settings;
 mod statsview;
 mod theme;
-mod tosu;
 mod viewer;
 mod watcher;
 mod windows;
@@ -152,10 +151,14 @@ impl eframe::App for Shell {
         };
         egui::CentralPanel::default().frame(egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 2 })).show(ui, |ui| app.main_ui(ui));
         app.track_window(&ctx);
-        if app.s.recs_open {
-            let (w, h) = app.s.recs_win;
+        if !app.s.recs_open {
+            app.recs_opened = None;
+        } else {
+            // Kept from opening: fed the tracked values, egui re-sends every change as a resize or move on each repaint, and
+            // repaints run constantly in game (Less: only this window, only in game, only once moved and resized).
+            let ((w, h), at) = *app.recs_opened.get_or_insert((app.s.recs_win, app.s.recs_pos));
             let mut b = ViewportBuilder::default().with_title("ManiaScope — Playlist").with_inner_size([w, h]).with_app_id("maniascope");
-            if let Some(p) = app.s.recs_pos {
+            if let Some(p) = at {
                 b = b.with_position(p); // Windows/X11 only: Wayland ignores it (a compositor window rule places them there)
             }
             if app.s.keep_above {
@@ -224,9 +227,17 @@ fn main() {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(ICON) {
         view = view.with_icon(icon);
     }
-    let options = eframe::NativeOptions { viewport: view, renderer: eframe::Renderer::Glow, ..Default::default() };
-    if let Err(e) = eframe::run_native("ManiaScope", options, Box::new(|_| Ok(Box::new(Shell { app: None, error: None })))) {
-        eprintln!("ManiaScope could not start: {e}");
+    // Windows: DirectX first. A VM or remote desktop has no OpenGL 2 ("egui_glow requires opengl 2.0+").
+    #[cfg(windows)]
+    let renderers = [eframe::Renderer::Wgpu, eframe::Renderer::Glow];
+    #[cfg(not(windows))]
+    let renderers = [eframe::Renderer::Glow];
+    for renderer in renderers {
+        let options = eframe::NativeOptions { viewport: view.clone(), renderer, ..Default::default() };
+        match eframe::run_native("ManiaScope", options, Box::new(|_| Ok(Box::new(Shell { app: None, error: None })))) {
+            Ok(()) => break,
+            Err(e) => eprintln!("ManiaScope could not start with {renderer}: {e}"),
+        }
     }
     lifecycle("application loop exited");
 }

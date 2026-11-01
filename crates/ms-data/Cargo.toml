@@ -15,4 +15,3 @@ serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 ureq = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }

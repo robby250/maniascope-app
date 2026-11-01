@@ -3,6 +3,7 @@
 //! identity, not a song-search keyword.
 use crate::catalog::Pick;
 use ms_data::paths;
+use ms_osumem::process::exes;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -43,45 +44,14 @@ pub fn song_search(p: &Pick, client: &str) -> String {
     p.bid.filter(|&b| b > 0).map_or_else(|| p.title.trim().to_string(), |b| b.to_string())
 }
 
-/// Full paths of the running osu!.exe processes. lazer and stable share that file name.
-#[cfg(windows)]
-fn osu_exes() -> Vec<PathBuf> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::ProcessStatus::EnumProcesses;
-    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
-    let (mut pids, mut used) = (vec![0u32; 16384], 0u32);
-    // SAFETY: the buffers outlive the calls, and every opened handle is closed.
-    unsafe {
-        if EnumProcesses(pids.as_mut_ptr(), (pids.len() * 4) as u32, &mut used) == 0 {
-            return Vec::new();
-        }
-        let mut found = Vec::new();
-        for &pid in &pids[..used as usize / 4] {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle.is_null() {
-                continue;
-            }
-            let (mut name, mut size) = (vec![0u16; 32768], 32768u32);
-            if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, name.as_mut_ptr(), &mut size) != 0 {
-                let path = PathBuf::from(String::from_utf16_lossy(&name[..size as usize]));
-                if path.file_name().is_some_and(|n| n.eq_ignore_ascii_case("osu!.exe")) {
-                    found.push(path);
-                }
-            }
-            CloseHandle(handle);
-        }
-        found
-    }
+/// The tosu the player runs themselves (Windows: its in-game overlay is Windows only).
+pub fn running_tosu() -> Option<PathBuf> {
+    exes("tosu.exe").into_iter().next().map(|e| e.1)
 }
 
-#[cfg(not(windows))]
-fn osu_exes() -> Vec<PathBuf> {
-    Vec::new()
-}
-
-/// The active client's running osu!.exe (Windows); stable's sits beside its osu!.db.
+/// The active client's running osu!.exe (Windows; lazer and stable share the name); stable's sits beside its osu!.db.
 fn client_exe(client: &str) -> Option<PathBuf> {
-    osu_exes().into_iter().find(|e| e.with_file_name("osu!.db").is_file() == (client == "stable"))
+    exes("osu!.exe").into_iter().map(|e| e.1).find(|e| e.with_file_name("osu!.db").is_file() == (client == "stable"))
 }
 
 /// The active client is running (stable is osu!.exe under Wine).

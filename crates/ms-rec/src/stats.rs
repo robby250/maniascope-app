@@ -135,7 +135,14 @@ fn fit_line(points: &[(f64, f64, f64)]) -> Option<(f64, f64)> {
     line(points)
 }
 
-/// `fit` no flatter than `slope`, the player's main keymode's: a side keymode's few plays sit near one difficulty, so its own
+/// The keymode whose slope `keys` may take: the most played above it, if played more than `keys` itself. Skill carries down the
+/// keymodes, never up (user 2026-11-01: "7k skill translates to 4k but 4k skill means nothing in 7k", "same for 7k->10k").
+fn slope_source(keys: i64, plays: &[(i64, usize)]) -> Option<i64> {
+    let own = plays.iter().find(|p| p.0 == keys).map_or(0, |p| p.1);
+    plays.iter().filter(|p| p.0 > keys && p.1 > own).max_by_key(|p| p.1).map(|p| p.0)
+}
+
+/// `fit` no flatter than `slope`, a more played higher keymode's: a side keymode's few plays sit near one difficulty, so its own
 /// slope reads flat and the rating runs off (the user's 6K at d 0.39: Level over 7K, the dan past the top of the ladder).
 /// The line stays through the plays. Too few plays for a fit of their own still get one, down to THIN_LINE.
 fn steepened(points: &[(f64, f64, f64)], fit: Option<(f64, f64)>, slope: Option<f64>) -> Option<(f64, f64)> {
@@ -328,15 +335,14 @@ pub fn build(rec: &Engine, db: &Db) -> Result<Profile> {
     let month = crate::evidence::now_months();
     let mut pages = BTreeMap::new();
     let of_keys = |keys: i64| usable.iter().filter(|r| r.keys == keys).copied().collect::<Vec<&Evidence>>();
-    // The keymode the player plays most sets the slope for the rest.
-    let main = SUPPORTED_KEYS.filter(|k| ctx.fit.keys.contains(k)).max_by_key(|&k| of_keys(k).iter().filter(|r| r.src != "public" && r.completed).count());
+    let plays: Vec<(i64, usize)> = SUPPORTED_KEYS.filter(|k| ctx.fit.keys.contains(k)).map(|k| (k, of_keys(k).iter().filter(|r| r.src != "public" && r.completed).count())).collect();
     let overall_only = ["overall".to_string()];
-    let main_slope = |fit: &dyn Fn(&[(f64, f64, f64)]) -> Option<(f64, f64)>| main.and_then(|k| ctx.calibration(&of_keys(k), &overall_only, fit).get("overall").map(|l| l.1));
-    let slope = main_slope(&fit_line);
-    let peak_slope = main_slope(&|p| peak_line(p, None));
+    let slope_of = |k: i64, fit: &dyn Fn(&[(f64, f64, f64)]) -> Option<(f64, f64)>| ctx.calibration(&of_keys(k), &overall_only, fit).get("overall").map(|l| l.1);
     for keys in SUPPORTED_KEYS {
         let rows = of_keys(keys);
-        let (slope, peak_slope) = if main == Some(keys) { (None, None) } else { (slope, peak_slope) };
+        let source = slope_source(keys, &plays);
+        let slope = source.and_then(|k| slope_of(k, &fit_line));
+        let peak_slope = source.and_then(|k| slope_of(k, &|p| peak_line(p, None)));
         // Many retries/rates of one chart are not independent coverage. Choose the highest played difficulty as its
         // representative, not its best accuracy.
         let mut charts: HashMap<&str, &Evidence> = HashMap::default();
@@ -507,7 +513,7 @@ pub fn current(profile: &Profile, n: &Now, rec: &Engine) -> Current {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_line, peak_line, steepened};
+    use super::{fit_line, peak_line, slope_source, steepened};
     use super::crossing;
 
     #[test]
@@ -526,6 +532,17 @@ mod tests {
         let (full, slope) = fit_line(&points(15)).unwrap();
         let (c, d) = peak_line(&points(15), None).unwrap();
         assert!(d == slope && (c - (full - 0.6 + super::GRIND)).abs() < 1e-9, "{c} {d}");
+    }
+
+    #[test]
+    fn a_slope_only_comes_from_a_higher_keymode_played_more() {
+        let plays = [(4, 300), (6, 50), (7, 9000), (8, 20), (10, 4000)];
+        assert_eq!(slope_source(4, &plays), Some(7));
+        assert_eq!(slope_source(6, &plays), Some(7));
+        assert_eq!(slope_source(7, &plays), None, "the most played keymode keeps its own");
+        assert_eq!(slope_source(8, &plays), Some(10), "7K is below it");
+        assert_eq!(slope_source(10, &plays), None, "nothing above it");
+        assert_eq!(slope_source(7, &[(4, 900), (7, 30)]), None, "4K skill means nothing in 7K");
     }
 
     #[test]

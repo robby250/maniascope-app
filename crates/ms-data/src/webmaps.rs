@@ -640,12 +640,23 @@ pub fn crawl(keys: &HashSet<i64>, stars: Option<(f64, f64)>, check: bool, full: 
 
 /// {key: value} of the crawl's saved state, for the app's window.
 pub fn state(db: &Connection) -> BTreeMap<String, Value> {
-    ["progress", "want_keys", "stars", "checked"].iter().filter_map(|k| Some((k.to_string(), kv_get(db, k)?))).collect()
+    ["progress", "want_keys", "stars", "checked", "reopen", "command"].iter().filter_map(|k| Some((k.to_string(), kv_get(db, k)?))).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_carries_what_the_app_needs_to_resume_a_paused_batch() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute("CREATE TABLE kv(k TEXT PRIMARY KEY, v TEXT)", []).unwrap();
+        kv_set(&db, "reopen", &json!(true)).unwrap();
+        kv_set(&db, "command", &json!("crawl")).unwrap();
+        let s = state(&db);
+        assert_eq!(s.get("reopen"), Some(&json!(true)));
+        assert_eq!(s.get("command"), Some(&json!("crawl")));
+    }
 
     #[test]
     fn rates_out_of_reach_are_never_loaded_and_two_anchor_a_window() {

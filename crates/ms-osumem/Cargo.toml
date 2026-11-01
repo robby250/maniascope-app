@@ -1,0 +1,13 @@
+[package]
+name = "ms-osumem"
+version = "1.0.0"
+edition = "2021"
+license = "LGPL-3.0-only"
+description = "Reads the selected map, mods and play state from the osu! process, ported from tosu v4.26.3 (LGPL-3.0, see LICENSE-tosu)"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

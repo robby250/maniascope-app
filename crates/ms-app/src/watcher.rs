@@ -1,29 +1,28 @@
-//! Observing the game: tosu's WebSocket first, lazer's log as the rate-less fallback. Emits an observation whenever the
+//! Observing the game: its memory first (ms-osumem, tosu's v2 frame shape), lazer's log as the rate-less fallback. Emits an observation whenever the
 //! selection, rate or connection changes; tracks each attempt from gameplay to its result.
 use ms_data::feedback::{constant_speed, rate_from_mods};
 use ms_data::imports::{stable_link, stable_songs};
 use ms_data::paths::{lazer_data, local_file, long_path, stable_data, stable_store};
 use ms_data::store::{now, timestamp};
+use ms_osumem::Reader;
 use ms_rec::navigation::game_running;
 use ms_rec::worker::{Queue, Task};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
-use tungstenite::{Message, WebSocket};
 
-pub const TOSU_HOST: &str = "127.0.0.1:24050";
-const GAMEPLAY_FRAME: Duration = Duration::from_millis(300); // tosu pushes every POLL_RATE; the clock needs 3 Hz
+const GAMEPLAY_FRAME: Duration = Duration::from_millis(300); // the clock needs 3 Hz
+const SELECT_FRAME: Duration = Duration::from_millis(30);
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Obs {
-    pub source: Option<&'static str>, // "tosu" | "log"
+    pub source: Option<&'static str>, // "game" | "log"
     pub path: Option<PathBuf>,
     pub rate: Option<f64>, // None: unknown, never No Mod
     pub cs: bool,
@@ -41,7 +40,7 @@ pub enum Event {
 }
 
 fn waiting() -> Obs {
-    Obs { source: Some("tosu"), note: "Waiting for osu!: start it and select a mania map".into(), ..Obs::default() }
+    Obs { source: Some("game"), note: "Waiting for osu!: start it and select a mania map".into(), ..Obs::default() }
 }
 
 fn basename(p: Option<&PathBuf>) -> Option<String> {
@@ -63,31 +62,24 @@ pub struct Tracker {
     stable_root: Option<PathBuf>,
     stable_game: Option<String>,
     stable_files: HashMap<(PathBuf, Option<SystemTime>, u64), PathBuf>,
-    pub replay_watching: fn() -> bool,
 }
 
-/// stable: tosu's StreamCompanion status (its v2 JSON lacks the flag) is 8 while a replay plays.
 fn file_is_mania(path: &Path) -> bool {
     std::fs::read(path).is_ok_and(|b| String::from_utf8_lossy(&b).lines().any(|l| l.strip_prefix("Mode:").is_some_and(|m| m.trim() == "3")))
 }
 
-fn replay_status() -> bool {
-    ureq::get(&format!("http://{TOSU_HOST}/json/sc")).timeout(Duration::from_millis(600)).call().ok()
-        .and_then(|r| r.into_string().ok()).and_then(|s| serde_json::from_str::<Value>(&s).ok()).is_some_and(|v| v["status"] == 8)
-}
-
 impl Tracker {
     pub fn new(tx: Sender<Event>, q: Arc<Queue>, play: Arc<Mutex<Option<Value>>>) -> Tracker {
-        Tracker { tx, q, play, done: None, last_score: None, last: None, live: None, last_live: None, needs_import: false, disconnected: false, stable_root: None, stable_game: None, stable_files: HashMap::new(), replay_watching: replay_status }
+        Tracker { tx, q, play, done: None, last_score: None, last: None, live: None, last_live: None, needs_import: false, disconnected: false, stable_root: None, stable_game: None, stable_files: HashMap::new() }
     }
 
     fn send(&self, e: Event) {
         let _ = self.tx.send(e);
     }
 
-    /// One observation pass: tosu's state or nothing (`tosu` false: the log fallback's).
-    pub fn observed(&mut self, obs: Obs, tosu: bool) {
-        if !tosu || obs.path.is_none() {
+    /// One observation pass: the game's state or nothing (`game` false: the log fallback's).
+    pub fn observed(&mut self, obs: Obs, game: bool) {
+        if !game || obs.path.is_none() {
             self.needs_import = true;
             self.disconnected = true;
         } else if self.needs_import && self.play.lock().unwrap().is_none() {
@@ -157,7 +149,7 @@ impl Tracker {
                     p["end"] = json!(now());
                     self.q.put(if self.disconnected { Task::Void } else { Task::Abort(p) });
                 }
-                let own = d["client"] != "stable" || !(self.replay_watching)();
+                let own = d["client"] != "stable" || !d["game"]["replay"].as_bool().unwrap_or(false);
                 let p = json!({"sha": sha, "path": path.map(|p| p.to_string_lossy()), "own": own, "rate": rate_from_mods(mods).0, "t": now(), "pos": live, "progress": 0.,
                                "played_seconds": 0., "mods": mods.get("array").cloned().unwrap_or(Value::Null)});
                 self.q.put(Task::Start(p.clone()));
@@ -232,7 +224,7 @@ impl Tracker {
         self.send(Event::Score { score, path: path.clone(), fresh, attempt });
     }
 
-    /// One frame of /websocket/v2 or /json/v2.
+    /// One frame in tosu's v2 shape.
     pub fn frame(&mut self, d: &Value) -> Obs {
         self.live = None;
         if d.get("error").is_some_and(|e| !e.is_null()) || d.get("beatmap").is_none() {
@@ -244,11 +236,11 @@ impl Tracker {
         let unparsed = d["beatmap"]["time"]["lastObject"].as_f64() == Some(0.);
         let path = if reported || unparsed { self.chart(d).filter(|p| reported || file_is_mania(p)) } else { None };
         let mania = reported || path.is_some();
-        let Some(state) = d["state"]["name"].as_str() else { return Obs { source: Some("tosu"), note: "unexpected tosu payload".into(), ..Obs::default() } };
+        let Some(state) = d["state"]["name"].as_str() else { return Obs { source: Some("game"), note: "unexpected tosu payload".into(), ..Obs::default() } };
         self.track(&state.to_lowercase(), d, path.as_ref());
         if state == "resultScreen" {
             self.note_score(d, path.as_ref());
-            if let Some(last) = self.last.as_ref().filter(|o| o.source == Some("tosu")) {
+            if let Some(last) = self.last.as_ref().filter(|o| o.source == Some("game")) {
                 return last.clone(); // a past score's mods are not the selection
             }
         }
@@ -259,7 +251,7 @@ impl Tracker {
         }
         let list = mods.get("array").or(Some(mods)).and_then(Value::as_array).cloned();
         let note = if path.is_some() { note } else if mania { "selected map file not found".into() } else { "not an osu!mania map".into() };
-        Obs { source: Some("tosu"), path, rate, cs: constant_speed(mods), mods: list, bid: d["beatmap"]["id"].as_i64(), client: d["client"].as_str().map(str::to_string), note }
+        Obs { source: Some("game"), path, rate, cs: constant_speed(mods), mods: list, bid: d["beatmap"]["id"].as_i64(), client: d["client"].as_str().map(str::to_string), note }
     }
 }
 
@@ -281,7 +273,7 @@ impl LogTail {
 
     fn poll(&mut self, client: &str, tx: &Sender<Event>) -> Obs {
         if client == "stable" {
-            return Obs { note: "osu!stable needs tosu (starting it…)".into(), ..Obs::default() };
+            return Obs { note: "Waiting for osu!: start it and select a mania map".into(), ..Obs::default() };
         }
         if !game_running("lazer") { // an old log is not a live selection
             (self.log, self.display) = (None, None);
@@ -310,7 +302,7 @@ impl LogTail {
         let path = self.display.clone().and_then(|d| self.resolve(&d, tx));
         let note = match (&self.display, &path) {
             (Some(d), None) => format!("not in library index: {d}"),
-            _ => "no live rate without tosu".to_string(),
+            _ => "can't read this osu! version yet: no live rate".to_string(),
         };
         Obs { source: Some("log"), path, note, ..Obs::default() }
     }
@@ -320,7 +312,7 @@ impl LogTail {
         if path.is_none() && self.job.is_none() && self.reindexed.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
             self.reindexed = Some(Instant::now());
             let force = self.index.is_some();
-            let _ = tx.send(Event::Status("tosu unavailable — indexing library in background; recovering scores from lazer".into()));
+            let _ = tx.send(Event::Status("Can't read osu! — indexing library in background; recovering scores from lazer".into()));
             let display = display.to_string();
             self.job = Some(std::thread::spawn(move || {
                 let index = ms_data::lazer_index::load_or_build(force);
@@ -331,46 +323,22 @@ impl LogTail {
     }
 }
 
-fn connect() -> Option<WebSocket<TcpStream>> {
-    let addr = TOSU_HOST.to_socket_addrs().ok()?.next()?;
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(600)).ok()?;
-    stream.set_read_timeout(Some(Duration::from_millis(600))).ok()?;
-    let _ = stream.set_nodelay(true);
-    tungstenite::client(format!("ws://{TOSU_HOST}/websocket/v2").as_str(), stream).ok().map(|x| x.0)
-}
-
-/// Sleeps on the socket: no frame, no work. `client` reads the player's chosen client for the fallback's message.
+/// The game has no events to wait on: a read every SELECT_FRAME picks up a selection at once, every GAMEPLAY_FRAME in play, and
+/// with no game running a second between looks. `client` picks between two running clients.
 pub fn run(mut t: Tracker, halt: Arc<AtomicBool>, client: impl Fn() -> String) {
     let mut tail = LogTail { log: None, display: None, index: None, reindexed: None, job: None };
+    let mut reader = Reader::new();
     while !halt.load(Ordering::Relaxed) {
-        let Some(mut socket) = connect() else {
+        let Some(d) = reader.poll(&client()) else {
             t.live = None;
             let obs = tail.poll(&client(), &t.tx);
             t.observed(obs, false);
             std::thread::sleep(Duration::from_secs(1));
             continue;
         };
-        let mut handled: Option<Instant> = None;
-        while !halt.load(Ordering::Relaxed) {
-            match socket.read() {
-                Ok(Message::Text(text)) => {
-                    if t.live.is_some() && handled.is_some_and(|h| h.elapsed() < GAMEPLAY_FRAME) {
-                        continue; // gameplay: never spend CPU next to the game on frames nothing shows
-                    }
-                    handled = Some(Instant::now());
-                    let Ok(d) = serde_json::from_str::<Value>(&text) else { continue };
-                    let obs = t.frame(&d);
-                    t.observed(obs, true);
-                }
-                Ok(_) => {}
-                // No frame for a while: tosu is up without a game.
-                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-                    t.live = None;
-                    t.observed(waiting(), true);
-                }
-                Err(_) => break,
-            }
-        }
+        let obs = t.frame(&d);
+        t.observed(obs, true);
+        std::thread::sleep(if t.live.is_some() { GAMEPLAY_FRAME } else { SELECT_FRAME });
     }
 }
 
@@ -546,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_tosu_reconnects_with_an_import() {
+    fn a_game_coming_back_brings_an_import() {
         let (mut t, rx, q) = tracker();
         let c = chart();
         t.observed(waiting(), true);
@@ -554,23 +522,5 @@ mod tests {
         t.observed(o, true);
         assert_eq!(drain(&q), ["import"]);
         assert_eq!(rx.try_iter().filter(|e| matches!(e, Event::Obs(_))).count(), 2);
-    }
-
-    #[test]
-    fn websocket_frames_reach_the_tracker() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (s, _) = listener.accept().unwrap();
-            let mut ws = tungstenite::accept(s).unwrap();
-            ws.send(Message::text(json!({"error": "not_ready"}).to_string())).unwrap();
-            let _ = ws.close(None);
-        });
-        let stream = TcpStream::connect(addr).unwrap();
-        let (mut ws, _) = tungstenite::client(format!("ws://{addr}/websocket/v2").as_str(), stream).unwrap();
-        let Ok(Message::Text(text)) = ws.read() else { panic!("no frame") };
-        let (mut t, _rx, _q) = tracker();
-        assert_eq!(t.frame(&serde_json::from_str(&text).unwrap()).note, waiting().note);
-        server.join().unwrap();
     }
 }

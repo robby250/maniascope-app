@@ -727,6 +727,16 @@ mod list_tests {
     }
 
     #[test]
+    fn a_list_without_skill_settings_keeps_its_order() {
+        let rows: Vec<Choice> = (0..40).map(|i| choice(&format!("a{i}"), 20. + i as f64, "chords")).collect();
+        let p = prepared(rows, &[7]);
+        let order = |weights: Option<std::collections::HashMap<String, f64>>| ranked(&p, Ask { nps: false, weights, ..Ask::default() }).iter().map(|x| x.0.sha.clone()).collect::<Vec<_>>();
+        assert!(crate::skills::shares(&[], &Default::default(), 0.).is_none(), "no settings ask for no shares");
+        assert!(crate::skills::shares(&["chordjack".to_string(), "delay".to_string()], &Default::default(), 0.).is_none(), "equal sliders neither");
+        assert_eq!(order(None).len(), 40);
+    }
+
+    #[test]
     fn other_maps_take_their_slider_share_of_the_list() {
         let rows: Vec<Choice> = (0..100).map(|i| {
             let mut c = choice(&format!("a{i}"), 30., "chords");

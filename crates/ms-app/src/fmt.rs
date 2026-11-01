@@ -59,7 +59,7 @@ pub fn wanted_mod(rate: f64) -> &'static str {
 /// The picked map: [rate to set (green once osu! shows it) and expectation, title], so they never move.
 pub fn target_lines(c: &Pick, obs: &Obs, shown: &Shown) -> Vec<Line> {
     let wanted = wanted_mod(c.rate);
-    let known = obs.source == Some("tosu") && obs.rate.is_some();
+    let known = obs.source == Some("game") && obs.rate.is_some();
     let observed = obs.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let same = same_map(c, Some(&observed), None, obs.bid);
     let mods: Vec<String> = obs.mods.iter().flatten().filter_map(|m| m["acronym"].as_str().map(str::to_uppercase)).collect();

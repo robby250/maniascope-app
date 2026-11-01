@@ -7,6 +7,7 @@ pub const BG: Color32 = Color32::from_rgb(0x20, 0x23, 0x26);
 pub const VIEW: Color32 = Color32::from_rgb(0x14, 0x16, 0x18);
 pub const BUTTON: Color32 = Color32::from_rgb(0x29, 0x2c, 0x30);
 pub const ROW_HOVER: Color32 = Color32::from_rgb(0x2c, 0x3f, 0x4d);
+pub const ROW_CURRENT: Color32 = Color32::from_rgb(0x23, 0x3a, 0x34); // the pick being played, apart from the list under it
 pub const BORDER: Color32 = Color32::from_rgb(0x4c, 0x4e, 0x51);
 pub const TEXT: Color32 = Color32::from_rgb(0xfc, 0xfc, 0xfc);
 pub const DIM: Color32 = Color32::from_rgb(0xa1, 0xa9, 0xb1);

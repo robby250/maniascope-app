@@ -119,11 +119,9 @@ impl App {
             self.q.put(Task::WebUpdated); // new website charts join the open playlist without a restart
         }
         self.web.ready = Some(ready);
-        if let Some((command, keys, stars)) = info.reopen.as_ref().filter(|_| !info.running) {
+        if let Some((command, keys, stars)) = info.reopen.as_ref().filter(|_| !info.running && self.web.child.is_none()) { // the child clears the flag a moment after it starts
             self.web_run(command, keys, *stars);
             self.web.continued = true;
-            self.status_text = "Website charts: continuing the batch you left unfinished (⋯ → Website charts to pause it)".to_string();
-            self.update_status();
         }
         let child = self.web.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
         self.web.next = (self.open.web || info.running || child).then(|| Instant::now() + Duration::from_secs(2));
@@ -347,7 +345,7 @@ impl App {
             self.request_save();
         }
         let mut above = self.s.keep_above;
-        if ui.checkbox(&mut above, "Always on top").on_hover_text("Keep ManiaScope and the playlist above other windows. Not above exclusive fullscreen; for that use the in-game overlay.").changed() {
+        if ui.checkbox(&mut above, "Always on top").on_hover_text("Keep ManiaScope and the playlist above other windows. Not above exclusive fullscreen; for that add ManiaScope to tosu's in-game overlay.").changed() {
             self.s.keep_above = above;
             self.request_save();
             ui.ctx().send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::WindowLevel(level(above)));
@@ -355,13 +353,9 @@ impl App {
         }
         if cfg!(windows) {
             let mut on = self.s.overlay;
-            if ui.checkbox(&mut on, "In-game overlay (tosu)").on_hover_text("Show this window inside osu!, also in fullscreen, through tosu's in-game overlay").changed() {
-                if on { self.open.overlay_confirm = true; } else { self.toggle_overlay(false); }
+            if ui.checkbox(&mut on, "ManiaScope in your tosu overlay").on_hover_text("If you run tosu yourself: ManiaScope adds its page there. In osu! press Ctrl+Shift+Space, right-click, add ManiaScope, then press Ctrl+Shift+Space again.").changed() {
+                self.toggle_overlay(on);
             }
-        }
-        if !crate::tosu::installed() && ui.button("Download tosu (rate tracking)").on_hover_text("Follows the exact rate you pick in osu!. Official tosu release from GitHub (~40 MB).").clicked() {
-            self.tosu.install();
-            close = true;
         }
         if ui.button("osu! profile…").on_hover_text("Your username: your public top 100 plays fill in bests that lazer doesn't have locally").clicked() {
             self.open.profile = if self.open.profile.is_some() { None } else { Some(false) };
@@ -496,23 +490,6 @@ impl App {
         let above = self.s.keep_above;
         if self.open.profile == Some(true) && window(ctx, "profile", "Welcome to ManiaScope", [380., 150.], above, |ui| self.profile_ui(ui)) {
             self.open.profile = None;
-        }
-        if self.open.overlay_confirm {
-            let (mut yes, mut no) = (false, false);
-            let closed = window(ctx, "overlay", "Turn on tosu's in-game overlay?", [420., 210.], above, |ui| {
-                ui.label(RichText::new("Turn on tosu's in-game overlay?").color(egui::Color32::from_rgb(0xf6, 0x74, 0x00)));
-                ui.label("tosu draws inside osu! by loading a DLL into the game, so fullscreen works. It downloads its overlay program the first time. tosu offers this openly, but osu! has no official statement on it, so use it at your own risk.\n\nAfter it starts: in osu!, press Ctrl+Shift+Space, right-click, add ManiaScope, then press Ctrl+Shift+Space again.");
-                ui.horizontal(|ui| {
-                    yes = ui.button("OK").clicked();
-                    no = ui.button("Cancel").clicked();
-                });
-            });
-            if yes {
-                self.toggle_overlay(true);
-            }
-            if yes || no || closed {
-                self.open.overlay_confirm = false;
-            }
         }
         if self.open.menu {
             self.open.menu &= !window(ctx, "menu", "ManiaScope — Settings", [430., 470.], above, |ui| self.menu_ui(ui));

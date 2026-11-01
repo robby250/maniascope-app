@@ -1,7 +1,6 @@
 //! The app's state and everything that is not drawing: messages from the worker, the watcher and the analysis thread.
 use crate::fmt::{self, Line};
 use crate::settings::{Ui as Settings, MODES};
-use crate::tosu::Tosu;
 use crate::viewer::{self, Analysis, Viewer};
 use crate::watcher::{self, Event, Obs, Tracker};
 use eframe::egui;
@@ -31,8 +30,6 @@ pub enum Msg {
     Rec(Out),
     Analysed(viewer::Done),
     Raise,
-    Status(String),
-    TosuReady,
     Web(Box<crate::windows::WebInfo>),
 }
 
@@ -88,7 +85,6 @@ pub struct Open {
     pub menu: bool,
     pub profile: Option<bool>, // first run
     pub profile_text: String,
-    pub overlay_confirm: bool,
     pub history: bool,
     pub history_only: bool,
     pub history_text: String,
@@ -134,9 +130,10 @@ pub struct App {
     pub bg_progress: Option<(usize, usize)>,
     pub blocker: Option<String>,
     pub foot: String,
+    pub recs_opened: Option<((f32, f32), Option<(f32, f32)>)>,
     pub open: Open,
     pub save_at: Option<Instant>,
-    pub tosu: Tosu,
+    pub page: Option<std::path::PathBuf>, // where the overlay page went, in the player's own tosu
     pub tracking: Option<bool>, // None: release builds have no pause switch
     pub debug: bool,
     pub web: crate::windows::WebView,
@@ -166,7 +163,7 @@ fn tracking_switch(db: &Db, debug: bool) -> Option<bool> {
 }
 
 impl App {
-    /// The window's state, with no worker, watcher or tosu behind it.
+    /// The window's state, with no worker or watcher behind it.
     fn bare(ctx: &egui::Context, s: Settings, db_path: &std::path::Path) -> Result<App, String> {
         let (tx, rx) = channel();
         let mail = Mail { tx, ctx: ctx.clone() };
@@ -182,7 +179,7 @@ impl App {
             s, rx, mail: mail.clone(), q: q.clone(), halt: halt.clone(), play: play.clone(), busy: busy.clone(), game: game.clone(), client_name: Arc::new(Mutex::new(client.clone())), viewer: Arc::default(), db,
             obs: Obs { note: "starting…".into(), ..Obs::default() }, local: None, shown: None, pending: None, generation: 0, requested: None, live: None, card: None, card_note: None,
             views: MODES.into_iter().map(|m| (m, view())).collect(), stats: None, stats_open: false, stats_keys: Some(7), stats_wait: None, expanded: HashSet::new(), chips_open: HashSet::new(), revision: 0, selection_id: 0,
-            units: Shown { client, miss_ratio }, result: None, status_text: String::new(), bg_progress: None, blocker: None, foot: String::new(), open: Open::default(), save_at: None, tosu: Tosu::new(mail.clone()), tracking, debug,
+            units: Shown { client, miss_ratio }, result: None, status_text: String::new(), bg_progress: None, blocker: None, foot: String::new(), recs_opened: None, open: Open::default(), save_at: None, page: None, tracking, debug,
             web: Default::default(), compare: Default::default(), resized: None, clipboard: arboard::Clipboard::new().ok(), keys_checked: None,
         };
         app.auto_keys(true);
@@ -197,7 +194,6 @@ impl App {
     pub fn new(ctx: &egui::Context) -> Result<App, String> {
         let db_path = rec_dir().join("rec.db");
         let mut app = App::bare(ctx, Settings::load(), &db_path)?;
-        app.tosu.start(app.s.overlay);
         app.sync_rec();
         // The worker: the UI thread never waits on it.
         let (mail, q, halt, play, busy, game) = (app.mail.clone(), app.q.clone(), app.halt.clone(), app.play.clone(), app.busy.clone(), app.game.clone());
@@ -460,12 +456,8 @@ impl App {
             self.q.put(Task::Selected { path: obs.path.clone(), rate: obs.rate, mods: obs.mods.clone() });
             self.on_rec(Out::Card { c: None, note: obs.path.as_ref().map(|_| "Updating selected-map prediction…".to_string()), path: None, rate: None });
         }
-        self.game.store(obs.source == Some("tosu") && obs.path.is_some(), Ordering::Relaxed);
-        let down = obs.source != Some("tosu");
+        self.game.store(obs.source == Some("game") && obs.path.is_some(), Ordering::Relaxed);
         self.obs = obs;
-        if down {
-            self.tosu.start(self.s.overlay); // helper died or was never up: bring it back
-        }
         self.refresh();
     }
 
@@ -578,17 +570,14 @@ impl App {
         let o = &self.obs;
         self.foot = if self.local.is_some() {
             "local file — osu! selection ignored".to_string()
-        } else if o.source == Some("tosu") && o.path.is_some() {
+        } else if o.source == Some("game") && o.path.is_some() {
             // Working is silent: this line is for what needs a look (user 2026-11-01).
             [o.note.as_str(), if o.rate.is_none() { "showing 1.00×" } else { "" }].iter().filter(|t| !t.is_empty()).copied().collect::<Vec<_>>().join(" · ")
         } else if o.source == Some("log") {
-            format!("lazer via log — {}{}", o.note, if o.path.is_some() { " · showing 1.00×, tosu reads the real rate" } else { "" })
+            format!("lazer via log — {}{}", o.note, if o.path.is_some() { " · showing 1.00×" } else { "" })
         } else {
             o.note.clone()
         };
-        if self.web.continued && self.web.info.as_ref().is_some_and(|i| i.running) {
-            self.foot = [self.foot.as_str(), "website charts continuing"].iter().filter(|t| !t.is_empty()).copied().collect::<Vec<_>>().join(" · ");
-        }
     }
 
     pub fn analysis(&self) -> Option<&Arc<Analysis>> {
@@ -615,13 +604,18 @@ impl App {
         if let Some(p) = &self.views[self.mode()].target {
             state["pick"] = json!({"title": p.title, "expected": format!("~{:.1}%", 100. * self.units.acc(p.pred.acc_mid)), "set": format!("{:.2}× {}", p.rate, fmt::wanted_mod(p.rate))});
         }
-        ms_data::tools::write_overlay_state(&state);
+        // Only a tosu the player runs themselves: ManiaScope no longer needs one.
+        let Some(dir) = ms_rec::navigation::running_tosu().map(|exe| ms_data::tools::overlay_dir(&exe)) else { return };
+        if self.page.as_ref() != Some(&dir) {
+            let _ = ms_data::tools::install_overlay(&dir);
+            self.page = Some(dir.clone());
+        }
+        ms_data::tools::write_overlay_state(&dir, &state);
     }
 
     pub fn toggle_overlay(&mut self, on: bool) {
         self.s.overlay = on;
         self.request_save();
-        self.tosu.restart(on);
         self.overlay_update();
     }
 
@@ -636,9 +630,7 @@ impl App {
             match m {
                 Msg::Rec(o) => self.on_rec(o),
                 Msg::Analysed(d) => self.on_analysed(d),
-                Msg::Status(t) => self.foot = t,
                 Msg::Raise => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
-                Msg::TosuReady => self.tosu.start(self.s.overlay),
                 Msg::Web(info) => self.web_show(*info),
                 Msg::Watch(Event::Obs(o)) => self.on_obs(o),
                 Msg::Watch(Event::Status(t)) => self.foot = t,
@@ -666,7 +658,6 @@ impl App {
         self.s.save();
         self.halt.store(true, Ordering::Relaxed);
         self.viewer.stop();
-        self.tosu.stop();
         self.web_pause();
     }
 }
