@@ -202,16 +202,17 @@ impl Builder {
     /// Worker._restore_local: the last list's references under this session, before the library is read. Saved choices
     /// are only chart/rate references, so they survive a calculator update and predictions are always current.
     pub fn restore(&mut self, db: &Db, r: &Request, refs: &[(String, f64)], installed: &[Arc<Inst>]) -> Result<(Arc<ChoiceList>, Arc<HashMap<String, Arc<Inst>>>)> {
-        let by_sha: HashMap<&str, &Arc<Inst>> = installed.iter().map(|i| (i.sha256.as_str(), i)).collect();
+        self.catalog = installed.iter().map(|i| (i.sha256.clone(), i.clone())).collect();
+        self.apply_converts(db, &r.converts)?; // a saved list is half converts on 10K, none with a library row
         let mut source = crate::evidence::FeatureSource { public: r.public.clone(), calc: r.calc.clone(), cache: Default::default() };
         let mut store = FeatStore::new(skills::feat_trees(), PROFILE.iter().map(|s| s.to_string()).collect(), r.model.c.clone(), STRUCTURE_VERSION).expect("skill trees");
         let (mut catalog, mut order): (HashMap<String, Arc<Inst>>, Vec<String>) = Default::default();
         for (sha, rate) in refs {
-            let Some(inst) = by_sha.get(sha.as_str()) else { continue };
+            let Some(inst) = self.catalog.get(sha) else { continue };
             let key = source.key(sha, *rate);
             if let Some(f) = source.lookup(db, &key)? {
                 store.put(sha, *rate, &f);
-                if catalog.insert(sha.clone(), (*inst).clone()).is_none() {
+                if catalog.insert(sha.clone(), inst.clone()).is_none() {
                     order.push(sha.clone());
                 }
             }
@@ -340,7 +341,12 @@ impl Builder {
         }
         let (library, _) = library(db, &r.client)?;
         let (none, root) = (HashMap::default(), crate::catalog::local_origin(&r.client).1);
-        let jobs = crate::converts::pending(db, &library, web, &self.installed_md5, &r.converts, reaches.unwrap_or(&none), &root, self.index_size)?;
+        let mut source = crate::evidence::FeatureSource { public: r.public.clone(), calc: r.calc.clone(), cache: Default::default() };
+        let mut rated = |sha: &str| {
+            let key = source.key(sha, 1.);
+            source.lookup(db, &key).ok().flatten().map(|f| f.f("overall"))
+        };
+        let jobs = crate::converts::pending(db, &library, web, &self.installed_md5, &r.converts, reaches.unwrap_or(&none), &mut rated, &root, self.index_size)?;
         if jobs.is_empty() {
             return Ok(false);
         }
@@ -417,7 +423,7 @@ impl Builder {
         let web_path = web_dir().join("web.msp");
         let web_mtime = std::fs::metadata(&web_path).and_then(|m| m.modified()).ok();
         let web = web_mtime.and_then(|_| Web::open(&web_path).ok());
-        let reaches = web_mtime.map(|_| reach(&r.model, &allowed, r.target, &r.model.c));
+        let reaches = (web_mtime.is_some() || !r.converts.is_empty()).then(|| reach(&r.model, &allowed, r.target, &r.model.c));
         let window = reaches.as_ref().map(|x| {
             let mut v: Vec<(i64, u64, u64)> = x.iter().map(|(k, (a, b))| (*k, a.to_bits(), b.to_bits())).collect();
             v.sort_unstable();

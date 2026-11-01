@@ -1,13 +1,10 @@
-//! Saved maps and comparative judgments, local evidence for calibration: ~/.config/maniascope/feedback.json (per
+//! Local evidence for calibration, read by `calib feedback`: ~/.config/maniascope/feedback.json (per
 //! machine). An entry is a chart identity (sha256 of the file) at a rate; judgments compare two entries.
 use crate::imports::score_allowed;
 use crate::paths;
 use crate::store::{local_stamp, Db};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-
-pub const VERDICTS: [&str; 4] = ["A harder", "about equal", "B harder", "unsure"];
 
 fn file() -> PathBuf {
     paths::config().join("feedback.json")
@@ -72,15 +69,6 @@ pub fn chart_path(m: &Value) -> Option<PathBuf> {
     paths::local_file(m["sha256"].as_str()?, &paths::lazer_data())
 }
 
-/// Save a chart at a rate; returns its id.
-pub fn add_map(db: &mut Value, path: &Path, chart: &Value, rate: f64) -> std::io::Result<String> {
-    let sha: String = Sha256::digest(std::fs::read(path)?).iter().map(|b| format!("{b:02x}")).collect();
-    let id = entry_id(&sha, rate);
-    db["maps"][&id] = json!({"sha256": sha, "rate": (rate * 100.).round() / 100., "path": path.to_string_lossy(), "keys": chart["keys"], "artist": chart["artist"], "title": chart["title"],
-                             "version": chart["version"], "creator": chart["creator"]});
-    Ok(id)
-}
-
 /// Record one of the user's own results (from tosu's results screen); false if known.
 pub fn add_score(db: &mut Value, score: &Value, path: &str, store: &Db) -> rusqlite::Result<bool> {
     if !score_allowed(store, score, None, false)? {
@@ -101,17 +89,4 @@ pub fn add_score(db: &mut Value, score: &Value, path: &str, store: &Db) -> rusql
 
 pub fn label(m: &Value) -> String {
     format!("{} [{}] · {}K · {:.2}×", m["title"].as_str().unwrap_or(""), m["version"].as_str().unwrap_or(""), m["keys"], m["rate"].as_f64().unwrap_or(0.))
-}
-
-pub fn remove_map(db: &mut Value, id: &str) {
-    db["maps"].as_object_mut().map(|m| m.shift_remove(id));
-    db["judgments"].as_array_mut().map(|j| j.retain(|x| x["a"] != id && x["b"] != id));
-}
-
-/// Record (or correct) the judgment for the pair a/b.
-pub fn judge(db: &mut Value, a: &str, b: &str, verdict: &str, note: &str, model: &Value) {
-    let pair = |j: &Value| (j["a"] == a && j["b"] == b) || (j["a"] == b && j["b"] == a);
-    let list = db["judgments"].as_array_mut().expect("load made it a list");
-    list.retain(|j| !pair(j));
-    list.push(json!({"a": a, "b": b, "verdict": verdict, "note": note, "model_when_judged": model, "date": local_stamp()[..10]}));
 }

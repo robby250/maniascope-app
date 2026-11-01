@@ -1,4 +1,25 @@
 {
+  "7a35f25f603a": {
+    "joint": {
+      "modes": {
+        "10": null
+      }
+    }
+  },
+  "faff7ab286c4": {
+    "joint": {
+      "modes": {
+        "4": null,
+        "5": null,
+        "6": null,
+        "8": null,
+        "10": null
+      }
+    }
+  },
+  "a4e17d09c2b6": {
+    "joint": null
+  },
   "3c695ee7a23f": {
     "modes": {
       "10": {
@@ -34,6 +55,7 @@
           ]
         }
       }
-    }
+    },
+    "joint": null
   }
 }

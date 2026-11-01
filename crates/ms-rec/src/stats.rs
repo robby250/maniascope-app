@@ -25,6 +25,7 @@ const CALIBRATION_MIN: f64 = 20.;      // effective recent plays for a skill's o
 const PEAK_SHARE: f64 = 0.5;           // of a player's plays, measured against expectation; a raw accuracy cut would keep only the easy charts
 const GRIND: f64 = -0.15;              // log(1 − acc) a ground course gains on those plays: the user's 7K history lands on Gamma, their stated level
 const THIN_LINE: f64 = 5.;              // effective recent plays that can still carry the main keymode's slope
+const CARRY_LOSS: f64 = 0.25;           // Level lost per keymode going down: the user's and iess's pairs give no gap, so the smallest step
 const MIN_RECENT: f64 = 3.;             // charts, halved per year: below it and without a line of its own a keymode has no Level
 const MIN_CHARTS: usize = 10;          // charts before a skill gets a number (4K LN from 3 charts read "Yume+", user 2026-10-30)
 const HISTORY_BW: f64 = 1.;            // months: Gaussian smoothing of the monthly history (a peak month stays visible)
@@ -80,6 +81,7 @@ pub struct Page {
     pub mash_maps: usize,
     pub diagnostics: Vec<(String, f64, usize)>, // skill, delta, maps
     pub session: bool,
+    pub source: Option<i64>, // the keymode whose skill carries down to this one
 }
 
 pub struct Profile {
@@ -140,6 +142,25 @@ fn fit_line(points: &[(f64, f64, f64)]) -> Option<(f64, f64)> {
 fn slope_source(keys: i64, plays: &[(i64, usize)]) -> Option<i64> {
     let own = plays.iter().find(|p| p.0 == keys).map_or(0, |p| p.1);
     plays.iter().filter(|p| p.0 > keys && p.1 > own).max_by_key(|p| p.1).map(|p| p.0)
+}
+
+/// A Level between what its source keymode carries down and that keymode's own (user 2026-11-01: "higher keymodes skill
+/// translates to lower keymode (with a penalty) but not vice versa", "my 7k skill should be the highest").
+fn carried(level: f64, source: f64, steps: i64) -> f64 {
+    level.clamp(source - CARRY_LOSS * steps as f64, source)
+}
+
+/// Display only: predictions never read a Page. Highest keymode first, so a chain carries the already moved Level.
+pub fn carry_down(pages: &mut BTreeMap<i64, Page>) {
+    for keys in pages.keys().rev().copied().collect::<Vec<_>>() {
+        let Some(from) = pages[&keys].source else { continue };
+        let Some((value, current)) = pages.get(&from).and_then(|p| p.groups.get("overall")).map(|g| (g.value, g.current)) else { continue };
+        let Some(g) = pages.get_mut(&keys).and_then(|p| p.groups.get_mut("overall")) else { continue };
+        let (Some(own), Some(source)) = (g.value, value) else { continue }; // no Level of its own: stays hidden
+        let moved = carried(own, source, from - keys);
+        (g.value, g.low, g.high) = (Some(moved), g.low + moved - own, g.high + moved - own);
+        g.current = g.current.map(|c| current.map_or(c, |s| carried(c, s, from - keys)));
+    }
 }
 
 /// `fit` no flatter than `slope`, a more played higher keymode's: a side keymode's few plays sit near one difficulty, so its own
@@ -436,7 +457,7 @@ pub fn build(rec: &Engine, db: &Db) -> Result<Profile> {
         let local: Vec<&Evidence> = rows.iter().filter(|r| r.src != "public").copied().collect();
         let form = ctx.form_history(keys, &local);
         pages.insert(keys, Page { keys, order: names, history: history.clone(), now: month, dan_at, form, evidence: (local.len(), rows.len() - local.len(), rows.iter().map(|r| r.ts.unwrap_or(0.)).fold(0., f64::max)),
-                                  peak: history.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)), maps: charts.len(), plays: rows.len(),
+                                  peak: history.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)), maps: charts.len(), plays: rows.len(), source,
                                   mash_maps: charts.values().filter(|r| ctx.dict(r).and_then(|d| d.dict("sk")).is_some_and(|sk| sk.fget("mash", 0.) >= 0.3)).count(), groups, ..Page::default() });
     }
     // Only frozen pre-play predictions can support a model-error diagnosis. Collapse retries by exact chart, and require
@@ -508,13 +529,26 @@ pub fn current(profile: &Profile, n: &Now, rec: &Engine) -> Current {
         page.session = view.activation(keys, None) >= 1.5;
         pages.insert(keys, page);
     }
+    carry_down(&mut pages);
     Current { target: TARGET, pages, phase: n.session.phase().to_string() }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_line, peak_line, slope_source, steepened};
+    use super::{carry_down, fit_line, peak_line, slope_source, steepened, Group, Page};
     use super::crossing;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn skill_carries_down_with_a_loss_and_never_past_its_source() {
+        let page = |value: Option<f64>, source| Page { source, groups: [("overall".to_string(), Group { value, low: value.unwrap_or(0.) - 1., current: value.map(|v| v + 0.1), ..Group::default() })].into_iter().collect(), ..Page::default() };
+        let mut pages: BTreeMap<i64, Page> = [(4, page(Some(9.), Some(7))), (6, page(Some(3.), Some(7))), (5, page(None, Some(7))), (7, page(Some(8.), None)), (10, page(Some(6.), None))].into_iter().collect();
+        carry_down(&mut pages);
+        let level = |k: i64| pages[&k].groups["overall"].value;
+        assert_eq!((level(4), level(6), level(5), level(7), level(10)), (Some(8.), Some(7.75), None, Some(8.), Some(6.)));
+        assert_eq!(pages[&4].groups["overall"].low, 7., "the band moves with the Level");
+        assert_eq!(pages[&4].groups["overall"].current, Some(8.1));
+    }
 
     #[test]
     fn the_dan_line_follows_the_best_plays_at_every_difficulty() {

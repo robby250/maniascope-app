@@ -38,8 +38,11 @@ pub type Db = Connection;
 
 /// Stored chart features moved to the calculator `to`, so a calibration change doesn't re-analyse the library. Charts it doesn't
 /// move keep their bytes. Rows are copied, as every older calculator's were left; a stopped run resumes.
-pub fn carry_feats(db: &Db, from: &str, to: &str, before: &ms_calc::params::Params, after: &ms_calc::params::Params) -> Result<usize> {
-    let keys: Vec<String> = db.prepare("SELECT key FROM feats WHERE key LIKE ?")?.query_map([format!("%|{from}")], |r| r.get(0))?.collect::<Result<_>>()?;
+pub fn carry_feats(db: &Db, from: &str, to: &str, before: &ms_calc::params::Params, after: &ms_calc::params::Params, flow: &dyn Fn(&str, f64) -> Option<ms_calc::flow::Flow>) -> Result<usize> {
+    let there: std::collections::HashSet<String> = db.prepare("SELECT key FROM feats WHERE key LIKE ?")?.query_map([format!("%|{to}")], |r| r.get(0))?.collect::<Result<_>>()?;
+    let all: Vec<String> = db.prepare("SELECT key FROM feats WHERE key LIKE ? ORDER BY key")?.query_map([format!("%|{from}")], |r| r.get(0))?.collect::<Result<_>>()?;
+    // A launch during a crawl repeats the carry, and a second source calculator repeats most rows: only the missing cost anything.
+    let keys: Vec<String> = all.into_iter().filter(|k| !there.contains(&format!("{}|{to}", k.rsplit_once('|').map_or("", |n| n.0)))).collect();
     for chunk in keys.chunks(500) {
         let tx = db.unchecked_transaction()?;
         for key in chunk {
@@ -49,12 +52,14 @@ pub fn carry_feats(db: &Db, from: &str, to: &str, before: &ms_calc::params::Para
                 Sql::Text(t) => serde_json::from_str(t).ok().map(|v| crate::codec::from_json(&v)),
                 _ => None,
             };
+            let name = key.rsplit_once('|').map_or("", |k| k.0);
+            let (sha, rate) = name.rsplit_once('@').map_or((name, 1.), |(s, r)| (s, r.parse().unwrap_or(1.)));
             let moved = match f {
-                Some(ms_calc::val::Val::Dict(f)) => ms_calc::features::recalibrated(&f, before, after),
+                Some(ms_calc::val::Val::Dict(f)) => ms_calc::features::recalibrated(&f, before, after, rate, &|| flow(sha, rate)),
                 _ => None,
             };
             let data = moved.map_or(data, |f| Sql::Blob(crate::codec::encode(&ms_calc::val::Val::Dict(f))));
-            tx.execute("INSERT OR IGNORE INTO feats VALUES (?,?)", params![format!("{}|{to}", key.rsplit_once('|').map_or("", |k| k.0)), data])?;
+            tx.execute("INSERT OR IGNORE INTO feats VALUES (?,?)", params![format!("{name}|{to}"), data])?;
         }
         tx.commit()?;
     }
@@ -469,8 +474,8 @@ mod tests {
         for (key, data) in [("a@1.000", chart(10, 0.95)), ("b@1.000", chart(10, 0.4)), ("c@1.000", chart(7, 0.95))] {
             db.execute("INSERT INTO feats VALUES (?,?)", params![format!("{key}|old"), data]).unwrap();
         }
-        assert_eq!(carry_feats(&db, "old", "new", &before, &after).unwrap(), 3);
-        assert_eq!(carry_feats(&db, "old", "new", &before, &after).unwrap(), 3, "a stopped run can repeat");
+        assert_eq!(carry_feats(&db, "old", "new", &before, &after, &|_, _| None).unwrap(), 3);
+        assert_eq!(carry_feats(&db, "old", "new", &before, &after, &|_, _| None).unwrap(), 0, "a stopped run can repeat");
         let at = |key: &str| db.query_row("SELECT data FROM feats WHERE key=?", [key], |r| r.get::<_, Vec<u8>>(0)).unwrap();
         let Val::Dict(moved) = crate::codec::decode(&at("a@1.000|new")).unwrap() else { panic!() };
         assert!((moved.f("overall") - 5.).abs() > 0.1, "{}", moved.f("overall"));

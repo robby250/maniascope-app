@@ -342,6 +342,11 @@ pub fn compute_inner(chart: &Chart, rate: f64, sv: bool, shared: &mut Shared, pr
     res.set("structure", shared.structure.clone().unwrap());
     let length = chart.last_end() - chart.t[0];
     res.set("length", if length.fract() == 0.0 && length.abs() < 9e15 { Val::Int(length as i64) } else { Val::F(length) });
+    if prm.model["joint"]["modes"][chart.keys.to_string()].is_object() {
+        if let Some(e) = res.dict_mut("execution") {
+            crate::flow::flow(chart, rate).store(e);
+        }
+    }
     model::apply(prm, &mut res, chart.od, rate);
     res.dict_mut("scores").unwrap().map_values(|v| v * uniformity);
     model::scale_archetypes(&mut res, uniformity);

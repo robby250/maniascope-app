@@ -24,8 +24,10 @@ use std::sync::{Arc, Mutex};
 /// recommend.predictor_id of the model the Rust port reproduces: forecasts stay comparable across the port. A change to
 /// the prediction model takes a new id, so old forecasts are not read as this model's.
 pub const PREDICTOR_ID: &str = "dec244ae8a09";
-pub const CALC_ID: &str = "a4e17d09c2b6";
-pub const CARRIED_CALC: &str = "3c695ee7a23f"; // differs in calibration only (calib/carry.json). Each carry keeps its source rows.
+pub const CALC_ID: &str = "9148bd02bce2";
+/// Differ from CALC_ID in calibration only (calib/carry.json), newest first: a crawl still running holds the website rows back a whole
+/// calculator, so those can start older than the library's. Each carry keeps its source row.
+pub const CARRIED_CALCS: [&str; 4] = ["7a35f25f603a", "faff7ab286c4", "a4e17d09c2b6", "3c695ee7a23f"];
 const SURE_PLAYS: usize = 50; // of the player's own, on a keymode: fewer and the model is mostly the population's guess
 pub const ACTIVE_KEYS: std::ops::RangeInclusive<i64> = 4..=10;
 
@@ -432,5 +434,47 @@ mod tests {
 
 /// Stored ratings of the past calculators moved to this one, without their charts. Rows already there stay.
 pub fn carry_rows(db: &ms_data::store::Db) -> std::result::Result<(), String> {
-    ms_data::store::carry_feats(db, CARRIED_CALC, CALC_ID, &ms_calc::features::params_of(CARRIED_CALC)?, &ms_calc::features::standard_params()).map(|_| ()).map_err(|e| e.to_string())
+    let charts = Charts::new(db).map_err(|e| e.to_string())?;
+    for from in CARRIED_CALCS {
+        ms_data::store::carry_feats(db, from, CALC_ID, &ms_calc::features::params_of(from)?, &ms_calc::features::standard_params(), &|sha, rate| charts.flow(sha, rate)).map_err(|e| e.to_string())?;
+    }
+    if charts.missing.get() > 0 {
+        eprintln!("{} charts without a file kept their rating", charts.missing.get());
+    }
+    Ok(())
+}
+
+/// Stored website features moved the same way.
+pub fn carry_web(db: &ms_data::store::Db) -> std::result::Result<(), String> {
+    let charts = Charts::new(db).map_err(|e| e.to_string())?;
+    CARRIED_CALCS.iter().try_for_each(|from| ms_data::webmaps::carry(from, CALC_ID, &ms_calc::features::params_of(from)?, &ms_calc::features::standard_params(), &|sha, rate| charts.flow(sha, rate)))
+}
+
+/// A stored chart by its sha: lazer's store, the website cache, or a convert remade from its source.
+pub struct Charts {
+    converts: HashMap<String, Inst>,
+    root: std::path::PathBuf,
+    last: std::cell::RefCell<Option<(String, Option<ms_calc::chart::Chart>)>>, // rows of one chart's rates come in a run
+    pub missing: std::cell::Cell<usize>, // charts without a file: their rows keep the old rating
+}
+
+impl Charts {
+    pub fn new(db: &Db) -> Result<Charts> {
+        Ok(Charts { converts: crate::converts::rows(db)?.into_iter().map(|i| (i.sha256.clone(), i)).collect(), root: ms_data::paths::lazer_data(), last: Default::default(), missing: Default::default() })
+    }
+
+    pub fn chart(&self, sha: &str) -> Option<ms_calc::chart::Chart> {
+        let web = ms_data::webmaps::web_dir().join("osu").join(format!("{sha}.osu"));
+        let data = ms_data::paths::local_file(sha, &self.root).and_then(|p| std::fs::read(p).ok()).or_else(|| std::fs::read(web).ok()).or_else(|| crate::converts::bytes(self.converts.get(sha)?, &self.root))?;
+        ms_calc::chart::parse(&data).ok()
+    }
+
+    pub fn flow(&self, sha: &str, rate: f64) -> Option<ms_calc::flow::Flow> {
+        let mut last = self.last.borrow_mut();
+        if last.as_ref().is_none_or(|l| l.0 != sha) {
+            *last = Some((sha.to_string(), self.chart(sha)));
+            self.missing.set(self.missing.get() + last.as_ref()?.1.is_none() as usize);
+        }
+        last.as_ref()?.1.as_ref().map(|c| ms_calc::flow::flow(c, rate))
+    }
 }

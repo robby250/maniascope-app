@@ -136,22 +136,38 @@ pub fn restore_feature(f: &mut Dict) {
 
 /// A chart's stored features moved from `before`'s calibration to `after`'s, without its file; None if it doesn't move.
 /// Ratios keep what the stages leave out (rate uniformity), and `sk`/`stam` are shares of the overall.
-pub fn recalibrated(f: &Dict, before: &Params, after: &Params) -> Option<Dict> {
+///
+/// The joint stage reads the chart's per-hand flow, which older rows lack: `flow` finds it. No chart, no joint move.
+pub fn recalibrated(f: &Dict, before: &Params, after: &Params, rate: f64, flow: &dyn Fn() -> Option<crate::flow::Flow>) -> Option<Dict> {
     let mut f = f.clone();
     restore_feature(&mut f);
     let keys = f.f("keys") as usize;
     let raw = f.fget("raw_overall", f.f("overall"));
     let features = f.get("calibration_features").map_or_else(Vec::new, Val::list_f);
-    let moved = |rating: &dyn Fn(&Params) -> f64| rating(after) / rating(before);
-    let overall = moved(&|p| model::final_rating(p, keys, raw, &features, f.dict("execution")));
+    let old = f.dict("execution").cloned();
+    with_joint(&mut f, after, rate, raw, flow);
+    let (overall, baseline) = (
+        model::final_rating(after, keys, raw, &features, f.dict("execution")) / model::final_rating(before, keys, raw, &features, old.as_ref()),
+        model::baseline_rating(after, keys, raw, &features, f.dict("execution")) / model::baseline_rating(before, keys, raw, &features, old.as_ref()),
+    );
     if !overall.is_finite() || overall == 1. {
         return None;
     }
-    let baseline = moved(&|p| model::baseline_rating(p, keys, raw, &features, f.dict("execution")));
     f.set("overall", f.f("overall") * overall);
     f.set("baseline_overall", f.f("baseline_overall") * baseline);
     convert_units(&mut f, after);
     Some(f)
+}
+
+fn with_joint(f: &mut Dict, after: &Params, rate: f64, raw: f64, flow: &dyn Fn() -> Option<crate::flow::Flow>) {
+    let joint = &after.model["joint"]["modes"][(f.f("keys") as i64).to_string()];
+    let length = f.fget("length", 0.);
+    let Some(e) = f.dict_mut("execution").filter(|_| joint.is_object()) else { return };
+    let Some(vector) = e.get("residual_vector").map(Val::list_f).filter(|v| !v.is_empty()) else { return };
+    let stored = e.get("flow_broken").map(|_| crate::flow::Flow { broken: e.fget("flow_broken", 0.), skip: e.fget("flow_skip", 0.), change: e.fget("flow_change", 0.), fast_ln: e.fget("fast_ln", 0.) });
+    let Some(found) = stored.or_else(flow) else { return };
+    found.store(e);
+    e.set("joint_factor", model::joint_shift(joint, &crate::flow::joint_row(&vector, length, raw, rate, found)).exp());
 }
 
 /// recdata._feats_at for a calculated result.

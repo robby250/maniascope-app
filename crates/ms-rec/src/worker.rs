@@ -2,7 +2,7 @@
 //! what `emit` hands back.
 use crate::builder::{self, rank, taste, web_factor, Builder, Published, RankInputs, Request, Update, DEFAULT_TARGET, PROFILE, STRUCTURE_VERSION};
 use crate::catalog::{one_by_md5, one_by_sha, Inst, Pick};
-use crate::engine::{forecast_chart, hashes, refit, Card, Engine, Now, Refit, CALC_ID, CARRIED_CALC, PREDICTOR_ID};
+use crate::engine::{forecast_chart, hashes, refit, Card, Engine, Now, Refit, CALC_ID, PREDICTOR_ID};
 use crate::evidence::y_of;
 use crate::history::{client_name, default_client, history_text, play_history, recover_results, Shown};
 use crate::navigation::{perform, same_map, ACTIONS};
@@ -459,7 +459,7 @@ impl Worker {
         if ms_data::webmaps::running() {
             return Ok(());
         }
-        if let Err(e) = ms_data::webmaps::carry(CARRIED_CALC, CALC_ID, &ms_calc::features::params_of(CARRIED_CALC)?, &ms_calc::features::standard_params()) {
+        if let Err(e) = crate::engine::carry_web(&self.db) {
             eprintln!("website features not carried: {e}");
             return Ok(());
         }
@@ -973,7 +973,7 @@ impl Worker {
 
     fn accept(&mut self, p: Published) -> Result<()> {
         let mode = key_mode(&p.mode);
-        // The restart cache holds installed charts only; the first real build replaces that placeholder list instead
+        // The restart cache holds no website charts; the first real build replaces that placeholder list instead
         // of keeping it, or website charts never show up.
         if self.states.get(mode).is_some_and(|s| s.restored) {
             self.playlists.insert(mode, Vec::new());

@@ -6,6 +6,7 @@ pub mod compute;
 pub mod demand;
 pub mod execution;
 pub mod features;
+pub mod flow;
 pub mod gestures;
 pub mod kern;
 pub mod model;
@@ -17,4 +18,4 @@ pub mod skills;
 pub mod structure;
 pub mod val;
 
-pub const CALC_ID: &str = "a4e17d09c2b6";
+pub const CALC_ID: &str = "9148bd02bce2";

@@ -43,7 +43,7 @@ impl App {
         let points: Vec<(f32, f32)> = pts.iter().enumerate().map(|(i, v)| (rect.left() + i as f32 * rect.width() / n, rect.bottom() - rect.height() * (*v / top) as f32)).collect();
         let p = ui.painter_at(rect);
         p.add(strip(rect, &points, TEXT.gamma_multiply(0.35)));
-        if let (Some(live), Some((t0, t1)), None) = (self.live, a.span, &self.local) {
+        if let (Some(live), Some((t0, t1))) = (self.live, a.span) {
             let f = (((live - t0) / (t1 - t0).max(1.)) as f32).clamp(0., 1.);
             let x = rect.left() + rect.width() * f;
             let mut done: Vec<(f32, f32)> = points.iter().copied().take_while(|q| q.0 <= x).collect();
@@ -145,12 +145,12 @@ impl App {
 
     fn context_line(&self, a: &Arc<Analysis>) -> String {
         let (_, _, known) = self.effective();
-        let mode = if self.local.is_some() { " local file" } else if known { "" } else { " (osu! rate unknown)" };
+        let mode = if known { "" } else { " (osu! rate unknown)" };
         let dan = self.s.display.dan.then(|| ms_rec::dans::label(a.keys, a.overall, a.ln_notes / a.notes.max(1) as f64, Some(&a.dan_vibro))).flatten();
         let mut text = fmt::context(a, dan.as_deref(), mode);
         // Chart length, or time left (real seconds at this rate) in play.
         if let Some((t0, t1)) = a.span {
-            let playing = self.live.filter(|_| self.local.is_none());
+            let playing = self.live;
             let left = (t1 - playing.unwrap_or(t0).max(t0)).max(0.) / 1000. / a.rate;
             text += &format!("  ·  {}{}", fmt::clock(left), if playing.is_some() { " left" } else { "" });
         }
@@ -226,10 +226,6 @@ impl App {
                 // Drawn here: the watcher replaces self.foot on every status, which erased a stored notice.
                 let continuing = self.web.continued && self.web.info.as_ref().is_some_and(|i| i.running);
                 let foot = [self.foot.as_str(), if continuing { "website charts continuing" } else { "" }].iter().filter(|t| !t.is_empty()).copied().collect::<Vec<_>>().join(" · ");
-                if self.local.is_some() && ui.button("Follow osu!").clicked() {
-                    self.local = None;
-                    self.refresh();
-                }
                 if let Some(c) = self.card.as_ref().filter(|c| c.sure) {
                     ui.label(RichText::new(format!("Expected ~{:.1}%", 100. * self.units.acc(c.acc_mid))).text_style(TextStyle::Small)).on_hover_text("Your expected accuracy on this map at this rate, from your own plays");
                 }

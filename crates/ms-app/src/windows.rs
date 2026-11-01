@@ -5,7 +5,6 @@ use crate::app::{App, Mail, Msg};
 use crate::fmt::{self, keys_label};
 use crate::theme::{self, DIM};
 use eframe::egui::{self, RichText, ScrollArea, Ui, ViewportBuilder, ViewportCommand, ViewportId};
-use ms_data::feedback;
 use ms_data::paths::cache;
 use ms_data::store::{kv_get, now};
 use ms_data::webmaps::{self, Estimate};
@@ -52,15 +51,6 @@ pub struct WebView {
     keys: Option<HashSet<i64>>,
     stars: Option<(f64, f64)>,
     saved: bool,
-}
-
-#[derive(Default)]
-pub struct CompareView {
-    db: Option<Value>,
-    a: Option<String>,
-    b: Option<String>,
-    verdict: usize,
-    note: String,
 }
 
 fn poll(mail: Mail, view: Option<(HashSet<i64>, Option<(f64, f64)>)>) {
@@ -312,20 +302,6 @@ impl App {
 
     pub fn menu_ui(&mut self, ui: &mut Ui) {
         let mut close = false;
-        if self.debug {
-            if ui.button("Open .osu…").clicked() {
-                self.open.open_osu = true;
-                close = true;
-            }
-            if ui.button("Save this map at this rate ★").on_hover_text("Saved maps can be compared with each other").clicked() {
-                self.save_map();
-                close = true;
-            }
-            if ui.button("Saved maps & comparisons…").clicked() {
-                self.open.compare = true;
-                close = true;
-            }
-        }
         let selected = self.analysis().map(|a| a.keys);
         ui.horizontal(|ui| {
             ui.label("Convert this map to");
@@ -410,82 +386,6 @@ impl App {
         }
     }
 
-    fn save_map(&mut self) {
-        let Some(s) = &self.shown else { return };
-        let Ok(a) = &s.result else { return };
-        let chart = serde_json::json!({"title": a.title, "artist": a.artist, "version": a.version, "keys": a.keys});
-        let mut db = feedback::load();
-        if let Ok(id) = feedback::add_map(&mut db, &s.path, &chart, s.rate) {
-            let _ = feedback::save(&db);
-            self.foot = format!("saved: {}", feedback::label(&db["maps"][&id]));
-        }
-    }
-
-    fn compare_ui(&mut self, ui: &mut Ui) {
-        let db = self.compare.db.get_or_insert_with(feedback::load);
-        let maps: Vec<(String, String)> = db["maps"].as_object().map_or_else(Vec::new, |o| o.iter().map(|(k, m)| (k.clone(), feedback::label(m))).collect());
-        ui.label("Save maps with ⋯ → Save this map in the main window (the rate is part of the entry), then compare two of them here. Recording a pair again corrects it.");
-        for (name, slot) in [("A", &mut self.compare.a), ("B", &mut self.compare.b)] {
-            ui.horizontal(|ui| {
-                ui.label(name);
-                let text = slot.as_ref().and_then(|id| maps.iter().find(|m| m.0 == *id)).map_or("—", |m| m.1.as_str());
-                egui::ComboBox::from_id_salt(name).width(ui.available_width() - 8.).selected_text(text).show_ui(ui, |ui| {
-                    for (id, label) in &maps {
-                        ui.selectable_value(slot, Some(id.clone()), label);
-                    }
-                });
-            });
-        }
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("verdict").selected_text(feedback::VERDICTS[self.compare.verdict]).show_ui(ui, |ui| {
-                for (i, v) in feedback::VERDICTS.iter().enumerate() {
-                    ui.selectable_value(&mut self.compare.verdict, i, *v);
-                }
-            });
-            if ui.button("Record").clicked() {
-                if let (Some(a), Some(b)) = (&self.compare.a, &self.compare.b) {
-                    if a != b {
-                        feedback::judge(db, a, b, feedback::VERDICTS[self.compare.verdict], self.compare.note.trim(), &Value::from(ms_calc::compute::MODEL_VERSION));
-                        let _ = feedback::save(db);
-                        self.compare.note.clear();
-                    }
-                }
-            }
-        });
-        ui.add(egui::TextEdit::singleline(&mut self.compare.note).hint_text("optional note, e.g. “LN coordination”, “brief jack burst”"));
-        let mut remove_map = None;
-        let mut remove_pair = None;
-        ScrollArea::vertical().show(ui, |ui| {
-            for j in db["judgments"].as_array().map_or(&[][..], Vec::as_slice) {
-                let (a, b) = (j["a"].as_str().unwrap_or(""), j["b"].as_str().unwrap_or(""));
-                ui.horizontal(|ui| {
-                    ui.label(format!("⚖ {}  vs  {} → {}  {}", feedback::label(&db["maps"][a]), feedback::label(&db["maps"][b]), j["verdict"].as_str().unwrap_or(""), j["note"].as_str().unwrap_or("")));
-                    if ui.small_button("✕").clicked() {
-                        remove_pair = Some((a.to_string(), b.to_string()));
-                    }
-                });
-            }
-            for (id, label) in &maps {
-                ui.horizontal(|ui| {
-                    ui.label(format!("★ {label}"));
-                    if ui.small_button("✕").clicked() {
-                        remove_map = Some(id.clone());
-                    }
-                });
-            }
-        });
-        if let Some(id) = remove_map {
-            feedback::remove_map(db, &id);
-            let _ = feedback::save(db);
-        }
-        if let Some((a, b)) = remove_pair {
-            if let Some(list) = db["judgments"].as_array_mut() {
-                list.retain(|j| !((j["a"] == a.as_str() && j["b"] == b.as_str()) || (j["a"] == b.as_str() && j["b"] == a.as_str())));
-            }
-            let _ = feedback::save(db);
-        }
-    }
-
     pub fn side_windows(&mut self, ctx: &egui::Context) {
         let above = self.s.keep_above;
         if self.open.profile == Some(true) && window(ctx, "profile", "Welcome to ManiaScope", [380., 150.], above, |ui| self.profile_ui(ui)) {
@@ -511,21 +411,6 @@ impl App {
                 ui.label(RichText::new("Latest 100 plays; unusual results sorted by prediction error. Accuracy is lazer accuracy.").color(DIM));
                 ScrollArea::vertical().show(ui, |ui| ui.label(&self.open.history_text));
             });
-        }
-        if self.open.compare {
-            self.open.compare = !window(ctx, "compare", "Saved maps & comparisons", [560., 420.], above, |ui| self.compare_ui(ui));
-        }
-        if self.open.open_osu {
-            let mut go = false;
-            self.open.open_osu = !window(ctx, "open", "Open .osu", [420., 70.], above, |ui| {
-                ui.text_edit_singleline(&mut self.open.open_text);
-                go = ui.button("Open").clicked();
-            });
-            if go {
-                self.local = Some(self.open.open_text.clone().into());
-                self.open.open_osu = false;
-                self.refresh();
-            }
         }
     }
 }

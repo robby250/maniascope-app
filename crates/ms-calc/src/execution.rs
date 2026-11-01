@@ -193,6 +193,7 @@ pub fn column_runs(chart: &Chart, rate: f64, bins: usize, k: &Knobs) -> Vec<f64>
     for i in 0..chart.len() {
         by[chart.col[i] as usize].push(chart.t[i] * 0.001 / rate);
     }
+    let first = if k.COLUMN_ORIGIN > 0.0 { chart.t.first().map_or(0.0, |t| t * 0.001 / rate) } else { 0.0 };
     let mut inrun = vec![0.0f64; bins];
     let mut count = vec![0.0f64; bins];
     for times in &mut by {
@@ -208,7 +209,7 @@ pub fn column_runs(chart: &Chart, rate: f64, bins: usize, k: &Knobs) -> Vec<f64>
             }
             let full = run.len() >= k.VIBRO_MIN;
             for &x in &run {
-                let b = (bins - 1).min((x / k.BIN) as usize);
+                let b = (bins - 1).min(((x - first) / k.BIN) as usize);
                 count[b] += 1.0;
                 inrun[b] += full as u8 as f64;
             }

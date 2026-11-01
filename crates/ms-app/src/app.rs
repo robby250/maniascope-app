@@ -89,9 +89,6 @@ pub struct Open {
     pub history_only: bool,
     pub history_text: String,
     pub web: bool,
-    pub compare: bool,
-    pub open_osu: bool,
-    pub open_text: String,
 }
 
 pub struct App {
@@ -107,7 +104,6 @@ pub struct App {
     pub db: Db,
     pub viewer: Arc<Viewer>,
     pub obs: Obs,
-    pub local: Option<PathBuf>,
     pub shown: Option<Selected>,
     pub pending: Option<Pending>,
     pub generation: u64,
@@ -137,7 +133,6 @@ pub struct App {
     pub tracking: Option<bool>, // None: release builds have no pause switch
     pub debug: bool,
     pub web: crate::windows::WebView,
-    pub compare: crate::windows::CompareView,
     pub resized: Option<(f32, f32)>,
     pub clipboard: Option<arboard::Clipboard>,
     keys_checked: Option<Instant>,
@@ -177,10 +172,10 @@ impl App {
         let tracking = tracking_switch(&db, debug);
         let mut app = App {
             s, rx, mail: mail.clone(), q: q.clone(), halt: halt.clone(), play: play.clone(), busy: busy.clone(), game: game.clone(), client_name: Arc::new(Mutex::new(client.clone())), viewer: Arc::default(), db,
-            obs: Obs { note: "starting…".into(), ..Obs::default() }, local: None, shown: None, pending: None, generation: 0, requested: None, live: None, card: None, card_note: None,
+            obs: Obs { note: "starting…".into(), ..Obs::default() }, shown: None, pending: None, generation: 0, requested: None, live: None, card: None, card_note: None,
             views: MODES.into_iter().map(|m| (m, view())).collect(), stats: None, stats_open: false, stats_keys: Some(7), stats_wait: None, expanded: HashSet::new(), chips_open: HashSet::new(), revision: 0, selection_id: 0,
             units: Shown { client, miss_ratio }, result: None, status_text: String::new(), bg_progress: None, blocker: None, foot: String::new(), recs_opened: None, open: Open::default(), save_at: None, page: None, tracking, debug,
-            web: Default::default(), compare: Default::default(), resized: None, clipboard: arboard::Clipboard::new().ok(), keys_checked: None,
+            web: Default::default(), resized: None, clipboard: arboard::Clipboard::new().ok(), keys_checked: None,
         };
         app.auto_keys(true);
         if !debug && asks_profile(&app.db) {
@@ -488,16 +483,12 @@ impl App {
 
     /// → (path, rate, rate known) for what should be on display now.
     pub fn effective(&self) -> (Option<PathBuf>, f64, bool) {
-        let path = self.local.clone().or_else(|| self.obs.path.clone());
-        if self.local.is_some() {
-            return (path, 1., true);
-        }
-        (path, self.obs.rate.filter(|r| *r != 0.).unwrap_or(1.), self.obs.rate.is_some())
+        (self.obs.path.clone(), self.obs.rate.filter(|r| *r != 0.).unwrap_or(1.), self.obs.rate.is_some())
     }
 
     /// Scroll changes count unless lazer's selection has Constant Speed.
     fn sv(&self) -> bool {
-        !(self.local.is_none() && self.obs.cs)
+        !self.obs.cs
     }
 
     /// Reconcile the display with the effective state and ask for an analysis if needed.
@@ -568,9 +559,7 @@ impl App {
 
     pub fn update_status(&mut self) {
         let o = &self.obs;
-        self.foot = if self.local.is_some() {
-            "local file — osu! selection ignored".to_string()
-        } else if o.source == Some("game") && o.path.is_some() {
+        self.foot = if o.source == Some("game") && o.path.is_some() {
             // Working is silent: this line is for what needs a look (user 2026-11-01).
             [o.note.as_str(), if o.rate.is_none() { "showing 1.00×" } else { "" }].iter().filter(|t| !t.is_empty()).copied().collect::<Vec<_>>().join(" · ")
         } else if o.source == Some("log") {

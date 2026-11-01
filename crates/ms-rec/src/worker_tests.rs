@@ -511,6 +511,19 @@ fn only_analysed_rates_are_offered_and_a_broken_chart_counts_as_done() {
 }
 
 #[test]
+fn a_restart_keeps_the_saved_lists_converts() {
+    let mut l = live("restart-converts", 240, busy(false));
+    let saved = l.w.states["nps"].catalog.keys().next().unwrap().clone();
+    let rec = l.w.rec.as_mut().unwrap();
+    rec.r.installed = Arc::new(rec.r.installed.iter().filter(|(_, i)| i.sha256 != saved).map(|(k, i)| (k.clone(), i.clone())).collect()); // a convert has no library row
+    l.world.db.execute("INSERT INTO converts VALUES ('src',7,?,4,?,'m','A','T','V','C',5,NULL,8,90,1,0)", rusqlite::params![ms_convert::CONVERTER_ID, saved]).unwrap();
+    l.w.converts.get_mut("nps").unwrap().insert(7, Setting { on: true, sources: vec![4], often: 0.5, weighted: true });
+    l.w.restored.clear();
+    l.w.restore_local("nps").unwrap();
+    assert_eq!(l.w.states["nps"].catalog[&saved].convert_of.as_deref(), Some("src"));
+}
+
+#[test]
 fn a_filter_nothing_matches_offers_nothing() {
     let mut l = live("filter", 240, busy(false));
     l.w.practice_skills = vec!["sv".into()];

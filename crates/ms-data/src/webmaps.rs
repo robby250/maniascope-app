@@ -455,7 +455,7 @@ pub struct WebMap {
 }
 
 /// Stored website features moved to the calculator `to`, web.msp with them: a calculator change would else crawl everything again.
-pub fn carry(from: &str, to: &str, before: &Params, after: &Params) -> Result<(), String> {
+pub fn carry(from: &str, to: &str, before: &Params, after: &Params, flow: &dyn Fn(&str, f64) -> Option<ms_calc::flow::Flow>) -> Result<(), String> {
     let text = |e: rusqlite::Error| e.to_string();
     if !web_dir().join("state.db").is_file() {
         return Ok(());
@@ -468,7 +468,7 @@ pub fn carry(from: &str, to: &str, before: &Params, after: &Params) -> Result<()
         for sha in chunk {
             let data: Vec<u8> = tx.query_row("SELECT data FROM feats WHERE sha=? AND calc=?", [sha.as_str(), from], |r| r.get(0)).map_err(text)?;
             let fs = read_cell(&data).unwrap_or_default();
-            let moved: Vec<Option<Dict>> = fs.iter().map(|(_, f)| ms_calc::features::recalibrated(f, before, after)).collect();
+            let moved: Vec<Option<Dict>> = fs.iter().map(|(r, f)| ms_calc::features::recalibrated(f, before, after, *r, &|| flow(sha, *r))).collect();
             let cell = if moved.iter().any(Option::is_some) {
                 write_cell(&fs.iter().zip(moved).map(|((r, f), m)| (*r, m.unwrap_or_else(|| f.clone()))).collect::<Vec<_>>())
             } else {

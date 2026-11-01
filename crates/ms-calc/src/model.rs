@@ -204,7 +204,18 @@ pub fn final_rating(prm: &Params, keys: usize, raw: f64, features: &[f64], execu
 fn final_from_base(prm: &Params, keys: usize, base: f64, execution: Option<&Dict>) -> f64 {
     let values = execution.and_then(|e| e.get("residual_vector")).map(|v| v.list_f());
     let value = correction(prm, keys, base, values.as_deref()) * tree_shift(prm, keys, base, values.as_deref()).exp();
-    value * execution.map_or(1.0, |e| e.fget("rolled_factor", 1.0))
+    value * execution.map_or(1.0, |e| e.fget("rolled_factor", 1.0) * e.fget("joint_factor", 1.0))
+}
+
+/// The joint stage: stages fitted one over another each kept its credit, so one refit over all their inputs corrects what they
+/// left (calib joint). Sparse: `columns` index `flow::joint_row`.
+const JOINT_LIMIT: f64 = 0.35;
+
+pub fn joint_shift(model: &Value, row: &[f64]) -> f64 {
+    let (lo, hi, mean, sd, coeff) = (nums(&model["low"]), nums(&model["high"]), nums(&model["mean"]), nums(&model["sd"]), nums(&model["coeff"]));
+    let at = model["columns"].as_array().map_or_else(Vec::new, |c| c.iter().filter_map(Value::as_u64).map(|c| c as usize).collect());
+    let shift: f64 = (0..at.len()).filter(|&i| sd[i] >= 1e-9).map(|i| coeff[i] * (row[at[i]].clamp(lo[i], hi[i]) - mean[i]) / sd[i]).sum(); // a column flat in the fit reads 0
+    shift.clamp(-JOINT_LIMIT, JOINT_LIMIT)
 }
 
 // ---- structural_residual ----
@@ -445,6 +456,13 @@ pub fn apply(prm: &Params, res: &mut Dict, od: f64, rate: f64) {
             stam,
             &cf,
         );
+        let joint = &prm.model["joint"]["modes"][keys.to_string()];
+        if present(joint) {
+            let e = res.dict("execution").unwrap();
+            let f = crate::flow::Flow { broken: e.fget("flow_broken", 0.0), skip: e.fget("flow_skip", 0.0), change: e.fget("flow_change", 0.0), fast_ln: e.fget("fast_ln", 0.0) };
+            let factor = joint_shift(joint, &crate::flow::joint_row(&rv, res.fget("length", 0.0), raw, rate, f)).exp();
+            res.dict_mut("execution").unwrap().set("joint_factor", factor);
+        }
         res.dict_mut("execution").unwrap().set("residual_vector", Val::floats(&rv));
     }
     let base = baseline_rating(prm, keys, raw, &cf, res.dict("execution"));
@@ -516,6 +534,7 @@ pub fn display_factor(prm: &Params, keys: usize, baseline: f64, execution: Optio
     let rolled = execution.map_or(1.0, |e| e.fget("rolled_factor", 1.0));
     let corrected = correction_with(prm, model, keys, baseline / rolled, values.as_deref(), Some(&coeff))
         * rolled
+        * execution.map_or(1.0, |e| e.fget("joint_factor", 1.0))
         * tree_shift(prm, keys, baseline, values.as_deref()).exp();
     corrected / original
 }

@@ -70,13 +70,25 @@ fn known(db: &Db, target: i64) -> Result<HashSet<String>> {
     rows.collect()
 }
 
-/// Up to `size` charts not converted yet, your own first. Website charts only near the target: a convert is denser than
-/// its source, so the window opens downwards.
-pub fn pending(db: &Db, library: &[Inst], web: Option<&Web>, installed_md5: &HashSet<String>, pairs: &[(i64, Vec<i64>)], reach: &HashMap<i64, (f64, f64)>, root: &Path, size: usize) -> Result<Vec<Job>> {
+/// What the offered rates (0.7–1.5×) can do to a 1× rating, with margin.
+const RATE_REACH: (f64, f64) = (0.55, 2.);
+
+/// A chart rated `overall` at 1× can fit `window` at some rate. Skipped charts stay unconverted, so they come in when reach moves.
+fn in_window(overall: f64, window: (f64, f64)) -> bool {
+    overall * RATE_REACH.1 >= window.0 && overall * RATE_REACH.0 <= window.1
+}
+
+/// Up to `size` charts not converted yet, your own first, only near the target: a convert is denser than its source, so the
+/// window opens downwards. `rated`: a source's stored 1× rating; an unrated one converts anyway.
+pub fn pending(db: &Db, library: &[Inst], web: Option<&Web>, installed_md5: &HashSet<String>, pairs: &[(i64, Vec<i64>)], reach: &HashMap<i64, (f64, f64)>, rated: &mut dyn FnMut(&str) -> Option<f64>, root: &Path, size: usize) -> Result<Vec<Job>> {
     let mut out = Vec::new();
     for (target, sources) in pairs {
         let done = known(db, *target)?;
+        let window = reach.get(target).map(|&(lo, hi)| (lo / 1.5, hi));
         for i in library.iter().filter(|i| sources.contains(&i.keys) && !done.contains(&i.sha256)) {
+            if window.zip(rated(&i.sha256)).is_some_and(|(w, overall)| !in_window(overall, w)) {
+                continue;
+            }
             let Some(path) = paths::local_file(&i.sha256, root) else { continue };
             out.push(Job { source: i.sha256.clone(), target: *target, keys: i.keys, path, artist: i.artist.clone(), title: i.title.clone(), version: i.version.clone(), creator: i.creator.clone(),
                            set_id: i.set_id, bid: i.beatmap_id, od: i.od, length: i.length, playcount: i.playcount, web: false });
@@ -85,7 +97,6 @@ pub fn pending(db: &Db, library: &[Inst], web: Option<&Web>, installed_md5: &Has
             }
         }
         let Some(web) = web else { continue };
-        let window = reach.get(target).map(|&(lo, hi)| (lo / 1.5, hi));
         for (n, m) in web.maps.iter().enumerate() {
             if !sources.contains(&m.keys) || done.contains(&m.sha) || installed_md5.contains(&m.file_md5) || web.window_rates(n, window).is_none() {
                 continue;
@@ -206,6 +217,11 @@ fn stable_folder(p: &Pick, source: &str, db: &Db) -> std::result::Result<Option<
     Ok(Path::new(&chart).parent().map(Path::to_path_buf))
 }
 
+/// A website source stays marked so once its set is in lazer; importing it again only shows the same name twice (user 2026-11-01).
+fn needs_original(p: &Pick, db: &Db, stable: bool) -> bool {
+    p.source_web && (stable || db.query_row("SELECT 1 FROM installed WHERE sha256=?", [p.convert_of.as_deref().unwrap_or("")], |_| Ok(())).is_err())
+}
+
 /// stable: an extra diff in the set's folder, sharing its audio and background; F5 in song select shows it (real stable,
 /// 2026-11-01, no ids needed). A website set arrives as one .osz with the diff inside. lazer has no such folder and an
 /// import can't add to a set: the same online id replaces the set (online ids reset, offsets and last played lost), so
@@ -230,7 +246,7 @@ pub fn deliver(p: &Pick, db: &Db, client: &str, root: &Path) -> std::result::Res
     let path = dir.join(format!("{name}.osz"));
     let mut owned: Vec<(String, Vec<u8>)> = Vec::new();
     let mut local = Vec::new();
-    if p.source_web {
+    if needs_original(p, db, stable) {
         let holder = if stable { paths::cache() } else { dir.clone() }; // stable would take the original from Songs by itself
         std::fs::create_dir_all(&holder).map_err(|e| e.to_string())?;
         let original = holder.join(format!("{set}.osz"));
@@ -279,6 +295,24 @@ mod tests {
             osu.push_str(&format!("{},192,{},1,0,0:0:0:0:\n", (step * 3 % 7) * 512 / 7 + 36, step * 125));
         }
         osu
+    }
+
+    #[test]
+    fn a_source_out_of_reach_waits_until_reach_moves() {
+        let dir = std::env::temp_dir().join(format!("ms-pending-{}", std::process::id()));
+        let db = ms_data::store::connect(&dir.join("rec.db")).unwrap();
+        let chart = |c: char| Inst { sha256: c.to_string().repeat(64), keys: 7, ..Inst::default() };
+        let library = [chart('a'), chart('b'), chart('c')];
+        let mut rated = |sha: &str| match &sha[..1] { "a" => Some(1.5), "b" => Some(9.), _ => None };
+        let mut jobs = |level: f64| {
+            let reach = [(10, (0.55 * level, 1.1 * level))].into_iter().collect();
+            let got = pending(&db, &library, None, &HashSet::new(), &[(10, vec![7])], &reach, &mut rated, &dir, 10).unwrap();
+            got.iter().map(|j| j.source[..1].to_string()).collect::<Vec<_>>().join("")
+        };
+        assert_eq!(jobs(4.), "ac", "9 stars can't fit a level 4 player, at any rate");
+        assert_eq!(jobs(6.), "abc", "the same chart once they improve");
+        assert_eq!(jobs(40.), "bc", "1.5 stars can't fit a level 40 player");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -339,6 +373,20 @@ mod tests {
         assert_eq!(rows.rows.iter().map(|r| (r.key.as_str(), r.keys as i64)).collect::<Vec<_>>(), [("s", 10)]);
         let (ledger, _) = crate::pp::build_ledger(&db, &public, &HashMap::default()).unwrap();
         assert!(ledger.best.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_installed_website_source_is_not_imported_again() {
+        let dir = std::env::temp_dir().join(format!("ms-original-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = ms_data::store::connect(&dir.join("rec.db")).unwrap();
+        let pick = Pick { source_web: true, convert_of: Some("source".into()), ..Pick::default() };
+        assert!(needs_original(&pick, &db, false), "a new website map brings its original");
+        db.execute("INSERT INTO installed(sha256, keys) VALUES ('source', 7)", []).unwrap();
+        assert!(!needs_original(&pick, &db, false));
+        assert!(needs_original(&pick, &db, true), "stable's copy comes from the same download");
+        assert!(!needs_original(&Pick { source_web: false, ..pick }, &db, false));
         let _ = std::fs::remove_dir_all(dir);
     }
 

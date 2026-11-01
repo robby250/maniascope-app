@@ -156,6 +156,7 @@ knobs! {
     TECH_FULL: f64 = 0.09,
     RT_WIN: usize = 4,
     RT_FULL: f64 = 0.2,
+    COLUMN_ORIGIN: f64 = 0.0, // 1: column-run bins count from the first note, as the demand does
     OHT_FULL: f64 = 0.5,
     ANC_FULL: f64 = 0.5,
     PT_FULL: f64 = 0.05,
