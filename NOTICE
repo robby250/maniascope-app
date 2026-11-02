@@ -28,3 +28,4 @@ osu! and osu!lazer are trademarks of their respective owners; ManiaScope is an
 unaffiliated, third-party tool.
 
 Liberation Sans (crates/ms-app/assets), SIL Open Font License 1.1: see crates/ms-app/assets/LICENSE-Liberation.
+DejaVu Sans icon subset (crates/ms-app/assets/Icons.ttf): see crates/ms-app/assets/LICENSE-DejaVu.

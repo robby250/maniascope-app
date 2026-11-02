@@ -139,7 +139,7 @@ fn a_local_queue_rechecks_readiness_after_a_prediction_refresh_and_pp_does_not()
     let fits = |c: &Pick| {
         let rec = l.w.rec.as_ref().unwrap();
         let f = c.f.as_ref().unwrap();
-        rec.model().eligible(f, &rec.predict(f, c.md5.as_ref().unwrap(), None, 1., &n).unwrap().shown, n.target, n.view.warm_flag)
+        rec.model().eligible(&rec.predict(f, c.md5.as_ref().unwrap(), None, 1., &n).unwrap().shown, n.target, n.view.warm_flag)
     };
     let want: Vec<String> = rows.iter().filter(|c| fits(c)).filter_map(|c| c.sha.clone()).collect();
     assert!(!want.is_empty() && want.len() < rows.len(), "{}", want.len());

@@ -1023,7 +1023,9 @@ pub fn personal_fit(c: &Consts, mut rows: Vec<Row>, feats: &[Feats], now: f64, l
     };
     for &k in &keys {
         let s = of_keys(k);
-        if s.len() < 200 {
+        // Lists aim every chart at one accuracy and 10K has one player, so the ridge read "denser = easier" and cancelled the stars:
+        // a 7★ chordjack came out level with a 3.8★ map (user 2026-11-01: 97 % shown, 84 % played). Later plays: .420 → .358.
+        if s.len() < 200 || k == 10 {
             continue;
         }
         let z: Vec<f64> = s.iter().flat_map(|&i| c.zvec(fe(i), rows[i].base + l_at[i])).collect();

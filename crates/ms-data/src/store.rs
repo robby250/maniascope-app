@@ -38,28 +38,43 @@ pub type Db = Connection;
 
 /// Stored chart features moved to the calculator `to`, so a calibration change doesn't re-analyse the library. Charts it doesn't
 /// move keep their bytes. Rows are copied, as every older calculator's were left; a stopped run resumes.
-pub fn carry_feats(db: &Db, from: &str, to: &str, before: &ms_calc::params::Params, after: &ms_calc::params::Params, flow: &dyn Fn(&str, f64) -> Option<ms_calc::flow::Flow>) -> Result<usize> {
+pub fn carry_feats(db: &Db, from: &str, to: &str, before: &ms_calc::params::Params, after: &ms_calc::params::Params, chart: &(dyn Fn(&str) -> Option<ms_calc::chart::Chart> + Sync)) -> Result<usize> {
     let there: std::collections::HashSet<String> = db.prepare("SELECT key FROM feats WHERE key LIKE ?")?.query_map([format!("%|{to}")], |r| r.get(0))?.collect::<Result<_>>()?;
     let all: Vec<String> = db.prepare("SELECT key FROM feats WHERE key LIKE ? ORDER BY key")?.query_map([format!("%|{from}")], |r| r.get(0))?.collect::<Result<_>>()?;
     // A launch during a crawl repeats the carry, and a second source calculator repeats most rows: only the missing cost anything.
     let keys: Vec<String> = all.into_iter().filter(|k| !there.contains(&format!("{}|{to}", k.rsplit_once('|').map_or("", |n| n.0)))).collect();
-    for chunk in keys.chunks(500) {
+    let rules = ms_calc::features::rules_differ(before, after);
+    // A chart's rates sit together in key order, so its file is read and its convert remade once. Half the cores: the game may be up.
+    let threads = (std::thread::available_parallelism().map_or(2, |x| x.get()) / 2).max(1);
+    let sha_of = |k: &str| k.rsplit_once('|').map_or(k, |n| n.0).rsplit_once('@').map_or("", |n| n.0).to_string();
+    let charts: Vec<&[String]> = keys.chunk_by(|a, b| sha_of(a) == sha_of(b)).collect();
+    for batch in charts.chunks(200) {
+        let mut stored: Vec<Vec<(String, Sql)>> = Vec::with_capacity(batch.len());
+        for group in batch {
+            stored.push(group.iter().map(|key| Ok((key.clone(), db.query_row("SELECT data FROM feats WHERE key=?", [key], |r| r.get(0))?))).collect::<Result<_>>()?);
+        }
+        let moved = ms_calc::background::background_map(&stored, threads, |group| {
+            let file = std::cell::OnceCell::new();
+            let sha = sha_of(&group[0].0);
+            let chart = || file.get_or_init(|| chart(&sha).map(std::rc::Rc::new)).clone();
+            Ok(group.iter().map(|(key, data)| {
+                let f = match data { // rows written before the binary form are JSON text
+                    Sql::Blob(b) => crate::codec::decode(b).ok(),
+                    Sql::Text(t) => serde_json::from_str(t).ok().map(|v| crate::codec::from_json(&v)),
+                    _ => None,
+                };
+                let name = key.rsplit_once('|').map_or("", |k| k.0);
+                let rate = name.rsplit_once('@').map_or(1., |(_, r)| r.parse().unwrap_or(1.));
+                let moved = match f {
+                    Some(ms_calc::val::Val::Dict(f)) => ms_calc::features::carried(&f, before, after, rules, rate, &chart),
+                    _ => None,
+                };
+                (format!("{name}|{to}"), moved.map_or_else(|| data.clone(), |f| Sql::Blob(crate::codec::encode(&ms_calc::val::Val::Dict(f)))))
+            }).collect::<Vec<_>>())
+        });
         let tx = db.unchecked_transaction()?;
-        for key in chunk {
-            let data: Sql = tx.query_row("SELECT data FROM feats WHERE key=?", [key], |r| r.get(0))?;
-            let f = match &data { // rows written before the binary form are JSON text
-                Sql::Blob(b) => crate::codec::decode(b).ok(),
-                Sql::Text(t) => serde_json::from_str(t).ok().map(|v| crate::codec::from_json(&v)),
-                _ => None,
-            };
-            let name = key.rsplit_once('|').map_or("", |k| k.0);
-            let (sha, rate) = name.rsplit_once('@').map_or((name, 1.), |(s, r)| (s, r.parse().unwrap_or(1.)));
-            let moved = match f {
-                Some(ms_calc::val::Val::Dict(f)) => ms_calc::features::recalibrated(&f, before, after, rate, &|| flow(sha, rate)),
-                _ => None,
-            };
-            let data = moved.map_or(data, |f| Sql::Blob(crate::codec::encode(&ms_calc::val::Val::Dict(f))));
-            tx.execute("INSERT OR IGNORE INTO feats VALUES (?,?)", params![format!("{name}|{to}"), data])?;
+        for rows in moved.into_iter().flatten().flatten() {
+            tx.execute("INSERT OR IGNORE INTO feats VALUES (?,?)", params![rows.0, rows.1])?;
         }
         tx.commit()?;
     }
@@ -474,8 +489,8 @@ mod tests {
         for (key, data) in [("a@1.000", chart(10, 0.95)), ("b@1.000", chart(10, 0.4)), ("c@1.000", chart(7, 0.95))] {
             db.execute("INSERT INTO feats VALUES (?,?)", params![format!("{key}|old"), data]).unwrap();
         }
-        assert_eq!(carry_feats(&db, "old", "new", &before, &after, &|_, _| None).unwrap(), 3);
-        assert_eq!(carry_feats(&db, "old", "new", &before, &after, &|_, _| None).unwrap(), 0, "a stopped run can repeat");
+        assert_eq!(carry_feats(&db, "old", "new", &before, &after, &|_| None).unwrap(), 3);
+        assert_eq!(carry_feats(&db, "old", "new", &before, &after, &|_| None).unwrap(), 0, "a stopped run can repeat");
         let at = |key: &str| db.query_row("SELECT data FROM feats WHERE key=?", [key], |r| r.get::<_, Vec<u8>>(0)).unwrap();
         let Val::Dict(moved) = crate::codec::decode(&at("a@1.000|new")).unwrap() else { panic!() };
         assert!((moved.f("overall") - 5.).abs() > 0.1, "{}", moved.f("overall"));

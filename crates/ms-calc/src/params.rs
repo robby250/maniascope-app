@@ -144,6 +144,17 @@ knobs! {
     ROW_SHARE: f64 = 0.3,
     FLAM: f64 = 0.045,
     V_FINGER: f64 = 8.0,
+    // Chord switching, measured on 5.2M notes of own replays at equal speed, width and play (docs/REPORT_2026-11-01_CHORD_SWITCH.md).
+    W_GROUP: f64 = 0.5,     // each extra separate group of fingers in a hand's chord: `10110`, not `11100`
+    GROUP_KEYS: f64 = 2.0,  // below 7K it fades as (keys/7)^this: 5K and 6K public maps allow about half
+    GROUP_SIZE: f64 = 3.0,  // rows smaller than this pay nothing: a split jump inside a stream isn't a chord to place
+    W_MIX: f64 = 0.6,       // a hand row where some fingers repeat and others are new
+    MIX_V: f64 = 12.0,      // hand rows/s where the mix starts to cost on 7K
+    MIX_KEYS: f64 = 3.0,    // that speed falls as (7/keys)^MIX_KEYS: about 4/s on 10K
+    W_SHAPES: f64 = 1.0,    // per doubling of the chord shapes a hand plays in 2 s past SHAPES_T
+    SHAPES_T: f64 = 4.0,    // on 10K; narrower keymodes start later, as (10/keys)^SHAPES_KEYS
+    SHAPES_KEYS: f64 = 2.0,
+    JACK_SHARE_KEYS: f64 = 2.0, // above 7K the chordjack discount falls as (7/keys)^this
     HORIZONS: [(f64, f64); 4] = [(2.0, 1.75), (8.0, 1.30), (30.0, 1.12), (120.0, 1.00)],
     BIN: f64 = 0.5,
     PHASES: usize = 8,

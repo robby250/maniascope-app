@@ -403,16 +403,16 @@ impl PredModel {
         Ok(())
     }
 
-    /// nps.central_target for a chart.
-    pub fn central_target(&self, f: &Feats, target: f64, warm: bool) -> f64 {
+    /// nps.central_target.
+    pub fn central_target(&self, target: f64, warm: bool) -> f64 {
         let ctx = Ctx { target, warm, skills: false, wants_vibro: false, preference: false, version: 0 };
-        ctx.central(matches!(self.group(f), 2 | 3))
+        ctx.central()
     }
 
     /// nps.eligible: a prediction inside the tab's accuracy band.
-    pub fn eligible(&self, f: &Feats, p: &Prediction, target: f64, warm: bool) -> bool {
+    pub fn eligible(&self, p: &Prediction, target: f64, warm: bool) -> bool {
         let ctx = Ctx { target, warm, skills: false, wants_vibro: false, preference: false, version: 0 };
-        ctx.eligible(matches!(self.group(f), 2 | 3), p)
+        ctx.eligible(p)
     }
 
     /// nps.Builder.initial_value: a known chart's density at the rate that meets the target, for analysis order.
@@ -420,8 +420,7 @@ impl PredModel {
         let (Some(f), Some((notes, length))) = (store.feats(&job.sha, rate), store.size(&job.sha, rate)) else { return Ok(0.) };
         let ctx = Ctx { target, warm: session.warm, skills: false, wants_vibro: false, preference: false, version: store.version };
         let p = self.predict(f, &job.key, job.bid, rate, session)?;
-        let jack = matches!(self.group(f), 2 | 3);
-        let need = rate * (ctx.rate_shift(jack, &p, ctx.central(jack)) / p.slope).exp();
+        let need = rate * (ctx.rate_shift(&p, ctx.central()) / p.slope).exp();
         Ok(notes / length.max(1000.) * need.min(MAX_RATE) * if need < MIN_RATE * 0.85 { 0.05 } else { 1. })
     }
 
@@ -709,35 +708,35 @@ impl Ctx {
     fn err(&self) -> f64 {
         1. - self.target.min(MAX_TARGET)
     }
-    /// nps.central_target: jack-led charts aim a third closer to 100 %.
-    fn central(&self, jack: bool) -> f64 {
-        let t = if jack { 1. - (1. - self.target) * 2. / 3. } else { self.target };
-        t.min(MAX_TARGET)
+    /// nps.central_target. Jack-led charts used to aim a third closer to 100 %: a workaround for chordjacks rated too easy, gone
+    /// with the chord rules of calculator 65c0a4cb63d6 (user 2026-11-02).
+    fn central(&self) -> f64 {
+        self.target.min(MAX_TARGET)
     }
-    fn band(&self, jack: bool) -> (f64, f64) {
-        let t = self.central(jack);
+    fn band(&self) -> (f64, f64) {
+        let t = self.central();
         (t - 0.25 * self.err(), MAX_HIGH.min(t + 0.25 * self.err()))
     }
-    fn opening_floor(&self, jack: bool, p: &Prediction) -> f64 {
-        let low = self.band(jack).0 - 0.1 * self.err();
+    fn opening_floor(&self, p: &Prediction) -> f64 {
+        let low = self.band().0 - 0.1 * self.err();
         if self.warm {
             return low;
         }
         let cold = (-p.activation / p.tau).exp();
-        low + cold * (self.central(jack) - 0.05 * self.err() - low)
+        low + cold * (self.central() - 0.05 * self.err() - low)
     }
-    fn eligible(&self, jack: bool, p: &Prediction) -> bool {
-        let (low, high) = self.band(jack);
+    fn eligible(&self, p: &Prediction) -> bool {
+        let (low, high) = self.band();
         let slack = 0.1 * self.err();
         if !(low - slack <= p.acc_mid && p.acc_mid <= MAX_HIGH.min(high + slack)) {
             return false;
         }
-        self.warm || p.opening_acc >= self.opening_floor(jack, p)
+        self.warm || p.opening_acc >= self.opening_floor(p)
     }
-    fn rate_shift(&self, jack: bool, p: &Prediction, target: f64) -> f64 {
+    fn rate_shift(&self, p: &Prediction, target: f64) -> f64 {
         let mut gap = (1. - target).ln() - (1. - p.acc_mid).max(1e-6).ln();
         if !self.warm {
-            gap = gap.min((1. - self.opening_floor(jack, p)).ln() - (1. - p.opening_acc).max(1e-6).ln());
+            gap = gap.min((1. - self.opening_floor(p)).ln() - (1. - p.opening_acc).max(1e-6).ln());
         }
         gap
     }
@@ -911,15 +910,11 @@ impl PredModel {
         if rated.is_empty() {
             return Ok(None);
         }
-        let jack = |f: &Feats| -> bool {
-            let g = self.group(f);
-            g == 2 || g == 3
-        };
-        let target = ctx.central(jack(&rated[0].1));
+        let target = ctx.central();
         // Rates whose last finish (14 days) missed the target by more than MISS_TOL: not offered again, the next rate
         // comes from that result (user 2026-10-13: "not get picked exactly the same rate even though it's not accurate").
         let missed = |rate: f64| session.charts.get(key).and_then(|c| c.last.iter().find(|x| x.0 == round2(rate))).map(|x| x.1).filter(|acc| (acc - target).abs() > MISS_TOL);
-        let shift_of = |i: usize| ctx.rate_shift(jack(&rated[i].1), &rated[i].2, target);
+        let shift_of = |i: usize| ctx.rate_shift(&rated[i].2, target);
         let mut a = 0;
         for i in 1..rated.len() {
             if shift_of(i).abs() < shift_of(a).abs() {
@@ -944,11 +939,10 @@ impl PredModel {
                 }
             }
         }
-        let jack_a = jack(f);
-        let shift = ctx.rate_shift(jack_a, e, target) / slope;
+        let shift = ctx.rate_shift(e, target) / slope;
         let mut proposal = round2(MAX_RATE.min(MIN_RATE.max(r * shift.exp())));
         let has = |x: f64| entries.iter().any(|e| e.offer.rate == x);
-        let eligible_a = ctx.eligible(jack_a, e);
+        let eligible_a = ctx.eligible(e);
         if !eligible_a && has(proposal) && shift != 0. {
             let direction: i64 = if shift < 0. { -1 } else { 1 };
             let mut step = if direction < 0 { (r * 100. - 1e-8).floor() as i64 } else { (r * 100. + 1e-8).ceil() as i64 };
@@ -976,8 +970,8 @@ impl PredModel {
             }
         }
         let mut best: Option<(usize, f64)> = None;
-        for (i, &(o, f, ref e, s)) in rated.iter().enumerate() {
-            if missed(o.rate).is_some() || !ctx.eligible(jack(f), e) || (o.vibro && !(ctx.skills && ctx.wants_vibro)) {
+        for (i, &(o, _, ref e, s)) in rated.iter().enumerate() {
+            if missed(o.rate).is_some() || !ctx.eligible(e) || (o.vibro && !(ctx.skills && ctx.wants_vibro)) {
                 continue;
             }
             if let Some(v) = ctx.value(o, s, o.nps, e, e.acc_mid, o.rate, target) {
@@ -988,8 +982,8 @@ impl PredModel {
         }
         // Picked with the first rate's target (as the Builder did); valued with its own, as the worker's re-score did.
         let best_out = best.and_then(|(i, _)| {
-            let (o, f, e, s) = (rated[i].0, rated[i].1, &rated[i].2, rated[i].3);
-            ctx.value(o, s, o.nps, e, e.acc_mid, o.rate, ctx.central(jack(f))).map(|v| (o.rate, v))
+            let (o, e, s) = (rated[i].0, &rated[i].2, rated[i].3);
+            ctx.value(o, s, o.nps, e, e.acc_mid, o.rate, ctx.central()).map(|v| (o.rate, v))
         });
         Ok(Some((best_out, prop, best.map(|(i, _)| rated.swap_remove(i).2))))
     }
@@ -1663,28 +1657,28 @@ mod target_tests {
     }
 
     #[test]
-    fn target_offsets_shrink_with_the_error_left_to_100() {
-        assert!((ctx(0.94, false).central(true) - 0.96).abs() < 1e-9);
+    fn jacks_get_no_separate_target_and_the_band_narrows_near_100() {
+        assert!((ctx(0.94, false).central() - 0.94).abs() < 1e-9, "jacks get no separate target");
         let c = ctx(0.97, false);
-        assert!((c.central(true) - 0.98).abs() < 1e-9);
-        assert!(c.band(false).1 - c.band(false).0 < 0.02);
-        let top = ctx(0.98, false);
-        assert_eq!(top.central(true), MAX_TARGET);
-        assert!(top.band(true).1 <= MAX_HIGH);
+        assert!((c.central() - 0.97).abs() < 1e-9);
+        assert!(c.band().1 - c.band().0 < 0.02);
+        let top = ctx(0.99, false);
+        assert_eq!(top.central(), MAX_TARGET);
+        assert!(top.band().1 <= MAX_HIGH);
     }
 
     #[test]
     fn a_cold_opening_cannot_borrow_warmth_from_the_same_maps_ending() {
         let c = ctx(0.94, false);
-        assert!(!c.eligible(false, &prediction(0.944, 0.91)));
-        assert!(c.eligible(false, &prediction(0.946, 0.94)));
-        assert!(ctx(0.94, true).eligible(false, &prediction(0.944, 0.91)));
+        assert!(!c.eligible(&prediction(0.944, 0.91)));
+        assert!(c.eligible(&prediction(0.946, 0.94)));
+        assert!(ctx(0.94, true).eligible(&prediction(0.944, 0.91)));
     }
 
     #[test]
     fn the_rate_search_moves_toward_an_eligible_cold_opening() {
         let p = prediction(0.94, 0.91);
-        assert!(ctx(0.94, false).rate_shift(false, &p, 0.94) < 0.);
-        assert_eq!(ctx(0.94, true).rate_shift(false, &p, 0.94), 0.);
+        assert!(ctx(0.94, false).rate_shift(&p, 0.94) < 0.);
+        assert_eq!(ctx(0.94, true).rate_shift(&p, 0.94), 0.);
     }
 }

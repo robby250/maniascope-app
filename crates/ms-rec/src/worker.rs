@@ -816,7 +816,7 @@ impl Worker {
             let chart = c.md5.clone().unwrap_or_else(|| sha.clone());
             let Some(mut expected) = rec.predict(&f, &chart, c.bid, c.rate, &n) else { continue };
             if let Some(a) = alternative.as_ref().filter(|a| a.rate != c.rate) {
-                let central = rec.model().central_target(&f, target, warm);
+                let central = rec.model().central_target(target, warm);
                 if (a.pred.acc_mid - central).abs() < (expected.shown.acc_mid - central).abs() {
                     if let (Some(af), Some(e)) = (a.f.clone(), a.f.as_ref().and_then(|af| rec.predict(af, &chart, c.bid, a.rate, &n))) {
                         let _ = af;
@@ -825,11 +825,10 @@ impl Worker {
                     }
                 }
             }
-            let Some(f) = c.f.clone() else { continue };
             if mode == "skills" && alternative.is_none() {
                 continue; // no longer matches the selection: the kernel left it out
             }
-            if local && !rec.model().eligible(&f, &expected.shown, target, warm) {
+            if local && !rec.model().eligible(&expected.shown, target, warm) {
                 continue;
             }
             c.pred = expected.shown.clone();

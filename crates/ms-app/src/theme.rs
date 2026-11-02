@@ -26,9 +26,14 @@ pub fn apply(ctx: &egui::Context) {
         fonts.font_data.insert(name.to_string(), Arc::new(FontData::from_static(data)));
         fonts.families.entry(family).or_default().insert(0, name.to_string());
     }
+    // DejaVu Sans subset: Windows' system fallback drew `☰` as a box (user 2026-11-01). New icons: rebuild it with pyftsubset.
+    fonts.font_data.insert("icons".to_string(), Arc::new(FontData::from_static(include_bytes!("../assets/Icons.ttf"))));
+    fonts.families.entry(FontFamily::Proportional).or_default().insert(1, "icons".to_string());
     let fallback = fonts.families[&FontFamily::Proportional].clone();
     fonts.families.entry(FontFamily::Name("bold".into())).or_default().extend(fallback);
     ctx.set_fonts(fonts);
+    // Windows keeps its light title bar over a dark app unless the window is told (user 2026-11-01).
+    ctx.set_theme(egui::Theme::Dark);
     let mut v = egui::Visuals::dark();
     v.panel_fill = BG;
     v.window_fill = BG;

@@ -527,7 +527,7 @@ impl App {
             if ui.add_enabled(enabled, next).on_hover_text(tip).clicked() {
                 self.next(false);
             }
-            if ui.add_enabled(enabled, egui::Button::new("⏭ Skip")).on_hover_text("Skip: not this map (avoided for about 12 h)").clicked() {
+            if ui.add_enabled(enabled, egui::Button::new("» Skip")).on_hover_text("Skip: not this map (avoided for about 12 h)").clicked() {
                 self.next(true);
             }
             if let Some(on) = self.tracking {

@@ -412,3 +412,15 @@ fn a_late_result_for_another_chart_cannot_replace_the_settled_one() {
     assert_eq!(a.shown.as_ref().map(|s| s.path.clone()), Some(first));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Windows has no system fallback here, so a glyph the embedded fonts lack draws as a box (`☰`, user 2026-11-01).
+#[test]
+fn every_character_in_the_window_is_in_the_embedded_fonts() {
+    let ctx = egui::Context::default();
+    crate::theme::apply(&ctx);
+    ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+    let sources = [include_str!("mainview.rs"), include_str!("playlist.rs"), include_str!("windows.rs"), include_str!("fmt.rs"), include_str!("app.rs")];
+    let font = egui::FontId::proportional(crate::theme::BODY);
+    let missing: std::collections::BTreeSet<char> = sources.iter().flat_map(|s| s.chars()).filter(|c| !c.is_ascii()).filter(|&c| !ctx.fonts_mut(|f| f.has_glyph(&font, c))).collect();
+    assert!(missing.is_empty(), "{missing:?}");
+}

@@ -79,7 +79,12 @@ pub fn params_of(calc: &str) -> Result<Params, String> {
     let patches: Value = serde_json::from_str(include_str!("../../../calib/carry.json")).map_err(|e| e.to_string())?;
     let mut model = standard_params().model;
     merge(&mut model, patches.get(calc).ok_or_else(|| format!("no calibration kept for {calc}"))?);
-    Params::new(model, &Value::Null)
+    Params::new(model, &before_chord_rules())
+}
+
+/// Knobs of every calculator before 65c0a4cb63d6, for carrying from one of them.
+pub fn before_chord_rules() -> Value {
+    serde_json::json!({"W_GROUP": 0, "W_MIX": 0, "W_SHAPES": 0, "JACK_SHARE_KEYS": 0})
 }
 
 /// The parameters of a keymode's display conversion.
@@ -138,7 +143,8 @@ pub fn restore_feature(f: &mut Dict) {
 /// Ratios keep what the stages leave out (rate uniformity), and `sk`/`stam` are shares of the overall.
 ///
 /// The joint stage reads the chart's per-hand flow, which older rows lack: `flow` finds it. No chart, no joint move.
-pub fn recalibrated(f: &Dict, before: &Params, after: &Params, rate: f64, flow: &dyn Fn() -> Option<crate::flow::Flow>) -> Option<Dict> {
+/// `rule` is the chart's rating under `after`'s rules over `before`'s when they differ: `rule_ratio`.
+pub fn recalibrated(f: &Dict, before: &Params, after: &Params, rate: f64, flow: &dyn Fn() -> Option<crate::flow::Flow>, rule: &dyn Fn() -> Option<f64>) -> Option<Dict> {
     let mut f = f.clone();
     restore_feature(&mut f);
     let keys = f.f("keys") as usize;
@@ -146,17 +152,39 @@ pub fn recalibrated(f: &Dict, before: &Params, after: &Params, rate: f64, flow: 
     let features = f.get("calibration_features").map_or_else(Vec::new, Val::list_f);
     let old = f.dict("execution").cloned();
     with_joint(&mut f, after, rate, raw, flow);
+    // A 4K hand has two fingers: the chord rules can't move it.
+    let moved = if keys > 4 { rule().unwrap_or(1.) } else { 1. };
     let (overall, baseline) = (
-        model::final_rating(after, keys, raw, &features, f.dict("execution")) / model::final_rating(before, keys, raw, &features, old.as_ref()),
-        model::baseline_rating(after, keys, raw, &features, f.dict("execution")) / model::baseline_rating(before, keys, raw, &features, old.as_ref()),
+        moved * model::final_rating(after, keys, raw, &features, f.dict("execution")) / model::final_rating(before, keys, raw, &features, old.as_ref()),
+        moved * model::baseline_rating(after, keys, raw, &features, f.dict("execution")) / model::baseline_rating(before, keys, raw, &features, old.as_ref()),
     );
     if !overall.is_finite() || overall == 1. {
         return None;
     }
     f.set("overall", f.f("overall") * overall);
     f.set("baseline_overall", f.f("baseline_overall") * baseline);
+    if moved != 1. {
+        f.set("raw_overall", raw * moved);
+    }
     convert_units(&mut f, after);
     Some(f)
+}
+
+/// A chart's rating under `after`'s rules over `before`'s: what a carry across a rule change moves a stored row by, without
+/// re-analysing it. The path the rule's gates read (`joint::moved_by`).
+pub fn rule_ratio(c: &crate::chart::Chart, rate: f64, before: &Params, after: &Params) -> Option<f64> {
+    let overall = |p: &Params| crate::compute::compute(c, rate, true, p).ok()?.dict("scores").map(|s| s.f("overall"));
+    Some(overall(after)? / overall(before)?).filter(|r| r.is_finite() && *r > 0.)
+}
+
+/// One stored row carried, with its chart when that can be found.
+pub fn carried(f: &Dict, before: &Params, after: &Params, rules: bool, rate: f64, chart: &dyn Fn() -> Option<std::rc::Rc<crate::chart::Chart>>) -> Option<Dict> {
+    recalibrated(f, before, after, rate, &|| chart().map(|c| crate::flow::flow(&c, rate)), &|| if rules { rule_ratio(&*chart()?, rate, before, after) } else { None })
+}
+
+/// Whether two parameter sets rate a chart differently, not only calibrate it differently.
+pub fn rules_differ(before: &Params, after: &Params) -> bool {
+    before.k.dump() != after.k.dump()
 }
 
 fn with_joint(f: &mut Dict, after: &Params, rate: f64, raw: f64, flow: &dyn Fn() -> Option<crate::flow::Flow>) {

@@ -23,11 +23,11 @@ use std::sync::{Arc, Mutex};
 
 /// recommend.predictor_id of the model the Rust port reproduces: forecasts stay comparable across the port. A change to
 /// the prediction model takes a new id, so old forecasts are not read as this model's.
-pub const PREDICTOR_ID: &str = "dec244ae8a09";
-pub const CALC_ID: &str = "9148bd02bce2";
+pub const PREDICTOR_ID: &str = "86660d70dccc";
+pub const CALC_ID: &str = "65c0a4cb63d6";
 /// Differ from CALC_ID in calibration only (calib/carry.json), newest first: a crawl still running holds the website rows back a whole
 /// calculator, so those can start older than the library's. Each carry keeps its source row.
-pub const CARRIED_CALCS: [&str; 4] = ["7a35f25f603a", "faff7ab286c4", "a4e17d09c2b6", "3c695ee7a23f"];
+pub const CARRIED_CALCS: [&str; 5] = ["9148bd02bce2", "7a35f25f603a", "faff7ab286c4", "a4e17d09c2b6", "3c695ee7a23f"];
 const SURE_PLAYS: usize = 50; // of the player's own, on a keymode: fewer and the model is mostly the population's guess
 pub const ACTIVE_KEYS: std::ops::RangeInclusive<i64> = 4..=10;
 
@@ -436,26 +436,28 @@ mod tests {
 pub fn carry_rows(db: &ms_data::store::Db) -> std::result::Result<(), String> {
     let charts = Charts::new(db).map_err(|e| e.to_string())?;
     for from in CARRIED_CALCS {
-        ms_data::store::carry_feats(db, from, CALC_ID, &ms_calc::features::params_of(from)?, &ms_calc::features::standard_params(), &|sha, rate| charts.flow(sha, rate)).map_err(|e| e.to_string())?;
+        ms_data::store::carry_feats(db, from, CALC_ID, &ms_calc::features::params_of(from)?, &ms_calc::features::standard_params(), &|sha| charts.counted(sha)).map_err(|e| e.to_string())?;
     }
-    if charts.missing.get() > 0 {
-        eprintln!("{} charts without a file kept their rating", charts.missing.get());
+    let missing = charts.missing.load(std::sync::atomic::Ordering::Relaxed);
+    if missing > 0 {
+        eprintln!("{missing} charts without a file kept their rating");
     }
     Ok(())
 }
 
 /// Stored website features moved the same way.
 pub fn carry_web(db: &ms_data::store::Db) -> std::result::Result<(), String> {
+    ms_data::webmaps::forget_in_client()?;
     let charts = Charts::new(db).map_err(|e| e.to_string())?;
-    CARRIED_CALCS.iter().try_for_each(|from| ms_data::webmaps::carry(from, CALC_ID, &ms_calc::features::params_of(from)?, &ms_calc::features::standard_params(), &|sha, rate| charts.flow(sha, rate)))
+    CARRIED_CALCS.iter().try_for_each(|from| ms_data::webmaps::carry(from, CALC_ID, &ms_calc::features::params_of(from)?, &ms_calc::features::standard_params(), &|sha| charts.counted(sha)))
 }
 
 /// A stored chart by its sha: lazer's store, the website cache, or a convert remade from its source.
 pub struct Charts {
     converts: HashMap<String, Inst>,
     root: std::path::PathBuf,
-    last: std::cell::RefCell<Option<(String, Option<ms_calc::chart::Chart>)>>, // rows of one chart's rates come in a run
-    pub missing: std::cell::Cell<usize>, // charts without a file: their rows keep the old rating
+    last: std::sync::Mutex<Option<(String, Option<ms_calc::chart::Chart>)>>, // rows of one chart's rates come in a run
+    pub missing: std::sync::atomic::AtomicUsize, // charts without a file: their rows keep the old rating
 }
 
 impl Charts {
@@ -469,11 +471,17 @@ impl Charts {
         ms_calc::chart::parse(&data).ok()
     }
 
+    /// `chart`, counting the ones missing.
+    pub fn counted(&self, sha: &str) -> Option<ms_calc::chart::Chart> {
+        let found = self.chart(sha);
+        self.missing.fetch_add(found.is_none() as usize, std::sync::atomic::Ordering::Relaxed);
+        found
+    }
+
     pub fn flow(&self, sha: &str, rate: f64) -> Option<ms_calc::flow::Flow> {
-        let mut last = self.last.borrow_mut();
+        let mut last = self.last.lock().unwrap();
         if last.as_ref().is_none_or(|l| l.0 != sha) {
-            *last = Some((sha.to_string(), self.chart(sha)));
-            self.missing.set(self.missing.get() + last.as_ref()?.1.is_none() as usize);
+            *last = Some((sha.to_string(), self.counted(sha)));
         }
         last.as_ref()?.1.as_ref().map(|c| ms_calc::flow::flow(c, rate))
     }

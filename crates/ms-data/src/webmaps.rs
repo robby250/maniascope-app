@@ -172,15 +172,73 @@ pub struct Estimate {
     pub unlisted: Vec<i64>,
 }
 
+/// What lazer already holds, by revision and by map. The website index only adds what isn't in the client (user 2026-11-02:
+/// "weren't website maps supposed to only download the maps that aren't in the client"); 35 % of a real crawl was copies.
+#[derive(Default)]
+struct InClient {
+    md5: HashSet<String>,
+    bid: HashSet<i64>,
+    sources: HashSet<String>, // website charts converts are remade from: `converts::bytes` reads their file
+}
+
+impl InClient {
+    fn read() -> Self {
+        let read = || -> rusqlite::Result<Self> {
+            let db = Connection::open_with_flags(paths::rec_dir().join("rec.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            db.busy_timeout(Duration::from_secs(5))?;
+            let mut out = Self::default();
+            for row in db.prepare("SELECT md5,beatmap_id FROM installed")?.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)))? {
+                let (md5, bid) = row?;
+                out.md5.extend(md5);
+                out.bid.extend(bid.filter(|b| *b > 0));
+            }
+            out.sources = db.prepare("SELECT DISTINCT source_sha FROM converts WHERE web!=0")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            Ok(out)
+        };
+        read().unwrap_or_default() // no rec.db yet: nothing held
+    }
+
+    fn holds(&self, bid: i64, md5: &str) -> bool {
+        self.md5.contains(md5) || self.bid.contains(&bid)
+    }
+}
+
+/// Drops what earlier crawls kept of charts now in the client, so they stop being carried and published. Comes back if the map
+/// leaves lazer: the next crawl finds it missing.
+pub fn forget_in_client() -> Result<usize, String> {
+    if !web_dir().join("state.db").is_file() {
+        return Ok(0);
+    }
+    let db = state_db().map_err(|e| e.to_string())?;
+    forget(&db, &InClient::read(), &web_dir().join("osu")).map_err(|e| e.to_string())
+}
+
+fn forget(db: &Connection, client: &InClient, osu: &Path) -> rusqlite::Result<usize> {
+    let held: Vec<(i64, String)> = db.prepare("SELECT bid,md5,sha FROM diffs WHERE sha IS NOT NULL")?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get::<_, String>(2)?)))?
+        .filter_map(Result::ok).filter(|r| client.holds(r.0, &r.1)).map(|r| (r.0, r.2)).collect();
+    let tx = db.unchecked_transaction()?;
+    for (bid, sha) in &held {
+        tx.execute("UPDATE diffs SET sha=NULL, fetched=NULL WHERE bid=?", [bid])?;
+        tx.execute("DELETE FROM feats WHERE sha=?", [sha])?;
+    }
+    tx.commit()?;
+    for (_, sha) in held.iter().filter(|h| !client.sources.contains(&h.1)) {
+        let _ = std::fs::remove_file(osu.join(format!("{sha}.osu")));
+    }
+    Ok(held.len())
+}
+
 /// What a crawl for these keymodes and ★ range still has to do.
 pub fn estimate(db: &Connection, keys: &HashSet<i64>, stars: Option<(f64, f64)>, calc: &str) -> rusqlite::Result<Estimate> {
     let (mut fetch, mut analyse, mut ready) = (0, 0, 0);
-    let mut q = db.prepare("SELECT d.keys,d.notes,d.length,d.stars,d.sha,d.fetched,d.md5,f.sha IS NOT NULL FROM diffs d LEFT JOIN feats f ON f.sha=d.sha AND f.calc=? WHERE d.error IS NULL")?;
+    let mut q = db.prepare("SELECT d.keys,d.notes,d.length,d.stars,d.sha,d.fetched,d.md5,f.sha IS NOT NULL,d.bid FROM diffs d LEFT JOIN feats f ON f.sha=d.sha AND f.calc=? WHERE d.error IS NULL")?;
     let rows = q.query_map([calc], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?, r.get::<_, Option<f64>>(3)?, r.get::<_, Option<String>>(4)?,
-                                           r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?, r.get::<_, bool>(7)?)))?;
+                                           r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?, r.get::<_, bool>(7)?, r.get::<_, i64>(8)?)))?;
+    let client = InClient::read();
     for row in rows {
-        let (k, notes, length, s, sha, fetched, md5, done) = row?;
-        if !keys.contains(&k) || !reachable(notes, length, k) || !in_stars(s, stars) {
+        let (k, notes, length, s, sha, fetched, md5, done, bid) = row?;
+        if !keys.contains(&k) || !reachable(notes, length, k) || !in_stars(s, stars) || client.holds(bid, md5.as_deref().unwrap_or("")) {
             continue;
         }
         if sha.is_none() || fetched != md5 {
@@ -304,9 +362,10 @@ fn crawl_meta(db: &Connection, keys: &HashSet<i64>, full: bool) -> Result<(), Cr
 
 /// Chart text once per revision, most-played first; empty body = unavailable.
 fn fetch(db: &Connection, keys: &HashSet<i64>, limit: usize, stars: Option<(f64, f64)>) -> Result<usize, CrawlError> {
+    let client = InClient::read();
     let mut q = db.prepare("SELECT bid,md5,keys,notes,length,stars FROM diffs WHERE error IS NULL AND (sha IS NULL OR fetched IS NOT md5) ORDER BY playcount DESC")?;
     let rows: Vec<(i64, String)> = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, f64>(4)?, r.get::<_, Option<f64>>(5)?)))?
-        .filter_map(Result::ok).filter(|r| keys.contains(&r.2) && reachable(r.3, r.4, r.2) && in_stars(r.5, stars)).take(limit).map(|r| (r.0, r.1)).collect();
+        .filter_map(Result::ok).filter(|r| keys.contains(&r.2) && reachable(r.3, r.4, r.2) && in_stars(r.5, stars) && !client.holds(r.0, &r.1)).take(limit).map(|r| (r.0, r.1)).collect();
     let (t0, done) = (std::time::Instant::now(), kv_get(db, "progress").and_then(|p| p["fetched"].as_u64()).unwrap_or(0) as usize);
     let total = rows.len();
     let (send, receive) = std::sync::mpsc::sync_channel::<(i64, Vec<u8>)>(1); // one ahead of the store loop, ~60/min
@@ -455,7 +514,7 @@ pub struct WebMap {
 }
 
 /// Stored website features moved to the calculator `to`, web.msp with them: a calculator change would else crawl everything again.
-pub fn carry(from: &str, to: &str, before: &Params, after: &Params, flow: &dyn Fn(&str, f64) -> Option<ms_calc::flow::Flow>) -> Result<(), String> {
+pub fn carry(from: &str, to: &str, before: &Params, after: &Params, chart: &(dyn Fn(&str) -> Option<ms_calc::chart::Chart> + Sync)) -> Result<(), String> {
     let text = |e: rusqlite::Error| e.to_string();
     if !web_dir().join("state.db").is_file() {
         return Ok(());
@@ -463,18 +522,27 @@ pub fn carry(from: &str, to: &str, before: &Params, after: &Params, flow: &dyn F
     let db = state_db().map_err(text)?;
     let todo: Vec<String> = db.prepare("SELECT sha FROM feats WHERE calc=? AND sha NOT IN (SELECT sha FROM feats WHERE calc=?)").map_err(text)?
         .query_map([from, to], |r| r.get(0)).map_err(text)?.collect::<rusqlite::Result<_>>().map_err(text)?;
+    let rules = ms_calc::features::rules_differ(before, after);
+    let threads = (std::thread::available_parallelism().map_or(2, |x| x.get()) / 2).max(1);
     for chunk in todo.chunks(500) {
-        let tx = db.unchecked_transaction().map_err(text)?;
+        let mut stored: Vec<(&String, Vec<u8>)> = Vec::with_capacity(chunk.len());
         for sha in chunk {
-            let data: Vec<u8> = tx.query_row("SELECT data FROM feats WHERE sha=? AND calc=?", [sha.as_str(), from], |r| r.get(0)).map_err(text)?;
-            let fs = read_cell(&data).unwrap_or_default();
-            let moved: Vec<Option<Dict>> = fs.iter().map(|(r, f)| ms_calc::features::recalibrated(f, before, after, *r, &|| flow(sha, *r))).collect();
-            let cell = if moved.iter().any(Option::is_some) {
+            stored.push((sha, db.query_row("SELECT data FROM feats WHERE sha=? AND calc=?", [sha.as_str(), from], |r| r.get(0)).map_err(text)?));
+        }
+        let cells = ms_calc::background::background_map(&stored, threads, |(sha, data)| {
+            let file = std::cell::OnceCell::new();
+            let chart = || file.get_or_init(|| chart(sha).map(std::rc::Rc::new)).clone();
+            let fs = read_cell(data).unwrap_or_default();
+            let moved: Vec<Option<Dict>> = fs.iter().map(|(r, f)| ms_calc::features::carried(f, before, after, rules, *r, &chart)).collect();
+            Ok(if moved.iter().any(Option::is_some) {
                 write_cell(&fs.iter().zip(moved).map(|((r, f), m)| (*r, m.unwrap_or_else(|| f.clone()))).collect::<Vec<_>>())
             } else {
-                data
-            };
-            tx.execute("INSERT OR REPLACE INTO feats VALUES(?,?,?)", params![sha, to, cell]).map_err(text)?;
+                data.clone()
+            })
+        });
+        let tx = db.unchecked_transaction().map_err(text)?;
+        for ((sha, _), cell) in stored.iter().zip(cells) {
+            tx.execute("INSERT OR REPLACE INTO feats VALUES(?,?,?)", params![sha, to, cell?]).map_err(text)?;
         }
         tx.commit().map_err(text)?;
     }
@@ -609,6 +677,7 @@ pub fn crawl(keys: &HashSet<i64>, stars: Option<(f64, f64)>, check: bool, full: 
     let stars = kv_get(&db, "stars").and_then(|v| Some((v[0].as_f64()?, v[1].as_f64()?)));
     let run = || -> Result<(), CrawlError> {
         crawl_meta(&db, keys, full)?;
+        forget(&db, &InClient::read(), &web_dir().join("osu"))?;
         if check {
             progress(&db, json!({"phase": "checked"}))?;
             return Ok(());
@@ -646,6 +715,28 @@ pub fn state(db: &Connection) -> BTreeMap<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chart_in_the_client_is_forgotten_and_a_convert_source_keeps_its_file() {
+        let dir = std::env::temp_dir().join(format!("ms-web-forget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE diffs(bid INTEGER PRIMARY KEY, md5 TEXT, sha TEXT, fetched TEXT); CREATE TABLE feats(sha TEXT, calc TEXT, data BLOB);
+            INSERT INTO diffs VALUES (1,'a','s1','a'),(2,'b','s2','b'),(3,'c','s3','c'),(4,'d','s4','d');
+            INSERT INTO feats VALUES ('s1','x',x''),('s2','x',x''),('s3','x',x''),('s4','x',x'');").unwrap();
+        for sha in ["s1", "s2", "s3", "s4"] {
+            std::fs::write(dir.join(format!("{sha}.osu")), "").unwrap();
+        }
+        let client = InClient { md5: ["a".to_string(), "d".to_string()].into(), bid: [2].into(), sources: ["s4".to_string()].into() };
+        assert_eq!(forget(&db, &client, &dir).unwrap(), 3, "same revision, older revision of the map, convert source");
+        let left: Vec<String> = db.prepare("SELECT sha FROM feats").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
+        assert_eq!(left, ["s3"]);
+        let fetched: i64 = db.query_row("SELECT count(*) FROM diffs WHERE sha IS NOT NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(fetched, 1);
+        assert!(!dir.join("s1.osu").exists() && !dir.join("s2.osu").exists());
+        assert!(dir.join("s3.osu").exists() && dir.join("s4.osu").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn state_carries_what_the_app_needs_to_resume_a_paused_batch() {

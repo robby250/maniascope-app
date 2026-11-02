@@ -323,6 +323,8 @@ pub fn demand(
     let wide = keys >= 5;
     let v_fast = k.V_FAST * ((keys.max(7) as f64) / 7.0).powf(k.V_FAST_KEYS);
     let w_jack = if keys == 7 { k.W_JACK_7K } else { k.W_JACK };
+    let w_group = k.W_GROUP * (keys.min(7) as f64 / 7.0).powf(k.GROUP_KEYS);
+    let jack_share = k.JACK_SHARE * (7.0 / keys.max(7) as f64).powf(k.JACK_SHARE_KEYS);
     let hand_of = hand_of(keys, centre_left);
     let n = g.times.len();
     let times = &g.times;
@@ -407,6 +409,7 @@ pub fn demand(
     let mut after_roll = false;
     let mut prev_row_mask = 0u32;
     let mut pending: Vec<(f64, usize)> = Vec::with_capacity(16);
+    let mut shapes_seen: [Vec<(f64, u32)>; 2] = [Vec::new(), Vec::new()];
     let w_cross = if wide { k.W_CROSS_WIDE } else { k.W_CROSS };
     let flam = k.FLAM;
     for (ri, row) in rows.iter().enumerate() {
@@ -559,8 +562,37 @@ pub fn demand(
             if n_jack[h] != 0 {
                 let vj = v(t - previous_hand[h], 0.07, 0.5);
                 jack_effort[h] =
-                    w_jack * vj * (vj / 12.0).powf(k.JACK_P) * (n_jack[h] as f64).powf(-k.JACK_SHARE) * mirror[h];
+                    w_jack * vj * (vj / 12.0).powf(k.JACK_P) * (n_jack[h] as f64).powf(-jack_share) * mirror[h];
                 inserted[h] = k.W_IJACK + (1.0 - k.W_IJACK) * smooth(vj, 7.0, 11.0);
+            }
+        }
+        // How many chords the hand must have ready: user's duplicated-4K map is 44 NPS with few shapes and plays far easier than a
+        // generated map at the same speed. Grows past what a 7K hand can reach, so wider keymodes pay it on their own.
+        let mut many = [0.0f64; 2];
+        if k.W_SHAPES != 0.0 {
+            for h in 0..2 {
+                if n_hand[h] >= 2 {
+                    shapes_seen[h].push((t, row_hand[h]));
+                }
+                shapes_seen[h].retain(|x| x.0 >= t - 2.0);
+                if n_hand[h] >= 2 {
+                    let mut count = 0.0f64;
+                    let mut wide_all: Vec<u32> = Vec::new();
+                    for x in &shapes_seen[h] {
+                        if !wide_all.contains(&x.1) {
+                            wide_all.push(x.1);
+                            count += 1.0;
+                        }
+                    }
+                    many[h] = k.W_SHAPES * (count / (k.SHAPES_T * (10.0 / keys as f64).powf(k.SHAPES_KEYS))).max(1.0).log2();
+                }
+            }
+        }
+        let mut mix = [0.0f64; 2];
+        for h in 0..2 {
+            if k.W_MIX != 0.0 && row_hand[h] & previous_mask[h] != 0 && row_hand[h] & !previous_mask[h] != 0 {
+                let edge = k.MIX_V * (7.0 / keys as f64).powf(k.MIX_KEYS);
+                mix[h] = k.W_MIX * smooth(v(t - previous_hand[h], 0.07, 0.5), edge, edge * 1.3);
             }
         }
         pending.clear();
@@ -596,7 +628,11 @@ pub fn demand(
             if jacked && prev_row_mask >> c & 1 == 0 {
                 e_jack *= inserted[h];
             }
-            let rice = (e_hand + e_jack) * 1f64.max(vdj / k.V_FINGER);
+            // User: "when chords switch, it gets much harder, the higher the keycount is". Rejected on replays: entropy per row,
+            // neighbour left up (W_ISO, overlaps the groups), fast jack premium, reviving V_FAST on 10K.
+            let groups = (row_hand[h] & !(row_hand[h] << 1)).count_ones() as f64;
+            let cost = 1. + mix[h] + many[h] + if size as f64 >= k.GROUP_SIZE { w_group * (groups - 1.) } else { 0. };
+            let rice = (e_hand + e_jack) * 1f64.max(vdj / k.V_FINGER) * cost;
             let mut held_same = 0.0f64;
             let mut held_other = 0.0f64;
             for &oc in &order[..nseen] {
